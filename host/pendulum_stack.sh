@@ -8,7 +8,8 @@ source ~/ros2_ws/install/setup.bash
 export ROS_DOMAIN_ID=7
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
-BASE_DIR=~/Documents/host
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+BASE_DIR="$SCRIPT_DIR"
 CSV_DIR="$BASE_DIR/run_logs"
 
 # ======================================================
@@ -45,7 +46,7 @@ select_csv_file() {
 
 run_imu_viewer() {
     echo "[INFO] imu_viewer 실행"
-    python3 $BASE_DIR/imu_viewer.py
+    python3 "$BASE_DIR/imu_viewer.py"
 }
 
 run_chrono_pendulum() {
@@ -57,10 +58,10 @@ run_chrono_pendulum() {
 
     if [ "$mode" == "1" ]; then
         echo "[INFO] chrono_pendulum (HOST mode)"
-        python3 $BASE_DIR/chrono_pendulum.py --mode host
+        python3 "$BASE_DIR/chrono_pendulum.py" --mode host
     elif [ "$mode" == "2" ]; then
         echo "[INFO] chrono_pendulum (JETSON mode)"
-        python3 $BASE_DIR/chrono_pendulum.py --mode jetson
+        python3 "$BASE_DIR/chrono_pendulum.py" --mode jetson
     else
         echo "[ERROR] Invalid selection"
     fi
@@ -70,7 +71,7 @@ run_plot() {
     file=$(select_csv_file)
     if [ -z "$file" ]; then return; fi
 
-    python3 $BASE_DIR/plot_pendulum.py --csv "$file"
+    python3 "$BASE_DIR/plot_pendulum.py" --csv "$file"
 }
 
 run_rl_fitting() {
@@ -93,7 +94,7 @@ run_rl_fitting() {
     fi
 
     echo "[INFO] RL fitting 실행 ($algo)"
-    python3 $BASE_DIR/RL_fitting.py --csv "$file" --algo $algo
+    python3 "$BASE_DIR/RL_fitting.py" --csv "$file" --algo "$algo"
 }
 
 run_full_pipeline() {
