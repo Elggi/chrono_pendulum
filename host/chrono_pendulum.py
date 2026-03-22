@@ -715,7 +715,11 @@ class PendulumModel:
         self.sys = ch.ChSystemNSC()
         self.sys.SetGravitationalAcceleration(ch.ChVector3d(0.0, -cfg.gravity, 0.0))
 
-        self.base = ch.ChBodyEasyCylinder(0.020, 0.050, 1000, True, True)
+        base_axis = getattr(ch, "ChAxis_Y", None)
+        if base_axis is None:
+            self.base = ch.ChBodyEasyCylinder(0.020, 0.050, 1000, True, True)
+        else:
+            self.base = ch.ChBodyEasyCylinder(base_axis, 0.020, 0.050, 1000, True, True)
         self.base.SetFixed(True)
         self.base.SetPos(ch.ChVector3d(0.0, 0.0, 0.0))
         self.sys.Add(self.base)
@@ -904,7 +908,10 @@ def main():
     ap.add_argument("--omega0", type=float, default=0.0)
     ap.add_argument("--link-mass", type=float, default=0.200)
     ap.add_argument("--link-length", type=float, default=0.285)
-    ap.add_argument("--host-control", action="store_true")
+    ap.add_argument("--host-control", action="store_true",
+                    help="Enable host-side manual command publishing.")
+    ap.add_argument("--mode", choices=["host", "jetson"], default=None,
+                    help="Compatibility option: host enables host-control, jetson uses external ROS input.")
     ap.add_argument("--delay-ms", type=float, default=0.0)
     ap.add_argument("--disable-auto-delay", action="store_true")
     ap.add_argument("--J", type=float, default=0.010)
@@ -916,6 +923,11 @@ def main():
     ap.add_argument("--R", type=float, default=2.0)
     ap.add_argument("--k-e", type=float, default=0.020)
     args = ap.parse_args()
+
+    if args.mode == "host":
+        args.host_control = True
+    elif args.mode == "jetson":
+        args.host_control = False
 
     cfg = BridgeConfig()
     cfg.enable_render = not args.headless
