@@ -8,7 +8,8 @@ source ~/ros2_ws/install/setup.bash
 export ROS_DOMAIN_ID=7
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
-BASE_DIR=~/Documents/host
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+BASE_DIR="$SCRIPT_DIR"
 CSV_DIR="$BASE_DIR/run_logs"
 
 # ======================================================
