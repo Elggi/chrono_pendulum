@@ -48,6 +48,16 @@ def terminal_status_line(msg: str, width: int = 220):
     sys.stdout.flush()
 
 
+def sanitize_float(value, default=0.0, limit=np.finfo(np.float32).max * 0.99):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if not math.isfinite(value):
+        return float(default)
+    return float(clamp(value, -limit, limit))
+
+
 def make_numbered_path(folder: str, prefix: str, ext: str = ".csv") -> str:
     os.makedirs(folder, exist_ok=True)
     pat = re.compile(rf"^{re.escape(prefix)}(\d+){re.escape(ext)}$")
@@ -104,6 +114,12 @@ class BridgeConfig:
     win_w: int = 1280
     win_h: int = 900
     window_title: str = "Chrono Pendulum | Online Calibration"
+    terminal_status_width: int = 160
+
+    motor_radius: float = 0.020
+    motor_length: float = 0.050
+    shaft_radius: float = 0.004
+    shaft_length: float = 0.015
 
     link_L: float = 0.285
     link_W: float = 0.020
@@ -157,6 +173,13 @@ class BridgeConfig:
     q_delay: float = 1e-6
     r_theta: float = 2e-4
     r_omega: float = 2e-3
+    ekf_enable_min_pwm: float = 5.0
+    J_max: float = 0.2
+    b_max: float = 5.0
+    tau_c_max: float = 2.0
+    mgl_max: float = 5.0
+    k_t_max: float = 5.0
+    i0_max: float = 255.0
 
     # cost weights
     w_theta: float = 5.0
@@ -262,6 +285,8 @@ class HostCommandController:
             self.keyboard_active = False
 
     def print_banner(self):
+        print("=" * 70)
+        print("Host Keyboard Controller")
         print("=" * 70)
         print("Controls:")
         print("  w / Up Arrow      : increase forward PWM")
@@ -457,7 +482,7 @@ class PendulumROSNode(Node):
     @staticmethod
     def _pub_float(pub, value):
         msg = Float32()
-        msg.data = float(value)
+        msg.data = sanitize_float(value)
         pub.publish(msg)
 
     def publish_host_cmd(self, u, mode_name):
@@ -683,11 +708,19 @@ class OnlineParameterEKF:
         K = P_pred @ H.T @ np.linalg.inv(S)
         self.x = x_pred + K @ y
         self.P = (np.eye(len(self.x)) - K @ H) @ P_pred
-        self.x[2] = max(self.x[2], self.cfg.j_min)
-        self.x[3:] = np.maximum(self.x[3:], 0.0)
+        self._clip_state()
         if inst_cost is not None and inst_cost < self.best_cost:
             self.best_cost = float(inst_cost)
             self.best_params = self.get_params()
+
+    def _clip_state(self):
+        self.x[2] = clamp(self.x[2], self.cfg.j_min, self.cfg.J_max)
+        self.x[3] = clamp(self.x[3], 0.0, self.cfg.b_max)
+        self.x[4] = clamp(self.x[4], 0.0, self.cfg.tau_c_max)
+        self.x[5] = clamp(self.x[5], 0.0, self.cfg.mgl_max)
+        self.x[6] = clamp(self.x[6], 0.0, self.cfg.k_t_max)
+        self.x[7] = clamp(self.x[7], 0.0, self.cfg.i0_max)
+        self.x[8] = clamp(self.x[8], 0.0, self.cfg.delay_max_ms / 1000.0)
 
     def get_params(self):
         return {
@@ -709,62 +742,102 @@ class OnlineParameterEKF:
 # Chrono model
 # ============================================================
 
+def add_axes_visual(sys_ch, axis_len=0.12, axis_thk=0.002):
+    axes = ch.ChBody()
+    axes.SetFixed(True)
+    sys_ch.Add(axes)
+
+    x_box = ch.ChVisualShapeBox(axis_len, axis_thk, axis_thk)
+    x_box.SetColor(ch.ChColor(1, 0, 0))
+    axes.AddVisualShape(x_box, ch.ChFramed(ch.ChVector3d(axis_len / 2.0, 0.0, 0.0), ch.QUNIT))
+
+    y_box = ch.ChVisualShapeBox(axis_thk, axis_len, axis_thk)
+    y_box.SetColor(ch.ChColor(0, 1, 0))
+    axes.AddVisualShape(y_box, ch.ChFramed(ch.ChVector3d(0.0, axis_len / 2.0, 0.0), ch.QUNIT))
+
+    z_box = ch.ChVisualShapeBox(axis_thk, axis_thk, axis_len)
+    z_box.SetColor(ch.ChColor(0, 0, 1))
+    axes.AddVisualShape(z_box, ch.ChFramed(ch.ChVector3d(0.0, 0.0, axis_len / 2.0), ch.QUNIT))
+
+
 class PendulumModel:
     def __init__(self, cfg: BridgeConfig):
         self.cfg = cfg
         self.sys = ch.ChSystemNSC()
         self.sys.SetGravitationalAcceleration(ch.ChVector3d(0.0, -cfg.gravity, 0.0))
+        add_axes_visual(self.sys)
 
-        base_axis = getattr(ch, "ChAxis_Y", None)
-        if base_axis is None:
-            self.base = ch.ChBodyEasyCylinder(0.020, 0.050, 1000, True, True)
-        else:
-            self.base = ch.ChBodyEasyCylinder(base_axis, 0.020, 0.050, 1000, True, True)
+        self.base = ch.ChBody()
         self.base.SetFixed(True)
         self.base.SetPos(ch.ChVector3d(0.0, 0.0, 0.0))
         self.sys.Add(self.base)
 
+        q_cyl_to_x = ch.QuatFromAngleZ(-math.pi / 2.0)
+        motor_cyl = ch.ChVisualShapeCylinder(cfg.motor_radius, cfg.motor_length)
+        motor_cyl.SetColor(ch.ChColor(0.05, 0.05, 0.05))
+        self.base.AddVisualShape(motor_cyl, ch.ChFramed(ch.ChVector3d(0.0, 0.0, 0.0), q_cyl_to_x))
+
+        shaft = ch.ChVisualShapeCylinder(cfg.shaft_radius, cfg.shaft_length)
+        shaft.SetColor(ch.ChColor(0.05, 0.05, 0.05))
+        self.base.AddVisualShape(
+            shaft,
+            ch.ChFramed(
+                ch.ChVector3d(cfg.motor_length / 2.0 + cfg.shaft_length / 2.0, 0.0, 0.0),
+                q_cyl_to_x,
+            ),
+        )
+
         self.link = ch.ChBody()
         self.link.SetMass(cfg.link_mass)
-        Iyy = (1.0 / 12.0) * cfg.link_mass * (cfg.link_L ** 2 + cfg.link_T ** 2)
-        Izz = (1.0 / 12.0) * cfg.link_mass * (cfg.link_L ** 2 + cfg.link_W ** 2)
-        Ixx = (1.0 / 12.0) * cfg.link_mass * (cfg.link_W ** 2 + cfg.link_T ** 2)
-        self.link.SetInertiaXX(ch.ChVector3d(Ixx, Iyy, Izz))
-
-        theta0 = math.radians(cfg.theta0_deg)
-        dir_x = np.array([math.sin(theta0), -math.cos(theta0), 0.0], dtype=float)
-        com = 0.5 * cfg.link_L * dir_x
-        self.link.SetPos(ch.ChVector3d(*com))
-        world_phi = math.atan2(dir_x[1], dir_x[0])
-        self.link.SetRot(ch.QuatFromAngleZ(world_phi))
+        izz_com = (1.0 / 12.0) * cfg.link_mass * (cfg.link_L ** 2 + cfg.link_W ** 2)
+        izz_pivot = izz_com + cfg.link_mass * (cfg.link_L / 2.0) ** 2
+        self.link.SetInertiaXX(ch.ChVector3d(1e-5, 1e-5, izz_pivot))
+        self.link.SetPos(ch.ChVector3d(0.0, 0.0, cfg.motor_length / 2.0))
+        self.link.SetRot(ch.QuatFromAngleZ(math.radians(cfg.theta0_deg)))
         self.sys.Add(self.link)
+        self.link.SetAngVelLocal(ch.ChVector3d(0.0, 0.0, cfg.omega0))
 
-        vis_link = ch.ChVisualShapeBox(cfg.link_L, cfg.link_W, cfg.link_T)
-        self.link.AddVisualShape(vis_link, ch.ChFramed(ch.ChVector3d(cfg.link_L * 0.5, 0.0, 0.0), ch.QUNIT))
+        vis_link = ch.ChVisualShapeBox(cfg.link_W, cfg.link_L, cfg.link_T)
+        vis_link.SetColor(ch.ChColor(0.93, 0.93, 0.93))
+        self.link.AddVisualShape(vis_link, ch.ChFramed(ch.ChVector3d(0.0, -cfg.link_L / 2.0, 0.0), ch.QUNIT))
 
-        # rigidly attached IMU visual block
+        self.imu = ch.ChBody()
+        self.imu.SetMass(cfg.imu_mass)
+        self.imu.SetInertiaXX(ch.ChVector3d(1e-6, 1e-6, 1e-6))
+        imu_local = ch.ChVector3d(0.0, -cfg.link_L + cfg.imu_size_y / 2.0, 0.0)
+        imu_abs = self.link.TransformPointLocalToParent(imu_local)
+        self.imu.SetPos(imu_abs)
+        self.imu.SetRot(self.link.GetRot())
+        self.sys.Add(self.imu)
+
         vis_imu = ch.ChVisualShapeBox(cfg.imu_size_x, cfg.imu_size_y, cfg.imu_size_z)
-        self.link.AddVisualShape(vis_imu, ch.ChFramed(ch.ChVector3d(cfg.imu_offset_x, cfg.imu_offset_y, cfg.imu_offset_z), ch.QUNIT))
+        vis_imu.SetColor(ch.ChColor(0.60, 0.60, 0.60))
+        self.imu.AddVisualShape(vis_imu)
 
-        self.rev = ch.ChLinkLockRevolute()
-        self.rev.Initialize(self.link, self.base, ch.ChFramed(ch.ChVector3d(0.0, 0.0, 0.0), ch.QUNIT))
-        self.sys.Add(self.rev)
+        fix_frame_abs = ch.ChFramed(imu_abs, self.link.GetRot())
+        self.fix_imu = ch.ChLinkLockLock()
+        self.fix_imu.Initialize(self.imu, self.link, fix_frame_abs)
+        self.sys.Add(self.fix_imu)
 
-        self.link.SetAngVelParent(ch.ChVector3d(0.0, 0.0, cfg.omega0))
+        self.motor = ch.ChLinkMotorRotationTorque()
+        self.motor.Initialize(self.link, self.base, ch.ChFramed(ch.ChVector3d(0.0, 0.0, 0.0), ch.QUNIT))
+        self.tau_fun = ch.ChFunctionConst(0.0)
+        self.motor.SetTorqueFunction(self.tau_fun)
+        self.sys.Add(self.motor)
+
         self.prev_sensor_vel = np.zeros(3, dtype=float)
         self.prev_t = None
 
     def get_theta(self):
-        d = self.link.TransformDirectionLocalToParent(ch.ChVector3d(1.0, 0.0, 0.0))
+        d = self.link.TransformDirectionLocalToParent(ch.ChVector3d(0.0, -1.0, 0.0))
         return math.atan2(float(d.x), -float(d.y))
 
     def get_omega(self):
-        return float(self.link.GetAngVelParent().z)
+        return float(self.link.GetAngVelLocal().z)
 
     def get_sensor_kinematics(self, cur_t, step):
-        sensor_local = ch.ChVector3d(self.cfg.imu_offset_x, self.cfg.imu_offset_y, self.cfg.imu_offset_z)
-        pos_w = self.link.TransformPointLocalToParent(sensor_local)
-        vel_w = self.link.PointSpeedLocalToParent(sensor_local)
+        pos_w = self.imu.GetPos()
+        vel_w = self.imu.GetPosDt()
         p = np.array([float(pos_w.x), float(pos_w.y), float(pos_w.z)], dtype=float)
         v = np.array([float(vel_w.x), float(vel_w.y), float(vel_w.z)], dtype=float)
         if self.prev_t is None:
@@ -774,12 +847,12 @@ class PendulumModel:
             a = (v - self.prev_sensor_vel) / dt
         self.prev_sensor_vel = v.copy()
         self.prev_t = cur_t
-        q = quat_to_np(self.link.GetRot())
+        q = quat_to_np(self.imu.GetRot())
         omega = np.array([0.0, 0.0, self.get_omega()], dtype=float)
         return p, v, a, q, omega
 
     def apply_torque(self, tau_z):
-        self.link.AccumulateTorque(ch.ChVector3d(0.0, 0.0, float(tau_z)), False)
+        self.tau_fun.SetConstant(sanitize_float(tau_z))
 
     def step(self, h):
         self.sys.DoStepDynamics(h)
@@ -818,6 +891,10 @@ class ViewerState:
         self.theta = deque(maxlen=hist_len)
         self.omega = deque(maxlen=hist_len)
         self.alpha = deque(maxlen=hist_len)
+        self.imu_ax = deque(maxlen=hist_len)
+        self.imu_ay = deque(maxlen=hist_len)
+        self.imu_az = deque(maxlen=hist_len)
+        self.imu_wz = deque(maxlen=hist_len)
         self.enc = deque(maxlen=hist_len)
         self.cpr = deque(maxlen=hist_len)
         self.tipx = deque(maxlen=hist_len)
@@ -832,6 +909,7 @@ def viewer_thread_fn(view_state: ViewerState, stop_flag: threading.Event):
     ax2 = fig.add_subplot(222)
     ax3 = fig.add_subplot(223)
     ax4 = fig.add_subplot(224)
+    fig.tight_layout(pad=2.0)
 
     def update(_):
         with view_state.lock:
@@ -839,6 +917,10 @@ def viewer_thread_fn(view_state: ViewerState, stop_flag: threading.Event):
             theta = np.array(view_state.theta, dtype=float)
             omega = np.array(view_state.omega, dtype=float)
             alpha = np.array(view_state.alpha, dtype=float)
+            imu_ax = np.array(view_state.imu_ax, dtype=float)
+            imu_ay = np.array(view_state.imu_ay, dtype=float)
+            imu_az = np.array(view_state.imu_az, dtype=float)
+            imu_wz = np.array(view_state.imu_wz, dtype=float)
             enc = np.array(view_state.enc, dtype=float)
             cpr = np.array(view_state.cpr, dtype=float)
             tipx = np.array(view_state.tipx, dtype=float)
@@ -849,19 +931,23 @@ def viewer_thread_fn(view_state: ViewerState, stop_flag: threading.Event):
             ax1.plot(t, omega, label="omega [rad/s]")
             ax1.plot(t, alpha, label="alpha [rad/s^2]")
             ax1.grid(True); ax1.legend(); ax1.set_title("Angular states")
-            ax2.plot(t, enc, label="enc")
+            ax2.plot(t, imu_ax, label="ax [m/s²]")
+            ax2.plot(t, imu_ay, label="ay [m/s²]")
+            ax2.plot(t, imu_az, label="az [m/s²]")
+            ax2.plot(t, imu_wz, label="wz [rad/s]")
+            ax2.grid(True); ax2.legend(); ax2.set_title("IMU signals")
+            ax3.plot(t, enc, label="enc")
             valid = np.isfinite(cpr)
             if np.any(valid):
-                ax2.plot(t[valid], cpr[valid], label="CPR sample")
-            ax2.grid(True); ax2.legend(); ax2.set_title("Encoder / CPR")
+                ax3.plot(t[valid], cpr[valid], label="CPR sample")
+            ax3.grid(True); ax3.legend(); ax3.set_title("Encoder / CPR")
         if len(tipx) > 2:
-            ax3.plot(tipx, tipy)
-            ax3.scatter([tipx[-1]], [tipy[-1]], s=20)
-            ax3.grid(True); ax3.axis("equal"); ax3.set_title("Tip trajectory")
+            ax4.plot(tipx, tipy)
+            ax4.scatter([tipx[-1]], [tipy[-1]], s=20)
+            ax4.grid(True); ax4.axis("equal"); ax4.set_title("Tip trajectory")
         if len(tipx) > 0:
-            ax4.plot([0.0, tipx[-1]], [0.0, tipy[-1]], "-o")
-            ax4.grid(True); ax4.axis("equal"); ax4.set_xlim(-0.35, 0.35); ax4.set_ylim(-0.35, 0.35)
-            ax4.set_title("Current link pose")
+            ax4.plot([0.0, tipx[-1]], [0.0, tipy[-1]], "-o", alpha=0.45)
+            ax4.set_xlim(-0.35, 0.35); ax4.set_ylim(-0.35, 0.35)
         if stop_flag.is_set():
             plt.close(fig)
 
@@ -887,6 +973,17 @@ def build_imu_msg(sim_t, q_wxyz, omega_xyz, acc_xyz):
     msg.linear_acceleration.y = float(acc_xyz[1])
     msg.linear_acceleration.z = float(acc_xyz[2])
     return msg
+
+
+def make_status_line(host_mode: bool, cmd_u_raw: float, cmd_u_used: float, hw_pwm: float, mode_name: str,
+                     cfg: BridgeConfig, delay_ms: float, fit_params: dict):
+    if host_mode:
+        return (
+            f"cmd_u={cmd_u_raw:7.1f} | step={cfg.pwm_step:5.1f} | "
+            f"max={cfg.pwm_limit:5.1f} | mode={mode_name:>6} | delay={delay_ms:5.1f} ms | "
+            f"J={fit_params['J']:.5f} b={fit_params['b']:.4f} tc={fit_params['tau_c']:.4f}"
+        )
+    return f"hw pwm={hw_pwm:7.1f} | sim pwm={cmd_u_used:7.1f}"
 
 
 def ros_spin_thread(node: Node, stop_flag: threading.Event):
@@ -1048,6 +1145,7 @@ def main():
                 omega = model.get_omega()
                 alpha = (omega - omega_prev) / max(sim_t - t_prev, cfg.step) if sim_t > 0 else 0.0
                 alpha = 0.8 * alpha_prev + 0.2 * alpha
+                alpha = sanitize_float(alpha)
                 alpha_prev = alpha
                 omega_prev = omega
                 t_prev = sim_t
@@ -1075,7 +1173,7 @@ def main():
                     cfg.w_p * (e_p ** 2)
                 )
 
-                if cfg.online_fit_enable:
+                if cfg.online_fit_enable and abs(cmd_u_used) >= cfg.ekf_enable_min_pwm:
                     ekf.update(theta_real, omega_real, model_out["u_eff"], cfg.step, inst_cost=inst_cost)
 
                 if inst_cost < best_eval["cost"]:
@@ -1083,22 +1181,33 @@ def main():
                     best_eval["time"] = float(sim_t)
                     best_eval["params"] = ekf.get_params().copy()
 
-                tip_world = model.link.TransformPointLocalToParent(ch.ChVector3d(cfg.link_L, 0.0, 0.0))
+                fit_params = ekf.get_params()
+                tip_world = model.link.TransformPointLocalToParent(ch.ChVector3d(0.0, -cfg.link_L, 0.0))
                 with viewer_state.lock:
                     viewer_state.t.append(sim_t)
                     viewer_state.theta.append(theta)
                     viewer_state.omega.append(omega)
                     viewer_state.alpha.append(alpha)
+                    viewer_state.imu_ax.append(sanitize_float(a_imu[0]))
+                    viewer_state.imu_ay.append(sanitize_float(a_imu[1]))
+                    viewer_state.imu_az.append(sanitize_float(a_imu[2]))
+                    viewer_state.imu_wz.append(sanitize_float(w_imu[2]))
                     viewer_state.enc.append(snap["hw_enc"])
                     viewer_state.cpr.append(cpr_est.last_cpr if np.isfinite(cpr_est.last_cpr) else np.nan)
                     viewer_state.tipx.append(float(tip_world.x))
                     viewer_state.tipy.append(float(tip_world.y))
 
-                status = (
-                    f"cmd_u={cmd_u_raw:7.1f} | step={cfg.pwm_step:5.1f} | max={cfg.pwm_limit:5.1f} | mode={mode_name:<8} | "
-                    f"delay={1000.0*delay_comp.delay_sec:5.1f} ms | J={ekf.get_params()['J']:.5f} b={ekf.get_params()['b']:.4f} tc={ekf.get_params()['tau_c']:.4f}"
+                status = make_status_line(
+                    host_mode=(host_controller is not None),
+                    cmd_u_raw=cmd_u_raw,
+                    cmd_u_used=cmd_u_used,
+                    hw_pwm=snap["hw_pwm"],
+                    mode_name=mode_name,
+                    cfg=cfg,
+                    delay_ms=1000.0 * delay_comp.delay_sec,
+                    fit_params=fit_params,
                 )
-                terminal_status_line(status)
+                terminal_status_line(status, width=cfg.terminal_status_width)
                 ros_node.publish_sim(theta, omega, alpha, model_out["tau_net"], cmd_u_used, 1000.0 * delay_comp.delay_sec, imu_msg, status)
 
                 wr.writerow([
@@ -1109,7 +1218,7 @@ def main():
                     bus_v, current_A, power_W,
                     model_out["v_pred"], model_out["i_pred"], model_out["p_pred"],
                     1000.0 * delay_comp.delay_sec,
-                    ekf.get_params()["J"], ekf.get_params()["b"], ekf.get_params()["tau_c"], ekf.get_params()["mgl"], ekf.get_params()["k_t"], ekf.get_params()["i0"],
+                    fit_params["J"], fit_params["b"], fit_params["tau_c"], fit_params["mgl"], fit_params["k_t"], fit_params["i0"],
                     inst_cost, best_eval["cost"],
                     q_imu[0], q_imu[1], q_imu[2], q_imu[3],
                     w_imu[0], w_imu[1], w_imu[2],
