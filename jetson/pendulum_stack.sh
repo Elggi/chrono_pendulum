@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -eo pipefail
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 # =========================
 # Jetson ROS stack launcher
@@ -274,7 +275,7 @@ main() {
         controller)
             load_env
             echo "[$(timestamp)] Starting pendulum_controller (foreground)..."
-            python3 ~/Documents/chrono/pendulum_controller.py
+            python3 "$SCRIPT_DIR/pendulum_controller.py"
             ;;
         *)
             usage

@@ -13,6 +13,8 @@ import select
 import sys
 import termios
 import tty
+import shutil
+import subprocess
 from dataclasses import dataclass, asdict
 from collections import deque
 
@@ -43,8 +45,10 @@ def now_wall():
     return time.time()
 
 
-def terminal_status_line(msg: str, width: int = 220):
-    sys.stdout.write("\r" + msg[:width].ljust(width))
+def terminal_status_line(msg: str, width: int | None = None):
+    term_width = shutil.get_terminal_size((max(width or 120, 40), 24)).columns
+    usable_width = max(20, min(width or term_width, term_width) - 1)
+    sys.stdout.write("\r\033[2K" + msg[:usable_width].ljust(usable_width))
     sys.stdout.flush()
 
 
@@ -213,7 +217,7 @@ class BridgeConfig:
     topic_sim_cmd_used: str = "/sim/cmd_used"
     topic_sim_delay_ms: str = "/sim/delay_ms"
     topic_sim_status: str = "/sim/status"
-    topic_imu: str = "/imu/data"
+    topic_imu: str = "/sim/imu/data"
 
     history_sec: float = 20.0
     log_dir: str = "./run_logs"
@@ -263,6 +267,32 @@ class KeyboardReader:
         return ch1
 
 
+class QuitWatcher:
+    def __init__(self):
+        self.kb = KeyboardReader() if sys.stdin.isatty() else None
+        self.active = False
+        self.quit_requested = False
+
+    def __enter__(self):
+        if self.kb is not None:
+            self.kb.__enter__()
+            self.active = True
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.active and self.kb is not None:
+            self.kb.__exit__(exc_type, exc, tb)
+            self.active = False
+
+    def poll(self):
+        if self.kb is None:
+            return None
+        key = self.kb.read_key_nonblocking(0.0)
+        if key in ("q", "Q", "ESC"):
+            self.quit_requested = True
+        return key
+
+
 class HostCommandController:
     def __init__(self, cfg: BridgeConfig):
         self.cfg = cfg
@@ -274,9 +304,9 @@ class HostCommandController:
         self.keyboard_active = False
 
     def __enter__(self):
+        self.print_banner()
         self.kb.__enter__()
         self.keyboard_active = True
-        self.print_banner()
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -884,6 +914,22 @@ def compute_model_torque_and_electrics(cmd_u, omega, bus_v, p, cfg: BridgeConfig
     }
 
 
+def blend_parameters_for_sim(ekf_params: dict, cfg: BridgeConfig):
+    return {
+        "theta": float(ekf_params["theta"]),
+        "omega": float(ekf_params["omega"]),
+        "J": float(cfg.J_init),
+        "b": float(cfg.b_init),
+        "tau_c": float(cfg.tau_c_init),
+        "mgl": float(cfg.mgl_init),
+        "k_t": float(cfg.k_t_init),
+        "i0": float(cfg.i0_init),
+        "delay_sec": float(ekf_params["delay_sec"]),
+        "R": float(cfg.R_init),
+        "k_e": float(cfg.k_e_init),
+    }
+
+
 class ViewerState:
     def __init__(self, hist_len=4000):
         self.lock = threading.Lock()
@@ -951,7 +997,8 @@ def viewer_thread_fn(view_state: ViewerState, stop_flag: threading.Event):
         if stop_flag.is_set():
             plt.close(fig)
 
-    FuncAnimation(fig, update, interval=100)
+    ani = FuncAnimation(fig, update, interval=100, cache_frame_data=False)
+    fig._chrono_animation = ani
     plt.show()
 
 
@@ -979,16 +1026,28 @@ def make_status_line(host_mode: bool, cmd_u_raw: float, cmd_u_used: float, hw_pw
                      cfg: BridgeConfig, delay_ms: float, fit_params: dict):
     if host_mode:
         return (
-            f"cmd_u={cmd_u_raw:7.1f} | step={cfg.pwm_step:5.1f} | "
-            f"max={cfg.pwm_limit:5.1f} | mode={mode_name:>6} | delay={delay_ms:5.1f} ms | "
-            f"J={fit_params['J']:.5f} b={fit_params['b']:.4f} tc={fit_params['tau_c']:.4f}"
+            f"cmd_u: {cmd_u_raw:6.1f} | used: {cmd_u_used:6.1f} | mode: {mode_name:<6} | "
+            f"step: {cfg.pwm_step:4.1f} | max: {cfg.pwm_limit:5.1f} | delay: {delay_ms:5.1f} ms | "
+            f"J: {fit_params['J']:.5f} | b: {fit_params['b']:.4f} | tc: {fit_params['tau_c']:.4f}"
         )
-    return f"hw pwm={hw_pwm:7.1f} | sim pwm={cmd_u_used:7.1f}"
+    return (
+        f"cmd_u: {cmd_u_used:6.1f} | hw_pwm: {hw_pwm:6.1f} | mode: external | "
+        f"delay: {delay_ms:5.1f} ms"
+    )
 
 
 def ros_spin_thread(node: Node, stop_flag: threading.Event):
     while rclpy.ok() and not stop_flag.is_set():
         rclpy.spin_once(node, timeout_sec=0.01)
+
+
+def start_imu_viewer_process(imu_topic: str, enc_topic: str):
+    script_path = os.path.join(os.path.dirname(__file__), "imu_viewer.py")
+    return subprocess.Popen(
+        [sys.executable, script_path, "--imu_topic", imu_topic, "--enc_topic", enc_topic],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 # ============================================================
@@ -1061,11 +1120,10 @@ def main():
     ekf = OnlineParameterEKF(cfg)
     best_eval = {"cost": float("inf"), "time": None, "params": None}
 
-    hist_len = max(500, int(cfg.history_sec / cfg.step))
-    viewer_state = ViewerState(hist_len)
-    viewer_stop = threading.Event()
+    viewer_proc = None
     if cfg.enable_imu_viewer:
-        threading.Thread(target=viewer_thread_fn, args=(viewer_state, viewer_stop), daemon=True).start()
+        viewer_topic = cfg.topic_imu if args.host_control else "/imu/data"
+        viewer_proc = start_imu_viewer_process(viewer_topic, cfg.topic_hw_enc)
 
     vis = None
     if cfg.enable_render:
@@ -1079,6 +1137,7 @@ def main():
         vis.AddTypicalLights()
 
     host_controller = HostCommandController(cfg) if args.host_control else None
+    quit_watcher = None if args.host_control else QuitWatcher()
 
     with open(log_csv, "w", newline="", encoding="utf-8") as f:
         wr = csv.writer(f)
@@ -1105,18 +1164,28 @@ def main():
 
         if host_controller is not None:
             host_controller.__enter__()
+            terminal_status_line("cmd_u:    0.0 | used:    0.0 | mode: manual | waiting for keyboard input", width=cfg.terminal_status_width)
+            print()
+        elif quit_watcher is not None:
+            quit_watcher.__enter__()
 
         try:
             while model.sys.GetChTime() < args.duration:
+                if host_controller is not None:
+                    host_controller.poll()
+                    if host_controller.quit_requested:
+                        break
+                elif quit_watcher is not None:
+                    quit_watcher.poll()
+                    if quit_watcher.quit_requested:
+                        break
+
                 if vis is not None:
                     if not vis.Run():
                         break
                     vis.BeginScene(); vis.Render(); vis.EndScene()
 
                 if host_controller is not None:
-                    host_controller.poll()
-                    if host_controller.quit_requested:
-                        break
                     cmd_u_raw = host_controller.get_command()
                     ros_node.publish_host_cmd(cmd_u_raw, host_controller.mode)
                     mode_name = host_controller.mode
@@ -1132,11 +1201,12 @@ def main():
                 cmd_u_used = delay_comp.get_delayed_cmd(wall_now, cmd_u_raw)
 
                 fit_params = ekf.get_params()
+                sim_params = blend_parameters_for_sim(fit_params, cfg)
                 bus_v = snap["bus_v"] if np.isfinite(snap["bus_v"]) else 7.4
                 current_A = snap["current_ma"] / 1000.0 if np.isfinite(snap["current_ma"]) else 0.0
                 power_W = snap["power_mw"] / 1000.0 if np.isfinite(snap["power_mw"]) else 0.0
 
-                model_out = compute_model_torque_and_electrics(cmd_u_used, model.get_omega(), bus_v, fit_params, cfg)
+                model_out = compute_model_torque_and_electrics(cmd_u_used, model.get_omega(), bus_v, sim_params, cfg)
                 model.apply_torque(model_out["tau_net"])
                 model.step(cfg.step)
 
@@ -1182,21 +1252,6 @@ def main():
                     best_eval["params"] = ekf.get_params().copy()
 
                 fit_params = ekf.get_params()
-                tip_world = model.link.TransformPointLocalToParent(ch.ChVector3d(0.0, -cfg.link_L, 0.0))
-                with viewer_state.lock:
-                    viewer_state.t.append(sim_t)
-                    viewer_state.theta.append(theta)
-                    viewer_state.omega.append(omega)
-                    viewer_state.alpha.append(alpha)
-                    viewer_state.imu_ax.append(sanitize_float(a_imu[0]))
-                    viewer_state.imu_ay.append(sanitize_float(a_imu[1]))
-                    viewer_state.imu_az.append(sanitize_float(a_imu[2]))
-                    viewer_state.imu_wz.append(sanitize_float(w_imu[2]))
-                    viewer_state.enc.append(snap["hw_enc"])
-                    viewer_state.cpr.append(cpr_est.last_cpr if np.isfinite(cpr_est.last_cpr) else np.nan)
-                    viewer_state.tipx.append(float(tip_world.x))
-                    viewer_state.tipy.append(float(tip_world.y))
-
                 status = make_status_line(
                     host_mode=(host_controller is not None),
                     cmd_u_raw=cmd_u_raw,
@@ -1235,6 +1290,8 @@ def main():
         finally:
             if host_controller is not None:
                 host_controller.__exit__(None, None, None)
+            elif quit_watcher is not None:
+                quit_watcher.__exit__(None, None, None)
 
     print()
     print("=== best online calibration point ===")
@@ -1255,7 +1312,12 @@ def main():
     print(f"saved csv  : {log_csv}")
     print(f"saved meta : {log_meta}")
 
-    viewer_stop.set()
+    if viewer_proc is not None:
+        viewer_proc.terminate()
+        try:
+            viewer_proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            viewer_proc.kill()
     ros_stop.set()
     try:
         ros_node.destroy_node()
