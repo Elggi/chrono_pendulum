@@ -14,6 +14,7 @@ import sys
 import termios
 import tty
 import shutil
+import signal
 from dataclasses import dataclass, asdict
 from collections import deque
 
@@ -1054,6 +1055,7 @@ def start_imu_viewer_process(imu_topic: str, enc_topic: str):
             [sys.executable, script_path, "--imu_topic", imu_topic, "--enc_topic", enc_topic],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
     except Exception as exc:
         print(f"[WARN] Failed to start IMU viewer: {exc}")
@@ -1360,11 +1362,16 @@ def main():
     print(f"saved meta : {log_meta}")
 
     if viewer_proc is not None:
-        viewer_proc.terminate()
         try:
+            os.killpg(viewer_proc.pid, signal.SIGTERM)
             viewer_proc.wait(timeout=2.0)
-        except subprocess.TimeoutExpired:
-            viewer_proc.kill()
+        except ProcessLookupError:
+            pass
+        except Exception:
+            try:
+                os.killpg(viewer_proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
     ros_stop.set()
     try:
         ros_node.destroy_node()

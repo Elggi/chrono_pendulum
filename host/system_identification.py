@@ -103,7 +103,7 @@ class CalibrationNode(Node):
         self.imu_msg = msg
 
     def send_status(self, text: str):
-        self.get_logger().info(text)
+        self.last_status = text
         msg = String()
         msg.data = text
         self.pub_status.publish(msg)
