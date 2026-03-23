@@ -62,6 +62,7 @@ class ArduinoBridge(Node):
 
         self.pub_enc = self.create_publisher(Float32, "/hw/enc", 10)
         self.pub_pwm = self.create_publisher(Float32, "/hw/pwm_applied", 10)
+        self.pub_pwm_tx = self.create_publisher(Float32, "/hw/pwm_tx", 10)
         self.pub_ms = self.create_publisher(Float32, "/hw/arduino_ms", 10)
 
         self.pub_bus_v = self.create_publisher(Float32, "/ina219/bus_voltage_v", 10)
@@ -69,6 +70,8 @@ class ArduinoBridge(Node):
         self.pub_power_mw = self.create_publisher(Float32, "/ina219/power_mw", 10)
 
         self.stop_flag = False
+        self.last_rx_time = time.time()
+        self.last_tx_warn_time = 0.0
         self.rx_thread = threading.Thread(target=self.rx_loop, daemon=True)
         self.rx_thread.start()
 
@@ -87,8 +90,18 @@ class ArduinoBridge(Node):
 
         try:
             self.ser.write(f"U,{pwm}\n".encode("ascii"))
+            self.publish_float(self.pub_pwm_tx, pwm)
         except Exception as e:
             self.get_logger().error(f"Serial write failed: {repr(e)}")
+            return
+
+        if abs(pwm) > 0 and (time.time() - self.last_rx_time) > 0.5:
+            if (time.time() - self.last_tx_warn_time) > 1.0:
+                self.last_tx_warn_time = time.time()
+                self.get_logger().warn(
+                    f"TX pwm={pwm} is being sent but no fresh Arduino RX status has arrived for "
+                    f"{time.time() - self.last_rx_time:.2f}s"
+                )
 
     def publish_float(self, pub, value):
         msg = Float32()
@@ -114,6 +127,7 @@ class ArduinoBridge(Node):
             enc = float(int(parts[1]))
             pwm = float(int(parts[2]))
             ms = float(int(parts[3]))
+            self.last_rx_time = time.time()
 
             self.publish_float(self.pub_enc, enc)
             self.publish_float(self.pub_pwm, pwm)

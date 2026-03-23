@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -eo pipefail
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 # =========================
 # Jetson ROS stack launcher
@@ -168,48 +169,10 @@ logs_nodes() {
     tail -n 50 "$LOG_DIR/imu_node.log" 2>/dev/null || true
 }
 
-monitor_menu() {
+monitor_live() {
     load_env
-
-    echo "======================================="
-    echo " Jetson ROS topic monitor"
-    echo "======================================="
-    echo "1) /imu/data"
-    echo "2) /hw/enc"
-    echo "3) /cmd/u"
-    echo "4) /hw/pwm_applied"
-    echo "5) /hw/arduino_ms"
-    echo "6) /ina219/bus_voltage_v"
-    echo "7) /ina219/current_ma"
-    echo "8) /ina219/power_mw"
-    echo "9) topic list"
-    echo "10) topic hz /imu/data"
-    echo "11) topic hz /hw/enc"
-    echo "12) topic hz /ina219/bus_voltage_v"
-    echo "13) topic hz /ina219/current_ma"
-    echo "14) topic hz /ina219/power_mw"
-    echo "q) quit"
-    echo "======================================="
-    read -rp "Select: " choice
-
-    case "$choice" in
-        1) ros2 topic echo /imu/data ;;
-        2) ros2 topic echo /hw/enc ;;
-        3) ros2 topic echo /cmd/u ;;
-        4) ros2 topic echo /hw/pwm_applied ;;
-        5) ros2 topic echo /hw/arduino_ms ;;
-        6) ros2 topic echo /ina219/bus_voltage_v ;;
-        7) ros2 topic echo /ina219/current_ma ;;
-        8) ros2 topic echo /ina219/power_mw ;;
-        9) ros2 topic list ;;
-        10) ros2 topic hz /imu/data ;;
-        11) ros2 topic hz /hw/enc ;;
-        12) ros2 topic hz /ina219/bus_voltage_v ;;
-        13) ros2 topic hz /ina219/current_ma ;;
-        14) ros2 topic hz /ina219/power_mw ;;
-        q|Q) exit 0 ;;
-        *) echo "Invalid choice"; exit 1 ;;
-    esac
+    echo "[$(timestamp)] Starting one-line live monitor (Ctrl+C to exit)..."
+    python3 "$SCRIPT_DIR/live_monitor.py"
 }
 
 
@@ -231,7 +194,7 @@ check_once() {
 
 usage() {
     cat <<EOF
-Usage: $0 {start|stop|restart|status|logs|monitor|check|controller}
+Usage: $0 {start|stop|restart|status|logs|monitor|check|controller|calibration}
 
 Commands:
   start    : 아두이노 브리지 + IMU 노드 실행
@@ -239,9 +202,10 @@ Commands:
   restart  : 재시작
   status   : 현재 프로세스 상태 확인
   logs     : 최근 로그 확인
-  monitor  : topic echo / hz 확인 메뉴
+  monitor  : 한줄 live monitor
   check    : 장치와 ROS 환경 간단 점검
   controller : pendulum_controller.py 직접 실행
+  calibration : 자동 calibration protocol 실행
 EOF
 }
 main() {
@@ -266,7 +230,7 @@ main() {
             logs_nodes
             ;;
         monitor)
-            monitor_menu
+            monitor_live
             ;;
         check)
             check_once
@@ -274,7 +238,12 @@ main() {
         controller)
             load_env
             echo "[$(timestamp)] Starting pendulum_controller (foreground)..."
-            python3 ~/Documents/chrono/pendulum_controller.py
+            python3 "$SCRIPT_DIR/pendulum_controller.py"
+            ;;
+        calibration)
+            load_env
+            echo "[$(timestamp)] Starting system identification protocol (jetson role)..."
+            python3 "$SCRIPT_DIR/../host/system_identification.py" --role jetson
             ;;
         *)
             usage
