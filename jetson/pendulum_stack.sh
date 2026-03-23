@@ -147,6 +147,8 @@ start_nodes() {
     echo "  $0 logs       # 로그 tail"
     echo "  $0 stop       # 전체 종료"
     echo "  $0 controller # 컨트롤러  실행"
+    echo "  $0 calibration# Calibration  실행"
+
 }
 
 stop_nodes() {
