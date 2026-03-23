@@ -1234,6 +1234,10 @@ def main():
                     ros_node.publish_host_cmd(cmd_u_raw, host_controller.mode)
                     mode_name = host_controller.mode
                 else:
+                    if quit_watcher is not None:
+                        quit_watcher.poll()
+                        if quit_watcher.quit_requested:
+                            break
                     snap0 = shared.snapshot()
                     cmd_u_raw = snap0["cmd_u"]
                     mode_name = "external"
