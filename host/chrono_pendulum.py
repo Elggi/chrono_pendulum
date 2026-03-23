@@ -216,7 +216,7 @@ class BridgeConfig:
     topic_sim_cmd_used: str = "/sim/cmd_used"
     topic_sim_delay_ms: str = "/sim/delay_ms"
     topic_sim_status: str = "/sim/status"
-    topic_imu: str = "/imu/data"
+    topic_imu: str = "/sim/imu/data"
 
     history_sec: float = 20.0
     log_dir: str = "./run_logs"
@@ -303,9 +303,9 @@ class HostCommandController:
         self.keyboard_active = False
 
     def __enter__(self):
+        self.print_banner()
         self.kb.__enter__()
         self.keyboard_active = True
-        self.print_banner()
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -1040,6 +1040,15 @@ def ros_spin_thread(node: Node, stop_flag: threading.Event):
         rclpy.spin_once(node, timeout_sec=0.01)
 
 
+def start_imu_viewer_process(imu_topic: str, enc_topic: str):
+    script_path = os.path.join(os.path.dirname(__file__), "imu_viewer.py")
+    return subprocess.Popen(
+        [sys.executable, script_path, "--imu_topic", imu_topic, "--enc_topic", enc_topic],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 # ============================================================
 # main
 # ============================================================
@@ -1110,11 +1119,10 @@ def main():
     ekf = OnlineParameterEKF(cfg)
     best_eval = {"cost": float("inf"), "time": None, "params": None}
 
-    hist_len = max(500, int(cfg.history_sec / cfg.step))
-    viewer_state = ViewerState(hist_len)
-    viewer_stop = threading.Event()
+    viewer_proc = None
     if cfg.enable_imu_viewer:
-        threading.Thread(target=viewer_thread_fn, args=(viewer_state, viewer_stop), daemon=True).start()
+        viewer_topic = cfg.topic_imu if args.host_control else "/imu/data"
+        viewer_proc = start_imu_viewer_process(viewer_topic, cfg.topic_hw_enc)
 
     vis = None
     if cfg.enable_render:
@@ -1160,15 +1168,21 @@ def main():
 
         try:
             while model.sys.GetChTime() < args.duration:
+                if host_controller is not None:
+                    host_controller.poll()
+                    if host_controller.quit_requested:
+                        break
+                elif quit_watcher is not None:
+                    quit_watcher.poll()
+                    if quit_watcher.quit_requested:
+                        break
+
                 if vis is not None:
                     if not vis.Run():
                         break
                     vis.BeginScene(); vis.Render(); vis.EndScene()
 
                 if host_controller is not None:
-                    host_controller.poll()
-                    if host_controller.quit_requested:
-                        break
                     cmd_u_raw = host_controller.get_command()
                     ros_node.publish_host_cmd(cmd_u_raw, host_controller.mode)
                     mode_name = host_controller.mode
@@ -1239,21 +1253,6 @@ def main():
                     best_eval["params"] = ekf.get_params().copy()
 
                 fit_params = ekf.get_params()
-                tip_world = model.link.TransformPointLocalToParent(ch.ChVector3d(0.0, -cfg.link_L, 0.0))
-                with viewer_state.lock:
-                    viewer_state.t.append(sim_t)
-                    viewer_state.theta.append(theta)
-                    viewer_state.omega.append(omega)
-                    viewer_state.alpha.append(alpha)
-                    viewer_state.imu_ax.append(sanitize_float(a_imu[0]))
-                    viewer_state.imu_ay.append(sanitize_float(a_imu[1]))
-                    viewer_state.imu_az.append(sanitize_float(a_imu[2]))
-                    viewer_state.imu_wz.append(sanitize_float(w_imu[2]))
-                    viewer_state.enc.append(snap["hw_enc"])
-                    viewer_state.cpr.append(cpr_est.last_cpr if np.isfinite(cpr_est.last_cpr) else np.nan)
-                    viewer_state.tipx.append(float(tip_world.x))
-                    viewer_state.tipy.append(float(tip_world.y))
-
                 status = make_status_line(
                     host_mode=(host_controller is not None),
                     cmd_u_raw=cmd_u_raw,
@@ -1314,7 +1313,12 @@ def main():
     print(f"saved csv  : {log_csv}")
     print(f"saved meta : {log_meta}")
 
-    viewer_stop.set()
+    if viewer_proc is not None:
+        viewer_proc.terminate()
+        try:
+            viewer_proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            viewer_proc.kill()
     ros_stop.set()
     try:
         ros_node.destroy_node()
