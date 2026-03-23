@@ -232,7 +232,7 @@ check_once() {
 
 usage() {
     cat <<EOF
-Usage: $0 {start|stop|restart|status|logs|monitor|check|controller}
+Usage: $0 {start|stop|restart|status|logs|monitor|check|controller|calibration}
 
 Commands:
   start    : 아두이노 브리지 + IMU 노드 실행
@@ -243,6 +243,7 @@ Commands:
   monitor  : topic echo / hz 확인 메뉴
   check    : 장치와 ROS 환경 간단 점검
   controller : pendulum_controller.py 직접 실행
+  calibration : 자동 calibration protocol 실행
 EOF
 }
 main() {
@@ -276,6 +277,11 @@ main() {
             load_env
             echo "[$(timestamp)] Starting pendulum_controller (foreground)..."
             python3 "$SCRIPT_DIR/pendulum_controller.py"
+            ;;
+        calibration)
+            load_env
+            echo "[$(timestamp)] Starting system identification protocol (jetson role)..."
+            python3 "$SCRIPT_DIR/../host/system_identification.py" --role jetson
             ;;
         *)
             usage

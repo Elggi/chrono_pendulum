@@ -217,6 +217,11 @@ class BridgeConfig:
     topic_sim_delay_ms: str = "/sim/delay_ms"
     topic_sim_status: str = "/sim/status"
     topic_imu: str = "/sim/imu/data"
+    topic_est_theta: str = "/est/theta"
+    topic_est_omega: str = "/est/omega"
+    topic_est_alpha: str = "/est/alpha"
+    topic_calib_status: str = "/calibration/status"
+    calibration_json: str = "./run_logs/calibration_latest.json"
 
     history_sec: float = 20.0
     log_dir: str = "./run_logs"
@@ -1041,12 +1046,41 @@ def ros_spin_thread(node: Node, stop_flag: threading.Event):
 
 
 def start_imu_viewer_process(imu_topic: str, enc_topic: str):
+    import subprocess
+
     script_path = os.path.join(os.path.dirname(__file__), "imu_viewer.py")
-    return subprocess.Popen(
-        [sys.executable, script_path, "--imu_topic", imu_topic, "--enc_topic", enc_topic],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    try:
+        return subprocess.Popen(
+            [sys.executable, script_path, "--imu_topic", imu_topic, "--enc_topic", enc_topic],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as exc:
+        print(f"[WARN] Failed to start IMU viewer: {exc}")
+        return None
+
+
+def apply_calibration_json(cfg: BridgeConfig, json_path: str | None):
+    if not json_path or not os.path.exists(json_path):
+        return None
+
+    with open(json_path, "r", encoding="utf-8") as f:
+        calib = json.load(f)
+
+    model_init = calib.get("model_init", {})
+    delay = calib.get("delay", {})
+
+    cfg.J_init = float(model_init.get("J", cfg.J_init))
+    cfg.b_init = float(model_init.get("b", cfg.b_init))
+    cfg.tau_c_init = float(model_init.get("tau_c", cfg.tau_c_init))
+    cfg.mgl_init = float(model_init.get("mgl", cfg.mgl_init))
+    cfg.k_t_init = float(model_init.get("k_t", cfg.k_t_init))
+    cfg.i0_init = float(model_init.get("i0", cfg.i0_init))
+    cfg.R_init = float(model_init.get("R", cfg.R_init))
+    cfg.k_e_init = float(model_init.get("k_e", cfg.k_e_init))
+    cfg.delay_init_ms = float(delay.get("effective_control_delay_ms", cfg.delay_init_ms))
+    cfg.calibration_json = json_path
+    return calib
 
 
 # ============================================================
@@ -1069,6 +1103,8 @@ def main():
                     help="Compatibility option: host enables host-control, jetson uses external ROS input.")
     ap.add_argument("--delay-ms", type=float, default=0.0)
     ap.add_argument("--disable-auto-delay", action="store_true")
+    ap.add_argument("--enable-online-fit", action="store_true")
+    ap.add_argument("--calibration-json", default="./run_logs/calibration_latest.json")
     ap.add_argument("--J", type=float, default=0.010)
     ap.add_argument("--b", type=float, default=0.030)
     ap.add_argument("--tau-c", type=float, default=0.080)
@@ -1102,6 +1138,9 @@ def main():
     cfg.k_e_init = args.k_e
     cfg.delay_init_ms = args.delay_ms
     cfg.auto_delay_comp = not args.disable_auto_delay
+    cfg.online_fit_enable = args.enable_online_fit
+
+    calib = apply_calibration_json(cfg, args.calibration_json)
 
     log_csv = make_numbered_path(cfg.log_dir, cfg.log_prefix, ".csv")
     log_meta = log_csv[:-4] + ".meta.json"
@@ -1121,7 +1160,7 @@ def main():
 
     viewer_proc = None
     if cfg.enable_imu_viewer:
-        viewer_topic = cfg.topic_imu if args.host_control else "/imu/data"
+        viewer_topic = "/imu/data"
         viewer_proc = start_imu_viewer_process(viewer_topic, cfg.topic_hw_enc)
 
     vis = None
@@ -1163,8 +1202,14 @@ def main():
 
         if host_controller is not None:
             host_controller.__enter__()
+            terminal_status_line("cmd_u:    0.0 | used:    0.0 | mode: manual | waiting for keyboard input", width=cfg.terminal_status_width)
+            print()
         elif quit_watcher is not None:
             quit_watcher.__enter__()
+
+        if calib is not None:
+            print(f"[INFO] Loaded calibration json: {args.calibration_json}")
+        print(f"[INFO] online_fit_enable={cfg.online_fit_enable}")
 
         try:
             while model.sys.GetChTime() < args.duration:
@@ -1303,6 +1348,7 @@ def main():
     meta = {
         "log_csv": log_csv,
         "config": asdict(cfg),
+        "calibration_json": cfg.calibration_json if calib is not None else None,
         "estimated_delay_ms_final": 1000.0 * delay_comp.delay_sec,
         "cpr_last": None if not np.isfinite(cpr_est.last_cpr) else float(cpr_est.last_cpr),
         "cpr_mean": None if not np.isfinite(cpr_est.mean) else float(cpr_est.mean),
