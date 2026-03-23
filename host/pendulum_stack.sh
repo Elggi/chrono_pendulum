@@ -67,6 +67,13 @@ run_chrono_pendulum() {
     fi
 }
 
+run_system_identification() {
+    echo "--------------------------------"
+    echo "[INFO] System Identification 시작"
+    echo "Jetson pendulum_stack.sh 에서 calibration을 시작하십시오."
+    python3 $BASE_DIR/system_identification.py --role host
+}
+
 run_plot() {
     file=$(select_csv_file)
     if [ -z "$file" ]; then return; fi
@@ -98,20 +105,7 @@ run_rl_fitting() {
 }
 
 run_full_pipeline() {
-    echo "================================"
-    echo "[PIPELINE] Chrono → Plot → RL"
-    echo "================================"
-
-    echo "[STEP 1] Chrono 실행"
-    run_chrono_pendulum
-
-    echo "[STEP 2] Plot 실행"
-    run_plot
-
-    echo "[STEP 3] RL fitting 실행"
-    run_rl_fitting
-
-    echo "[DONE] Full pipeline complete"
+    echo "[INFO] Full pipeline 메뉴는 System Identification → Optimization → Chrono 순 workflow로 대체 예정"
 }
 
 # ======================================================
@@ -123,11 +117,11 @@ while true; do
     echo "=========================================="
     echo "      Pendulum Digital Twin Stack"
     echo "=========================================="
-    echo "1) IMU Viewer (standalone)"
-    echo "2) Chrono Pendulum (simulation)"
-    echo "3) Plot CSV (analysis)"
-    echo "4) RL Fitting (offline optimization)"
-    echo "5) Full Pipeline (Chrono → Plot → RL)"
+    echo "1) IMU Viewer (Standalone Viewer)"
+    echo "2) System Identification (Parameter Calibration)"
+    echo "3) Parameter Optimization (Reinforcement Learning)"
+    echo "4) Chrono Pendulum (Select Host/Jetson mode)"
+    echo "5) Plot Data"
     echo "6) Exit"
     echo "=========================================="
 
@@ -139,19 +133,19 @@ while true; do
             pause
             ;;
         2)
-            run_chrono_pendulum
+            run_system_identification
             pause
             ;;
         3)
-            run_plot
-            pause
-            ;;
-        4)
             run_rl_fitting
             pause
             ;;
+        4)
+            run_chrono_pendulum
+            pause
+            ;;
         5)
-            run_full_pipeline
+            run_plot
             pause
             ;;
         6)

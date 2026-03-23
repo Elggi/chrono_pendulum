@@ -5,6 +5,7 @@ import tty
 import select
 import time
 import math
+import shutil
 from dataclasses import dataclass
 
 import rclpy
@@ -284,6 +285,16 @@ def print_help():
     print("=" * 70 + "\n")
 
 
+def print_status_line(node: KeyboardControllerNode):
+    term_width = shutil.get_terminal_size((120, 24)).columns
+    msg = (
+        f"cmd_u: {node.current_u:6.1f} | step: {node.cfg.pwm_step:4.1f} | "
+        f"max: {node.cfg.pwm_max:5.1f} | mode: {node.preset_mode:<6}"
+    )
+    sys.stdout.write("\r\033[2K" + msg[: max(20, term_width - 1)].ljust(max(20, term_width - 1)))
+    sys.stdout.flush()
+
+
 def main():
     rclpy.init()
     cfg = ControllerConfig()
@@ -313,20 +324,10 @@ def main():
                     node.publish_state(key_name=key or "")
                     node.last_pub_time = now
 
-                    print(
-                        f"\rcmd_u={node.current_u:7.1f} | step={node.cfg.pwm_step:5.1f} | "
-                        f"max={node.cfg.pwm_max:5.1f} | mode={node.preset_mode:>6}",
-                        end="",
-                        flush=True,
-                    )
+                    print_status_line(node)
 
                 elif changed:
-                    print(
-                        f"\rcmd_u={node.current_u:7.1f} | step={node.cfg.pwm_step:5.1f} | "
-                        f"max={node.cfg.pwm_max:5.1f} | mode={node.preset_mode:>6}",
-                        end="",
-                        flush=True,
-                    )
+                    print_status_line(node)
 
                 rclpy.spin_once(node, timeout_sec=0.0)
 
