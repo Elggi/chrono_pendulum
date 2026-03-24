@@ -5,6 +5,7 @@ import os
 import csv
 import json
 import time
+import shutil
 import argparse
 from dataclasses import dataclass, asdict
 
@@ -42,15 +43,52 @@ JETSON_PROTOCOL = [
     ProtocolStep("jetson_pos_120", 120.0, 1.5),
     ProtocolStep("jetson_zero_mid_3", 0.0, 1.0),
     ProtocolStep("jetson_neg_120", -120.0, 1.5),
-    ProtocolStep("jetson_pos_180", 180.0, 1.5),
+    ProtocolStep("jetson_pos_120_second", 120.0, 1.5),
     ProtocolStep("jetson_zero_mid_4", 0.0, 1.0),
-    ProtocolStep("jetson_neg_180", -180.0, 1.5),
+    ProtocolStep("jetson_neg_120_second", -120.0, 1.5),
     ProtocolStep("jetson_zero_end", 0.0, 2.0),
 ]
 
+MAX_CALIB_PWM = 120.0
+
 
 def terminal_status_line(msg: str, width: int = 180):
+    term_cols = shutil.get_terminal_size((width, 20)).columns
+    width = min(width, term_cols)
     print("\r\033[2K" + msg[:width].ljust(width), end="", flush=True)
+
+
+def clamp_protocol_pwm(steps, max_abs_pwm: float):
+    out = []
+    for s in steps:
+        clamped = max(-max_abs_pwm, min(max_abs_pwm, float(s.pwm)))
+        label = s.label if clamped == s.pwm else f"{s.label}_clamped"
+        out.append(ProtocolStep(label=label, pwm=clamped, duration_sec=s.duration_sec))
+    return out
+
+
+def load_protocol_from_json(path: str, role: str):
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    if isinstance(payload, dict):
+        if role in payload:
+            raw_steps = payload[role]
+        else:
+            raw_steps = payload.get("steps", [])
+    else:
+        raw_steps = payload
+    steps = []
+    for i, item in enumerate(raw_steps):
+        steps.append(
+            ProtocolStep(
+                label=str(item.get("label", f"{role}_step_{i}")),
+                pwm=float(item["pwm"]),
+                duration_sec=float(item["duration_sec"]),
+            )
+        )
+    if not steps:
+        raise ValueError(f"No protocol steps found in {path} for role={role}")
+    return steps
 
 
 class CalibrationNode(Node):
@@ -140,14 +178,16 @@ class CalibrationNode(Node):
     def monitor_text(self, step_label: str, cmd_u: float):
         snap = self.snapshot()
         return (
-            f"role={self.args.role:<6} | step={step_label:<18} | cmd_u={cmd_u:7.1f} | "
-            f"hw_pwm={snap['hw_pwm']:7.1f} | enc={snap['hw_enc']:11.1f} | "
-            f"bus_v={snap['bus_v']:6.2f} | current_mA={snap['current_ma']:7.1f} | "
-            f"imu_wz={0.0 if snap['imu_wz'] is None else snap['imu_wz']:7.4f} | "
-            f"imu_ay={0.0 if snap['imu_ay'] is None else snap['imu_ay']:7.3f}"
+            f"{self.args.role:<6} step={step_label:<16} cmd={cmd_u:6.1f} pwm={snap['hw_pwm']:6.1f} "
+            f"enc={snap['hw_enc']:10.1f} V={snap['bus_v']:5.2f} I={snap['current_ma']:7.1f} "
+            f"wz={0.0 if snap['imu_wz'] is None else snap['imu_wz']:7.4f}"
         )
 
     def run_protocol(self, steps, csv_path):
+        start_enc = None
+        last_enc = None
+        net_encoder_delta = 0.0
+        abs_encoder_travel = 0.0
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             wr = csv.writer(f)
             wr.writerow([
@@ -166,6 +206,13 @@ class CalibrationNode(Node):
                     self.publish_pwm(step.pwm)
                     rclpy.spin_once(self, timeout_sec=0.0)
                     snap = self.snapshot()
+                    if start_enc is None:
+                        start_enc = snap["hw_enc"]
+                    if last_enc is not None:
+                        d_enc = snap["hw_enc"] - last_enc
+                        net_encoder_delta += d_enc
+                        abs_encoder_travel += abs(d_enc)
+                    last_enc = snap["hw_enc"]
                     wr.writerow([
                         time.time(), self.args.role, step.label, step.pwm,
                         snap["hw_pwm"], snap["hw_enc"], snap["hw_ms"],
@@ -178,6 +225,37 @@ class CalibrationNode(Node):
                     terminal_status_line(self.monitor_text(step.label, step.pwm))
                     time.sleep(1.0 / max(self.args.loop_hz, 1.0))
                 self.send_status(f"{self.args.role}:{step.label}:done")
+
+            # Return to origin encoder point using bounded PWM.
+            if start_enc is not None and self.args.return_to_origin:
+                self.send_status(f"{self.args.role}:return_to_origin:start")
+                t_until = time.time() + self.args.return_timeout_sec
+                while time.time() < t_until:
+                    rclpy.spin_once(self, timeout_sec=0.0)
+                    err = start_enc - self.hw_enc
+                    if abs(err) <= self.args.return_tol_counts:
+                        break
+                    pwm = max(self.args.return_min_pwm, min(self.args.return_kp * abs(err), self.args.max_calib_pwm))
+                    cmd = pwm if err > 0 else -pwm
+                    self.publish_pwm(cmd)
+                    snap = self.snapshot()
+                    if last_enc is not None:
+                        d_enc = snap["hw_enc"] - last_enc
+                        net_encoder_delta += d_enc
+                        abs_encoder_travel += abs(d_enc)
+                    last_enc = snap["hw_enc"]
+                    wr.writerow([
+                        time.time(), self.args.role, "return_to_origin", cmd,
+                        snap["hw_pwm"], snap["hw_enc"], snap["hw_ms"],
+                        snap["bus_v"], snap["current_ma"], snap["power_mw"],
+                        snap["imu_qx"], snap["imu_qy"], snap["imu_qz"], snap["imu_qw"],
+                        snap["imu_wx"], snap["imu_wy"], snap["imu_wz"],
+                        snap["imu_ax"], snap["imu_ay"], snap["imu_az"],
+                        snap["last_status"],
+                    ])
+                    terminal_status_line(self.monitor_text("return_to_origin", cmd))
+                    time.sleep(1.0 / max(self.args.loop_hz, 1.0))
+                self.send_status(f"{self.args.role}:return_to_origin:done")
             self.publish_pwm(0.0)
             for _ in range(5):
                 rclpy.spin_once(self, timeout_sec=0.0)
@@ -199,6 +277,17 @@ class CalibrationNode(Node):
                 ])
                 time.sleep(0.05)
         print()
+        end_enc = self.hw_enc
+        turns_net = None if start_enc is None else (end_enc - start_enc) / max(self.args.counts_per_rev, 1e-9)
+        return {
+            "encoder_start": start_enc,
+            "encoder_end": end_enc,
+            "encoder_net_delta": None if start_enc is None else (end_enc - start_enc),
+            "encoder_signed_travel": net_encoder_delta,
+            "encoder_abs_travel": abs_encoder_travel,
+            "turns_net": turns_net,
+            "turns_abs": abs_encoder_travel / max(self.args.counts_per_rev, 1e-9),
+        }
 
 
 def make_labeled_path(folder: str, prefix: str, role: str, ext: str):
@@ -233,11 +322,24 @@ def build_argparser():
     ap.add_argument("--output-json", default="./run_logs/calibration_latest.json")
     ap.add_argument("--log-dir", default="./run_logs")
     ap.add_argument("--wait-timeout-sec", type=float, default=180.0)
+    ap.add_argument("--protocol-json", default=None, help="Optional JSON protocol override")
+    ap.add_argument("--max-calib-pwm", type=float, default=MAX_CALIB_PWM)
+    ap.add_argument("--counts-per-rev", type=float, default=360.0)
+    ap.add_argument("--return-to-origin", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--return-timeout-sec", type=float, default=20.0)
+    ap.add_argument("--return-tol-counts", type=float, default=8.0)
+    ap.add_argument("--return-kp", type=float, default=0.12)
+    ap.add_argument("--return-min-pwm", type=float, default=28.0)
     return ap
 
 
 def host_main(args):
     node = CalibrationNode(args)
+    if args.protocol_json:
+        host_protocol = load_protocol_from_json(args.protocol_json, "host")
+    else:
+        host_protocol = HOST_PROTOCOL
+    host_protocol = clamp_protocol_pwm(host_protocol, args.max_calib_pwm)
     host_csv = make_labeled_path(args.log_dir, "calibration_", "host", ".csv")
     node.send_status("host:waiting_for_jetson")
     print("[INFO] host terminal에서 Calibration을 시작하십시오… Jetson calibration 대기중")
@@ -252,7 +354,7 @@ def host_main(args):
         raise TimeoutError("Timed out waiting for jetson calibration completion")
 
     node.send_status("host:jetson_finished_proceeding_host_protocol")
-    node.run_protocol(HOST_PROTOCOL, host_csv)
+    host_summary = node.run_protocol(host_protocol, host_csv)
     node.send_status("host:protocol:finished")
 
     result = {
@@ -279,10 +381,13 @@ def host_main(args):
             "R": 2.0,
             "k_e": 0.02,
         },
-        "protocols": {
-            "jetson": [asdict(x) for x in JETSON_PROTOCOL],
-            "host": [asdict(x) for x in HOST_PROTOCOL],
+        "protocols": {"host": [asdict(x) for x in host_protocol]},
+        "calibration_algorithm": {
+            "name": "rule_based_openloop_protocol_with_encoder_return",
+            "details": "Not Nelder-Mead/least-squares/EKF/UKF. Fixed time-PWM sequence logs sensor data and returns to initial encoder origin.",
+            "max_abs_pwm": args.max_calib_pwm,
         },
+        "rotation_tracking": {"host": host_summary},
         "logs": {
             "host_csv": host_csv,
         },
@@ -295,10 +400,15 @@ def host_main(args):
 
 def jetson_main(args):
     node = CalibrationNode(args)
+    if args.protocol_json:
+        jetson_protocol = load_protocol_from_json(args.protocol_json, "jetson")
+    else:
+        jetson_protocol = JETSON_PROTOCOL
+    jetson_protocol = clamp_protocol_pwm(jetson_protocol, args.max_calib_pwm)
     jetson_csv = make_labeled_path(args.log_dir, "calibration_", "jetson", ".csv")
     node.send_status("jetson:protocol:started")
     print("[INFO] jetson -> host calibration 진행중…")
-    node.run_protocol(JETSON_PROTOCOL, jetson_csv)
+    node.run_protocol(jetson_protocol, jetson_csv)
     node.send_status("jetson:protocol:finished")
     print(f"[INFO] calibration csv saved: {jetson_csv}")
     node.destroy_node()
