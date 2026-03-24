@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 # ---- user-configurable ----
 ROS_SETUP="/opt/ros/humble/setup.bash"
-DEFAULT_WS_SETUP="$SCRIPT_DIR/../ros2_ws/install/setup.bash"
+DEFAULT_WS_SETUP="/home/jetson/ros2_ws/install/setup.bash"
 WS_SETUP="${WS_SETUP:-$DEFAULT_WS_SETUP}"
 
 export ROS_DOMAIN_ID=7
@@ -41,8 +41,8 @@ load_env() {
     if [ ! -f "$WS_SETUP" ]; then
         echo "[ERROR] Workspace setup not found: $WS_SETUP"
         echo "[HINT] Build the ROS workspace first, then source it:"
-        echo "       cd \"$SCRIPT_DIR/../ros2_ws\" && colcon build"
-        echo "       source \"$SCRIPT_DIR/../ros2_ws/install/setup.bash\""
+        echo "       cd \"$(dirname "$(dirname "$WS_SETUP")")\" && colcon build"
+        echo "       source \"$WS_SETUP\""
         exit 1
     fi
     source "$WS_SETUP"
