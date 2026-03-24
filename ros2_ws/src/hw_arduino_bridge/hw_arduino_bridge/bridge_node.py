@@ -57,6 +57,7 @@ class ArduinoBridge(Node):
 
         self.u_latest = 0.0
         self.last_cmd_time = time.time()
+        self.timeout_active = False
 
         self.sub = self.create_subscription(Float32, "/cmd/u", self.on_cmd, 10)
 
@@ -78,12 +79,28 @@ class ArduinoBridge(Node):
     def on_cmd(self, msg: Float32):
         self.u_latest = float(msg.data)
         self.last_cmd_time = time.time()
+        if self.timeout_active:
+            self.get_logger().info(
+                f"/cmd/u stream resumed with {self.u_latest:.1f}; leaving timeout stop state"
+            )
+            self.timeout_active = False
 
     def tx_tick(self):
-        if (time.time() - self.last_cmd_time) > self.cmd_timeout:
+        age = time.time() - self.last_cmd_time
+        if age > self.cmd_timeout:
             pwm = 0
+            if not self.timeout_active:
+                self.get_logger().warn(
+                    f"/cmd/u timeout ({age:.3f}s > {self.cmd_timeout:.3f}s); forcing PWM to 0"
+                )
+                self.timeout_active = True
         else:
             pwm = int(round(clamp(self.u_latest, -self.pwm_limit, self.pwm_limit)))
+            if self.timeout_active:
+                self.get_logger().info(
+                    f"/cmd/u timeout cleared at age {age:.3f}s; applying PWM {pwm}"
+                )
+                self.timeout_active = False
 
         try:
             self.ser.write(f"U,{pwm}\n".encode("ascii"))
