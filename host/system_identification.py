@@ -17,6 +17,8 @@ from std_msgs.msg import Float32, String
 
 MAX_CALIB_PWM = 120.0
 
+MAX_CALIB_PWM = 120.0
+
 
 def terminal_status_line(msg: str, width: int = 180):
     term_cols = shutil.get_terminal_size((width, 20)).columns
@@ -347,6 +349,11 @@ def build_argparser():
 
 def host_main(args):
     node = CalibrationNode(args)
+    if args.protocol_json:
+        host_protocol = load_protocol_from_json(args.protocol_json, "host")
+    else:
+        host_protocol = HOST_PROTOCOL
+    host_protocol = clamp_protocol_pwm(host_protocol, args.max_calib_pwm)
     host_csv = make_labeled_path(args.log_dir, "calibration_", "host", ".csv")
     node.send_status("host:waiting_for_jetson")
     print("[INFO] host terminal에서 Calibration을 시작하십시오… Jetson calibration 대기중")
@@ -402,6 +409,11 @@ def host_main(args):
 
 def jetson_main(args):
     node = CalibrationNode(args)
+    if args.protocol_json:
+        jetson_protocol = load_protocol_from_json(args.protocol_json, "jetson")
+    else:
+        jetson_protocol = JETSON_PROTOCOL
+    jetson_protocol = clamp_protocol_pwm(jetson_protocol, args.max_calib_pwm)
     jetson_csv = make_labeled_path(args.log_dir, "calibration_", "jetson", ".csv")
     node.send_status("jetson:protocol:started")
     print("[INFO] jetson -> host calibration 진행중…")
