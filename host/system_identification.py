@@ -16,6 +16,9 @@ from std_msgs.msg import Float32, String
 
 
 MAX_CALIB_PWM = 120.0
+# Backward-compat placeholders for mixed deployments still referencing legacy names.
+HOST_PROTOCOL = []
+JETSON_PROTOCOL = []
 
 
 def terminal_status_line(msg: str, width: int = 180):
