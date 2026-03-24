@@ -8,7 +8,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 # ---- user-configurable ----
 ROS_SETUP="/opt/ros/humble/setup.bash"
-WS_SETUP="$HOME/ros2_ws/install/setup.bash"
+DEFAULT_WS_SETUP="$SCRIPT_DIR/../ros2_ws/install/setup.bash"
+WS_SETUP="${WS_SETUP:-$DEFAULT_WS_SETUP}"
 
 export ROS_DOMAIN_ID=7
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
@@ -39,6 +40,9 @@ load_env() {
 
     if [ ! -f "$WS_SETUP" ]; then
         echo "[ERROR] Workspace setup not found: $WS_SETUP"
+        echo "[HINT] Build the ROS workspace first, then source it:"
+        echo "       cd \"$SCRIPT_DIR/../ros2_ws\" && colcon build"
+        echo "       source \"$SCRIPT_DIR/../ros2_ws/install/setup.bash\""
         exit 1
     fi
     source "$WS_SETUP"
@@ -208,6 +212,66 @@ monitor_live() {
     python3 "$SCRIPT_DIR/live_monitor.py"
 }
 
+diag_topic_once() {
+    local topic="$1"
+    local timeout_sec="${2:-2}"
+    local out
+    out="$(timeout "${timeout_sec}s" ros2 topic echo --once "$topic" 2>&1 || true)"
+    if echo "$out" | rg -q "data:|header:|orientation:|angular_velocity:|linear_acceleration:"; then
+        echo "[OK] topic has data: $topic"
+        return 0
+    fi
+    echo "[WARN] no sample received from $topic (timeout=${timeout_sec}s)"
+    return 1
+}
+
+diag_topic_pub() {
+    local topic="$1"
+    local info
+    info="$(ros2 topic info "$topic" 2>&1 || true)"
+    local pubs
+    pubs="$(echo "$info" | awk -F': ' '/Publisher count/ {print $2}' | tr -d '\r' | tail -n 1)"
+    if [ -n "${pubs:-}" ] && [ "$pubs" -ge 1 ] 2>/dev/null; then
+        echo "[OK] publisher count for $topic = $pubs"
+        return 0
+    fi
+    echo "[WARN] publisher missing for $topic"
+    return 1
+}
+
+diagnose_nodes_and_topics() {
+    load_env
+    echo "===== diagnose: node process status ====="
+    status_nodes
+    echo
+
+    echo "===== diagnose: ROS node graph ====="
+    ros2 node list || true
+    echo
+
+    echo "===== diagnose: key topic publishers ====="
+    diag_topic_pub "/cmd/u" || true
+    diag_topic_pub "/hw/pwm_applied" || true
+    diag_topic_pub "/hw/enc" || true
+    diag_topic_pub "/ina219/bus_voltage_v" || true
+    diag_topic_pub "/ina219/current_ma" || true
+    diag_topic_pub "/ina219/power_mw" || true
+    diag_topic_pub "/imu/data" || true
+    echo
+
+    echo "===== diagnose: sample data check ====="
+    diag_topic_once "/hw/pwm_applied" 2 || true
+    diag_topic_once "/hw/enc" 2 || true
+    diag_topic_once "/ina219/bus_voltage_v" 2 || true
+    diag_topic_once "/ina219/current_ma" 2 || true
+    diag_topic_once "/ina219/power_mw" 2 || true
+    diag_topic_once "/imu/data" 2 || true
+    echo
+
+    echo "===== diagnose: recent logs ====="
+    logs_nodes
+}
+
 
 check_once() {
     load_env
@@ -233,7 +297,7 @@ check_once() {
 
 usage() {
     cat <<EOF
-Usage: $0 {start|stop|restart|status|logs|monitor|check|controller|calibration}
+Usage: $0 {start|stop|restart|status|logs|monitor|check|diagnose|controller|calibration}
 
 Commands:
   start    : 아두이노 브리지 + IMU 노드 실행
@@ -243,6 +307,7 @@ Commands:
   logs     : 최근 로그 확인
   monitor  : 한줄 live monitor
   check    : 장치와 ROS 환경 간단 점검
+  diagnose : 어떤 노드/토픽이 비었는지 상세 점검
   controller : pendulum_controller.py 직접 실행
   calibration : 자동 calibration protocol 실행
 EOF
@@ -273,6 +338,9 @@ main() {
             ;;
         check)
             check_once
+            ;;
+        diagnose)
+            diagnose_nodes_and_topics
             ;;
         controller)
             load_env
