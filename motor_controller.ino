@@ -1,5 +1,8 @@
 #include <Wire.h>
 #include <Adafruit_INA219.h>
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
 
 Adafruit_INA219 ina219;
 
@@ -13,6 +16,7 @@ volatile long enc_count = 0;
 volatile unsigned long last_enc_us = 0;
 
 int last_pwm = 0;
+bool ina219_ok = false;
 
 unsigned long last_status_ms = 0;
 const unsigned long STATUS_PERIOD_MS = 20;   // 50 Hz
@@ -20,6 +24,10 @@ const unsigned long STATUS_PERIOD_MS = 20;   // 50 Hz
 // 너무 짧은 펄스는 노이즈로 보고 무시
 // 값은 엔코더 상태 보면서 20~200us 정도에서 조정
 const unsigned long ENC_GLITCH_US = 50;
+
+const size_t CMD_BUF_LEN = 32;
+char cmd_buf[CMD_BUF_LEN];
+size_t cmd_len = 0;
 
 // A상 상승엣지에서만 샘플링하는 1x 디코딩
 void isr_enc_a_rising() {
@@ -66,14 +74,35 @@ void applyPWM(int pwm) {
   }
 }
 
+void readPowerMetrics(float &bus_V, float &current_mA, float &power_mW) {
+  bus_V = NAN;
+  current_mA = NAN;
+  power_mW = NAN;
+
+  if (!ina219_ok) {
+    return;
+  }
+
+  bus_V = ina219.getBusVoltage_V();
+  current_mA = ina219.getCurrent_mA();
+  power_mW = ina219.getPower_mW();
+
+  if (!isfinite(bus_V) || !isfinite(current_mA) || !isfinite(power_mW)) {
+    ina219_ok = false;
+    Serial.println("INA219,RUNTIME_ERR");
+    bus_V = NAN;
+    current_mA = NAN;
+    power_mW = NAN;
+  }
+}
+
 void sendStatus() {
   long enc = readEnc();
   unsigned long ms = millis();
-
-  float shunt_mV   = ina219.getShuntVoltage_mV();
-  float bus_V      = ina219.getBusVoltage_V();
-  float current_mA = ina219.getCurrent_mA();
-  float power_mW   = ina219.getPower_mW();
+  float bus_V = NAN;
+  float current_mA = NAN;
+  float power_mW = NAN;
+  readPowerMetrics(bus_V, current_mA, power_mW);
 
   // S,enc,pwm,ms,bus_v,current_mA,power_mW
   Serial.print("S,");
@@ -83,11 +112,55 @@ void sendStatus() {
   Serial.print(",");
   Serial.print(ms);
   Serial.print(",");
-  Serial.print(bus_V, 4);
+  if (isfinite(bus_V)) Serial.print(bus_V, 4);
+  else Serial.print("nan");
   Serial.print(",");
-  Serial.print(current_mA, 4);
+  if (isfinite(current_mA)) Serial.print(current_mA, 4);
+  else Serial.print("nan");
   Serial.print(",");
-  Serial.println(power_mW, 4);
+  if (isfinite(power_mW)) Serial.println(power_mW, 4);
+  else Serial.println("nan");
+}
+
+void handleCommand(const char *line) {
+  if (strncmp(line, "U,", 2) == 0) {
+    int pwm = atoi(line + 2);
+    applyPWM(pwm);
+    sendStatus();
+  }
+  else if (strcmp(line, "ZERO") == 0) {
+    zeroEnc();
+    Serial.println("ZERO_OK");
+  }
+  else if (strcmp(line, "PING") == 0) {
+    Serial.println("PONG");
+  }
+}
+
+void pollSerial() {
+  while (Serial.available() > 0) {
+    char ch = (char)Serial.read();
+
+    if (ch == '\r') {
+      continue;
+    }
+
+    if (ch == '\n') {
+      cmd_buf[cmd_len] = '\0';
+      if (cmd_len > 0) {
+        handleCommand(cmd_buf);
+      }
+      cmd_len = 0;
+      continue;
+    }
+
+    if (cmd_len < (CMD_BUF_LEN - 1)) {
+      cmd_buf[cmd_len++] = ch;
+    } else {
+      cmd_len = 0;
+      Serial.println("CMD,OVERRUN");
+    }
+  }
 }
 
 void setup() {
@@ -106,36 +179,21 @@ void setup() {
   delay(1000);
 
   Wire.begin();
-  if (!ina219.begin()) {
+  ina219_ok = ina219.begin();
+  if (!ina219_ok) {
     Serial.println("INA219,ERR");
-    while (1) delay(10);
+  } else {
+    Serial.println("INA219,OK");
   }
 
   Serial.println("BOOT,OK");
-  Serial.println("INA219,OK");
 
   // 기존 CHANGE x 2개 대신 A상 rising만 사용
   attachInterrupt(digitalPinToInterrupt(ENC_A), isr_enc_a_rising, RISING);
 }
 
 void loop() {
-  if (Serial.available()) {
-    String line = Serial.readStringUntil('\n');
-    line.trim();
-
-    if (line.startsWith("U,")) {
-      int pwm = line.substring(2).toInt();
-      applyPWM(pwm);
-      sendStatus();
-    }
-    else if (line == "ZERO") {
-      zeroEnc();
-      Serial.println("ZERO_OK");
-    }
-    else if (line == "PING") {
-      Serial.println("PONG");
-    }
-  }
+  pollSerial();
 
   unsigned long now = millis();
   if (now - last_status_ms >= STATUS_PERIOD_MS) {

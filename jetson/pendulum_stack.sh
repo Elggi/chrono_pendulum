@@ -13,10 +13,12 @@ WS_SETUP="$HOME/ros2_ws/install/setup.bash"
 export ROS_DOMAIN_ID=7
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
-ARDUINO_PORT="/dev/ttyACM0"
+ARDUINO_PORT_PATTERN="${ARDUINO_PORT_PATTERN:-/dev/serial/by-id/*Arduino*}"
+ARDUINO_PORT_FALLBACK="${ARDUINO_PORT_FALLBACK:-/dev/ttyACM0}"
 ARDUINO_BAUD="115200"
 
-IMU_PORT="/dev/ttyUSB0"
+IMU_PORT_PATTERN="${IMU_PORT_PATTERN:-/dev/serial/by-id/*IMU*}"
+IMU_PORT_FALLBACK="${IMU_PORT_FALLBACK:-/dev/ttyUSB0}"
 IMU_BAUD="921600"
 
 LOG_DIR="$HOME/jetson_ros_logs"
@@ -40,6 +42,30 @@ load_env() {
         exit 1
     fi
     source "$WS_SETUP"
+}
+
+resolve_serial_port() {
+    local label="$1"
+    local pattern="$2"
+    local fallback="$3"
+    local resolved=""
+
+    shopt -s nullglob
+    local matches=( $pattern )
+    shopt -u nullglob
+
+    if [ "${#matches[@]}" -gt 0 ]; then
+        resolved="${matches[0]}"
+    else
+        resolved="$fallback"
+    fi
+
+    if [ ! -e "$resolved" ]; then
+        echo "[ERROR] $label serial device not found. pattern=$pattern fallback=$fallback resolved=$resolved"
+        exit 1
+    fi
+
+    printf '%s' "$resolved"
 }
 
 start_process() {
@@ -133,11 +159,16 @@ status_process() {
 start_nodes() {
     load_env
 
+    local arduino_port
+    local imu_port
+    arduino_port="$(resolve_serial_port "Arduino" "$ARDUINO_PORT_PATTERN" "$ARDUINO_PORT_FALLBACK")"
+    imu_port="$(resolve_serial_port "IMU" "$IMU_PORT_PATTERN" "$IMU_PORT_FALLBACK")"
+
     start_process "arduino_bridge" \
-        "ros2 run hw_arduino_bridge bridge_node --ros-args -p port:=$ARDUINO_PORT -p baud:=$ARDUINO_BAUD -p pwm_limit:=255.0"
+        "ros2 run hw_arduino_bridge bridge_node --ros-args -p port:=$arduino_port -p baud:=$ARDUINO_BAUD -p pwm_limit:=255.0"
 
     start_process "imu_node" \
-        "ros2 run wheeltec_n100_imu imu_node --ros-args -p serial_port:=$IMU_PORT -p serial_baud:=$IMU_BAUD -r imu:=/imu/data"
+        "ros2 run wheeltec_n100_imu imu_node --ros-args -p serial_port:=$imu_port -p serial_baud:=$IMU_BAUD -r imu:=/imu/data"
 
     echo
     echo "[$(timestamp)] All nodes started."
@@ -186,8 +217,14 @@ check_once() {
     echo
 
     echo "===== device check ====="
-    ls -l "$ARDUINO_PORT" 2>/dev/null || echo "Missing: $ARDUINO_PORT"
-    ls -l "$IMU_PORT" 2>/dev/null || echo "Missing: $IMU_PORT"
+    local arduino_port
+    local imu_port
+    arduino_port="$(resolve_serial_port "Arduino" "$ARDUINO_PORT_PATTERN" "$ARDUINO_PORT_FALLBACK")"
+    imu_port="$(resolve_serial_port "IMU" "$IMU_PORT_PATTERN" "$IMU_PORT_FALLBACK")"
+    echo "Arduino port: $arduino_port"
+    ls -l "$arduino_port" 2>/dev/null || true
+    echo "IMU port: $imu_port"
+    ls -l "$imu_port" 2>/dev/null || true
     echo
 
     echo "===== topic list ====="
