@@ -12,7 +12,6 @@ class LiveMonitor(Node):
         super().__init__('jetson_live_monitor')
         self.values = {
             'cmd_u': 0.0,
-            'pwm_tx': 0.0,
             'hw_pwm': 0.0,
             'enc': 0.0,
             'bus_v': float('nan'),
@@ -20,7 +19,6 @@ class LiveMonitor(Node):
             'power_mw': float('nan'),
         }
         self.create_subscription(Float32, '/cmd/u', self._cb('cmd_u'), 100)
-        self.create_subscription(Float32, '/hw/pwm_tx', self._cb('pwm_tx'), 100)
         self.create_subscription(Float32, '/hw/pwm_applied', self._cb('hw_pwm'), 100)
         self.create_subscription(Float32, '/hw/enc', self._cb('enc'), 100)
         self.create_subscription(Float32, '/ina219/bus_voltage_v', self._cb('bus_v'), 100)
@@ -41,7 +39,6 @@ class LiveMonitor(Node):
             return format(v, spec)
         msg = (
             f"cmd_u={fmt(self.values['cmd_u'], '7.1f')} | "
-            f"pwm_tx={fmt(self.values['pwm_tx'], '7.1f')} | "
             f"hw_pwm={fmt(self.values['hw_pwm'], '7.1f')} | "
             f"enc={fmt(self.values['enc'], '11.1f')} | "
             f"bus_v={fmt(self.values['bus_v'], '6.2f')} | "
