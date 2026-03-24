@@ -17,8 +17,6 @@ from std_msgs.msg import Float32, String
 
 MAX_CALIB_PWM = 120.0
 
-MAX_CALIB_PWM = 120.0
-
 
 def terminal_status_line(msg: str, width: int = 180):
     term_cols = shutil.get_terminal_size((width, 20)).columns
@@ -331,6 +329,8 @@ def build_argparser():
     ap.add_argument("--output-json", default="./run_logs/calibration_latest.json")
     ap.add_argument("--log-dir", default="./run_logs")
     ap.add_argument("--wait-timeout-sec", type=float, default=180.0)
+    # Backward-compat: kept as no-op to avoid AttributeError on older call paths.
+    ap.add_argument("--protocol-json", default=None)
     ap.add_argument("--max-calib-pwm", type=float, default=MAX_CALIB_PWM)
     ap.add_argument("--counts-per-rev", type=float, default=360.0)
     ap.add_argument("--settle-sec", type=float, default=1.0)
