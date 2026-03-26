@@ -70,10 +70,7 @@ run_chrono_pendulum() {
 run_system_identification() {
     echo "--------------------------------"
     echo "[INFO] System Identification 시작"
-    echo "Select calibration role:"
-    echo "1) host"
-    echo "2) jetson"
-    read -p "Enter number: " calib_role
+    echo "[INFO] Calibration 실행"
     read -p "enter max-pwm (default 80): " input_max_pwm
     read -p "enter sweep-pwm-step (default 5): " input_sweep_step
     read -p "enter sweep-hold-sec (default 0.4): " input_sweep_hold
@@ -91,14 +88,7 @@ run_system_identification() {
         --max-turns-one-side "$max_turn"
     )
 
-    if [ "$calib_role" == "1" ]; then
-        python3 $BASE_DIR/system_identification.py --role host "${common_args[@]}"
-    elif [ "$calib_role" == "2" ]; then
-        python3 $BASE_DIR/system_identification.py --role jetson "${common_args[@]}"
-    else
-        echo "[ERROR] Invalid selection"
-        return
-    fi
+    python3 $BASE_DIR/system_identification.py --role host "${common_args[@]}"
 }
 
 run_plot() {

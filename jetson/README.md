@@ -11,7 +11,6 @@ Jetson 운영 자동화 스크립트로 다음 기능을 제공합니다.
 - 브리지/IMU 노드 start/stop/status/logs
 - live monitor 실행
 - keyboard controller 실행
-- calibration 실행 연계
 
 ### 운영 포인트
 - PID 파일 기반 프로세스 관리
@@ -56,5 +55,3 @@ Jetson 운영 자동화 스크립트로 다음 기능을 제공합니다.
 
 1. Jetson이 하드웨어 센서/액추에이터 토픽 제공
 2. Host가 이를 받아 시뮬레이션/식별/분석 수행
-3. Calibration 시 role(host/jetson)에 맞는 스크립트 실행으로 동기화
-

@@ -182,7 +182,6 @@ start_nodes() {
     echo "  $0 logs       # 로그 tail"
     echo "  $0 stop       # 전체 종료"
     echo "  $0 controller # 컨트롤러  실행"
-    echo "  $0 calibration# Calibration  실행"
 
 }
 
@@ -297,7 +296,7 @@ check_once() {
 
 usage() {
     cat <<EOF
-Usage: $0 {start|stop|restart|status|logs|monitor|check|diagnose|controller|calibration}
+Usage: $0 {start|stop|restart|status|logs|monitor|check|diagnose|controller}
 
 Commands:
   start    : 아두이노 브리지 + IMU 노드 실행
@@ -309,7 +308,6 @@ Commands:
   check    : 장치와 ROS 환경 간단 점검
   diagnose : 어떤 노드/토픽이 비었는지 상세 점검
   controller : pendulum_controller.py 직접 실행
-  calibration : 자동 calibration protocol 실행
 EOF
 }
 main() {
@@ -346,11 +344,6 @@ main() {
             load_env
             echo "[$(timestamp)] Starting pendulum_controller (foreground)..."
             python3 "$SCRIPT_DIR/pendulum_controller.py"
-            ;;
-        calibration)
-            load_env
-            echo "[$(timestamp)] Starting system identification protocol (jetson role)..."
-            python3 "$SCRIPT_DIR/../host/system_identification.py" --role jetson
             ;;
         *)
             usage

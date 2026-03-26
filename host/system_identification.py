@@ -183,11 +183,17 @@ class CalibrationNode(Node):
 
             for direction, step_label in [(1.0, "sweep_pos"), (-1.0, "sweep_neg")]:
                 cmd_mag = self.args.sweep_pwm_start
+                dir_start_yaw = yaw_unwrapped
+                dir_start_enc = self.hw_enc
                 while cmd_mag <= self.args.max_calib_pwm:
-                    cmd = direction * cmd_mag
+                    cmd_mag_eff = cmd_mag
                     t_hold = time.time() + self.args.sweep_hold_sec
                     one_side_turns = 0.0
                     while time.time() < t_hold:
+                        remain_turns = self.args.max_turns_one_side - one_side_turns
+                        if remain_turns <= self.args.turn_slow_zone_turns:
+                            cmd_mag_eff = min(cmd_mag_eff, self.args.slow_max_pwm)
+                        cmd = direction * cmd_mag_eff
                         self.publish_pwm(cmd)
                         rclpy.spin_once(self, timeout_sec=0.0)
                         snap = self._write_row(wr, step_label, cmd)
@@ -214,13 +220,15 @@ class CalibrationNode(Node):
                                 abs_yaw_travel += abs(dy)
                             last_yaw = yaw
 
-                        one_side_turns_imu = abs(max(0.0, direction * yaw_unwrapped)) / (2.0 * math.pi)
-                        one_side_turns_enc = abs(max(0.0, direction * (snap["hw_enc"] - start_enc))) / max(self.args.counts_per_rev, 1e-9)
+                        one_side_turns_imu = abs(max(0.0, direction * (yaw_unwrapped - dir_start_yaw))) / (2.0 * math.pi)
+                        one_side_turns_enc = abs(max(0.0, direction * (snap["hw_enc"] - dir_start_enc))) / max(self.args.counts_per_rev, 1e-9)
                         one_side_turns = max(one_side_turns_imu, one_side_turns_enc)
                         terminal_status_line(
                             self.monitor_text(f"{step_label}:{one_side_turns:.2f}turn", cmd)
                         )
                         if one_side_turns >= self.args.max_turns_one_side:
+                            self.publish_pwm(0.0)
+                            time.sleep(self.args.hard_stop_hold_sec)
                             break
                         time.sleep(1.0 / max(self.args.loop_hz, 1.0))
                     if one_side_turns >= self.args.max_turns_one_side:
@@ -315,7 +323,7 @@ def save_calibration_json(args, result):
 
 def build_argparser():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--role", choices=["host", "jetson"], required=True)
+    ap.add_argument("--role", choices=["host"], default="host")
     ap.add_argument("--cmd-topic", default="/cmd/u")
     ap.add_argument("--status-topic", default="/calibration/status")
     ap.add_argument("--imu-topic", default="/imu/data")
@@ -337,6 +345,9 @@ def build_argparser():
     ap.add_argument("--sweep-hold-sec", type=float, default=0.6)
     ap.add_argument("--dir-pause-sec", type=float, default=0.6)
     ap.add_argument("--max-turns-one-side", type=float, default=1.9)
+    ap.add_argument("--turn-slow-zone-turns", type=float, default=0.25)
+    ap.add_argument("--slow-max-pwm", type=float, default=30.0)
+    ap.add_argument("--hard-stop-hold-sec", type=float, default=0.15)
     ap.add_argument("--return-to-origin", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--return-timeout-sec", type=float, default=20.0)
     ap.add_argument("--return-tol-rad", type=float, default=0.08)
@@ -348,19 +359,8 @@ def build_argparser():
 def host_main(args):
     node = CalibrationNode(args)
     host_csv = make_labeled_path(args.log_dir, "calibration_", "host", ".csv")
-    node.send_status("host:waiting_for_jetson")
-    print("[INFO] host terminal에서 Calibration을 시작하십시오… Jetson calibration 대기중")
-    t0 = time.time()
-    while time.time() - t0 < args.wait_timeout_sec:
-        rclpy.spin_once(node, timeout_sec=0.2)
-        terminal_status_line(node.monitor_text("waiting_for_jetson", 0.0))
-        if node.last_status == "jetson:protocol:finished":
-            print("\n[INFO] Jetson mode calibration finished, proceeding with Host mode calibration.")
-            break
-    else:
-        raise TimeoutError("Timed out waiting for jetson calibration completion")
-
-    node.send_status("host:jetson_finished_proceeding_host_protocol")
+    node.send_status("host:adaptive_calibration:started")
+    print("[INFO] Calibration 시작")
     host_summary = node.run_protocol(host_csv)
     node.send_status("host:protocol:finished")
 
@@ -375,9 +375,8 @@ def host_main(args):
             "sensor_to_link_quat": None,
         },
         "delay": {
-            "host_to_jetson_ms": None,
-            "jetson_to_host_ms": None,
-            "effective_control_delay_ms": 0.0,
+            "policy": "online_compensation_in_chrono_pendulum",
+            "estimated_in_calibration": False,
         },
         "model_init": {
             "J": 0.01,
@@ -399,27 +398,11 @@ def host_main(args):
     node.destroy_node()
 
 
-
-def jetson_main(args):
-    node = CalibrationNode(args)
-    jetson_csv = make_labeled_path(args.log_dir, "calibration_", "jetson", ".csv")
-    node.send_status("jetson:protocol:started")
-    print("[INFO] jetson -> host calibration 진행중…")
-    node.run_protocol(jetson_csv)
-    node.send_status("jetson:protocol:finished")
-    print(f"[INFO] calibration csv saved: {jetson_csv}")
-    node.destroy_node()
-
-
-
 def main():
     args = build_argparser().parse_args()
     rclpy.init()
     try:
-        if args.role == "host":
-            host_main(args)
-        else:
-            jetson_main(args)
+        host_main(args)
     except KeyboardInterrupt:
         pass
     finally:
