@@ -16,7 +16,7 @@ from sensor_msgs.msg import Imu
 from std_msgs.msg import Float32
 
 
-DEFAULT_PWM_STEP = 5.0
+DEFAULT_PWM_STEP = 1.0
 DEFAULT_LOOP_HZ = 30.0
 DEFAULT_COUNTS_PER_REV = 360.0
 
@@ -196,13 +196,13 @@ def run_calibration(node: SysIdNode, args):
     pwm_limit = float(user_input)
     pwm_limit = abs(min(pwm_limit, args.max_pwm_hard_limit))
 
-    print(f"[INFO] 사용자 최대 PWM={pwm_limit:.2f}, step={args.pwm_step:.2f}")
+    print(f"[INFO] 사용자 최대 PWM={pwm_limit:.2f}, step=1.00")
 
     start_enc, end_enc, start_rots = ramp_until_target_rotations(
         node=node,
         direction=1,
         pwm_limit=pwm_limit,
-        pwm_step=args.pwm_step,
+        pwm_step=DEFAULT_PWM_STEP,
         loop_hz=args.loop_hz,
         target_rotations=2,
     )
@@ -220,7 +220,7 @@ def run_calibration(node: SysIdNode, args):
             node=node,
             direction=-1,
             pwm_limit=pwm_limit,
-            pwm_step=args.pwm_step,
+            pwm_step=DEFAULT_PWM_STEP,
             loop_hz=args.loop_hz,
             target_rotations=1,
         )
@@ -239,7 +239,7 @@ def run_calibration(node: SysIdNode, args):
     result = {
         "created_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "user_pwm_limit": pwm_limit,
-        "pwm_step": args.pwm_step,
+        "pwm_step": DEFAULT_PWM_STEP,
         "detected_full_rotations": node.full_rotations_detected,
         "extra_rotations_after_stop": extra_rotations,
         "reverse_turns_done": reverse_turns_done,
@@ -265,7 +265,6 @@ def build_argparser():
     ap.add_argument("--hw-pwm-topic", default="/hw/pwm_applied")
     ap.add_argument("--output-json", default="./run_logs/calibration_latest.json")
     ap.add_argument("--loop-hz", type=float, default=DEFAULT_LOOP_HZ)
-    ap.add_argument("--pwm-step", type=float, default=DEFAULT_PWM_STEP)
     ap.add_argument("--max-pwm-hard-limit", type=float, default=120.0)
     ap.add_argument("--counts-per-rev", type=float, default=DEFAULT_COUNTS_PER_REV)
     ap.add_argument("--imu-wait-sec", type=float, default=5.0)
