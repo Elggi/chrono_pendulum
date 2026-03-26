@@ -101,22 +101,9 @@ run_chrono_pendulum() {
 run_system_identification() {
     echo "--------------------------------"
     echo "[INFO] System Identification 시작"
-    echo "[INFO] host role로 adaptive calibration 실행"
-    read -p "enter max-pwm (default 80): " input_max_pwm
-    read -p "enter sweep-pwm-step (default 5): " input_sweep_step
-    read -p "enter sweep-hold-sec (default 0.4): " input_sweep_hold
-
-    max_pwm="${input_max_pwm:-80}"
-    sweep_step="${input_sweep_step:-5}"
-    sweep_hold="${input_sweep_hold:-0.4}"
-
-    common_args=(
-        --max-calib-pwm "$max_pwm"
-        --sweep-pwm-step "$sweep_step"
-        --sweep-hold-sec "$sweep_hold"
-    )
-
-    python3 $BASE_DIR/system_identification.py --role host "${common_args[@]}"
+    echo "[INFO] calibration.py 실행 (max PWM은 calibration.py에서 직접 입력)"
+    echo "[INFO] step size는 1 PWM으로 고정"
+    python3 $BASE_DIR/calibration.py
 }
 
 run_plot() {

@@ -16,7 +16,7 @@
               ▼
 [ROS2 topics]
               │
-              ├─ host/system_identification.py
+              ├─ host/calibration.py
               │    (adaptive calibration, CPR estimate, safety return)
               │
               ├─ host/chrono_pendulum.py
@@ -102,4 +102,3 @@ N_{turn} = \max\left(\frac{|\Delta\psi_{imu}|}{2\pi},\;\frac{|\Delta enc|}{CPR_{
 - `host/README.md`: Host 파이프라인 상세 동작
 - `jetson/README.md`: Jetson 제어/센서/노드 운영 상세
 - `motor_controller.ino`, `ros2_ws/`는 본 상위 README에서 상세 생략 (요청사항 반영)
-
