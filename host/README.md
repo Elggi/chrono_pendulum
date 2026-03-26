@@ -24,26 +24,25 @@
 
 ---
 
-## 2) `system_identification.py`
+## 2) `calibration.py`
 
 ### 역할
-- **Adaptive calibration** 수행
-- IMU yaw + encoder를 이용해 회전량 추적
-- 안전 제약(PWM 상한, 최대 회전수) 하에서 sweep
-- 원점 복귀(return-to-origin)
-- CPR 추정치 산출 및 calibration JSON 저장
+- IMU orientation + encoder 기반 calibration 수행
+- full rotation 감지 기반으로 회전/정지 제어
+- 사용자 입력 최대 PWM 한계 하에서 1 PWM step 증가 적용
+- 정지 후 overshoot 회전량을 반대 방향으로 보정
+- mean CPR, IMU 기반 `r` 추정치 출력 및 JSON 저장
 
 ### 핵심 로직
-- settle 구간에서 기준 yaw/encoder 확보
-- 단일 방향으로 PWM을 단계적으로 증가
-- full rotation 2회 감지 시 sweep 정지
-- 종료 후 yaw 기준 복귀 제어
+- IMU 수신 확인 후 초기 orientation 기준점 설정
+- 단일 방향으로 PWM을 1 step씩 증가
+- full rotation 2회 감지 시 즉시 정지
+- 정지 후 추가 회전량을 측정해 반대 방향으로 보정
 
 ### CLI 주요 파라미터
-- `--max-calib-pwm`
-- `--sweep-pwm-step`
-- `--sweep-hold-sec`
-- `--return-kp`, `--return-timeout-sec`, `--return-tol-rad`
+- `--max-pwm-hard-limit`
+- `--loop-hz`
+- `--imu-wait-sec`, `--stop-settle-sec`
 
 ---
 
@@ -83,4 +82,4 @@
 ### 역할
 - Host 통합 메뉴 엔트리 포인트
 - IMU viewer / calibration / RL / chrono / plot 실행
-- calibration role 및 safety 파라미터 입력 지원
+- calibration 메뉴 실행 (max PWM은 calibration.py 내부에서 입력)
