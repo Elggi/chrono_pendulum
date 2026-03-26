@@ -163,16 +163,9 @@ def ros_spin_thread(state, imu_topic, enc_topic):
     node = ViewerNode(state, imu_topic, enc_topic)
     try:
         rclpy.spin(node)
-<<<<<<< codex/update-calibration-host-terminal-output-55shfz
     except Exception:
         # Ignore shutdown/context races during external termination.
         pass
-=======
-    except Exception as exc:
-        # Ignore shutdown race during external termination.
-        if exc.__class__.__name__ != "ExternalShutdownException":
-            raise
->>>>>>> host-fix-pendulum
     finally:
         node.destroy_node()
         try:
