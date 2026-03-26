@@ -196,11 +196,9 @@ class CalibrationNode(Node):
             cmd_mag = self.args.sweep_pwm_start
             step_label = "sweep_until_2turn"
             reached_turns = 0.0
-<<<<<<< codex/update-calibration-host-terminal-output-55shfz
             max_turns_observed = 0.0
             target_hit = False
-=======
->>>>>>> host-fix-pendulum
+
             while cmd_mag <= self.args.max_calib_pwm and reached_turns < TARGET_FULL_TURNS:
                 cmd_mag_eff = cmd_mag
                 t_hold = time.time() + self.args.sweep_hold_sec
