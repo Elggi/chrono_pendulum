@@ -40,6 +40,34 @@ select_csv_file() {
     done
 }
 
+select_json_file() {
+    echo "--------------------------------" >&2
+    echo "[INFO] Parameter JSON 파일 선택" >&2
+
+    local files=("$BASE_DIR"/run_logs/*.json "$BASE_DIR"/rl_results/*.json)
+    local valid=()
+    for f in "${files[@]}"; do
+        [ -f "$f" ] && valid+=("$f")
+    done
+
+    if [ "${#valid[@]}" -eq 0 ]; then
+        local default_json="$BASE_DIR/run_logs/calibration_latest.json"
+        echo "[WARN] 선택 가능한 json 파일이 없습니다. 기본값 사용: $default_json" >&2
+        echo "$default_json"
+        return 0
+    fi
+
+    select file in "${valid[@]}"; do
+        if [ -n "$file" ]; then
+            echo "[INFO] Selected JSON: $file" >&2
+            echo "$file"
+            return 0
+        else
+            echo "[ERROR] 잘못된 선택" >&2
+        fi
+    done
+}
+
 # ======================================================
 # 실행 함수들
 # ======================================================
