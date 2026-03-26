@@ -8,6 +8,8 @@ import time
 import shutil
 import argparse
 import math
+import subprocess
+import sys
 
 import rclpy
 from rclpy.node import Node
@@ -16,6 +18,7 @@ from std_msgs.msg import Float32, String
 
 
 MAX_CALIB_PWM = 120.0
+TARGET_FULL_TURNS = 2.0
 
 
 def terminal_status_line(msg: str, width: int = 180):
@@ -146,6 +149,9 @@ class CalibrationNode(Node):
         yaw_unwrapped = 0.0
         last_yaw = None
         abs_yaw_travel = 0.0
+        t_hist = []
+        wz_hist = []
+        ay_hist = []
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             wr = csv.writer(f)
             wr.writerow([
@@ -169,74 +175,66 @@ class CalibrationNode(Node):
                 if yaw is not None and yaw0 is None:
                     yaw0 = yaw
                     last_yaw = yaw
+                if snap["imu_wz"] is not None:
+                    t_hist.append(time.time())
+                    wz_hist.append(float(snap["imu_wz"]))
+                if snap["imu_ay"] is not None:
+                    ay_hist.append(float(snap["imu_ay"]))
                 if start_enc is None:
                     start_enc = snap["hw_enc"]
                     last_enc = snap["hw_enc"]
                 terminal_status_line(self.monitor_text("settle", 0.0))
                 time.sleep(1.0 / max(self.args.loop_hz, 1.0))
 
-            # adaptive sweep both directions
+            # adaptive sweep (single direction) until 2 full rotations.
             if yaw0 is None:
                 self.publish_pwm(0.0)
                 self.send_status(f"{self.args.role}:adaptive_calibration:imu_missing_abort")
                 raise RuntimeError("IMU orientation unavailable; aborting adaptive calibration for safety.")
 
-            for direction, step_label in [(1.0, "sweep_pos"), (-1.0, "sweep_neg")]:
-                cmd_mag = self.args.sweep_pwm_start
-                dir_start_yaw = yaw_unwrapped
-                dir_start_enc = self.hw_enc
-                while cmd_mag <= self.args.max_calib_pwm:
-                    cmd_mag_eff = cmd_mag
-                    t_hold = time.time() + self.args.sweep_hold_sec
-                    one_side_turns = 0.0
-                    while time.time() < t_hold:
-                        remain_turns = self.args.max_turns_one_side - one_side_turns
-                        if remain_turns <= self.args.turn_slow_zone_turns:
-                            cmd_mag_eff = min(cmd_mag_eff, self.args.slow_max_pwm)
-                        cmd = direction * cmd_mag_eff
-                        self.publish_pwm(cmd)
-                        rclpy.spin_once(self, timeout_sec=0.0)
-                        snap = self._write_row(wr, step_label, cmd)
-                        if start_enc is None:
-                            start_enc = snap["hw_enc"]
-                        if last_enc is not None:
-                            d_enc = snap["hw_enc"] - last_enc
-                            net_encoder_delta += d_enc
-                            abs_encoder_travel += abs(d_enc)
-                        last_enc = snap["hw_enc"]
+            direction = 1.0
+            cmd_mag = self.args.sweep_pwm_start
+            step_label = "sweep_until_2turn"
+            reached_turns = 0.0
+            while cmd_mag <= self.args.max_calib_pwm and reached_turns < TARGET_FULL_TURNS:
+                cmd_mag_eff = cmd_mag
+                t_hold = time.time() + self.args.sweep_hold_sec
+                while time.time() < t_hold:
+                    remain_turns = TARGET_FULL_TURNS - reached_turns
+                    if remain_turns <= self.args.turn_slow_zone_turns:
+                        cmd_mag_eff = min(cmd_mag_eff, self.args.slow_max_pwm)
+                    cmd = direction * cmd_mag_eff
+                    self.publish_pwm(cmd)
+                    rclpy.spin_once(self, timeout_sec=0.0)
+                    snap = self._write_row(wr, step_label, cmd)
+                    if last_enc is not None:
+                        d_enc = snap["hw_enc"] - last_enc
+                        net_encoder_delta += d_enc
+                        abs_encoder_travel += abs(d_enc)
+                    last_enc = snap["hw_enc"]
 
-                        yaw = quat_to_yaw_rad(self.imu_msg.orientation if self.imu_msg is not None else None)
-                        if yaw is not None:
-                            if yaw0 is None:
-                                yaw0 = yaw
-                                last_yaw = yaw
-                            if last_yaw is not None:
-                                dy = yaw - last_yaw
-                                while dy > math.pi:
-                                    dy -= 2.0 * math.pi
-                                while dy < -math.pi:
-                                    dy += 2.0 * math.pi
-                                yaw_unwrapped += dy
-                                abs_yaw_travel += abs(dy)
-                            last_yaw = yaw
+                    yaw = quat_to_yaw_rad(self.imu_msg.orientation if self.imu_msg is not None else None)
+                    if yaw is not None and last_yaw is not None:
+                        dy = yaw - last_yaw
+                        while dy > math.pi:
+                            dy -= 2.0 * math.pi
+                        while dy < -math.pi:
+                            dy += 2.0 * math.pi
+                        yaw_unwrapped += dy
+                        abs_yaw_travel += abs(dy)
+                    if yaw is not None:
+                        last_yaw = yaw
 
-                        one_side_turns_imu = abs(max(0.0, direction * (yaw_unwrapped - dir_start_yaw))) / (2.0 * math.pi)
-                        one_side_turns_enc = abs(max(0.0, direction * (snap["hw_enc"] - dir_start_enc))) / max(self.args.counts_per_rev, 1e-9)
-                        one_side_turns = max(one_side_turns_imu, one_side_turns_enc)
-                        terminal_status_line(
-                            self.monitor_text(f"{step_label}:{one_side_turns:.2f}turn", cmd)
-                        )
-                        if one_side_turns >= self.args.max_turns_one_side:
-                            self.publish_pwm(0.0)
-                            time.sleep(self.args.hard_stop_hold_sec)
-                            break
-                        time.sleep(1.0 / max(self.args.loop_hz, 1.0))
-                    if one_side_turns >= self.args.max_turns_one_side:
+                    reached_turns = abs(yaw_unwrapped) / (2.0 * math.pi)
+                    terminal_status_line(self.monitor_text(f"{step_label}:{reached_turns:.2f}turn", cmd))
+                    if reached_turns >= TARGET_FULL_TURNS:
                         self.publish_pwm(0.0)
+                        time.sleep(self.args.hard_stop_hold_sec)
                         break
-                    cmd_mag += self.args.sweep_pwm_step
-                self.publish_pwm(0.0)
-                time.sleep(self.args.dir_pause_sec)
+                    time.sleep(1.0 / max(self.args.loop_hz, 1.0))
+                cmd_mag += self.args.sweep_pwm_step
+            self.publish_pwm(0.0)
+            time.sleep(self.args.dir_pause_sec)
 
             # Return to origin using yaw priority.
             if self.args.return_to_origin and yaw0 is not None:
@@ -293,6 +291,20 @@ class CalibrationNode(Node):
         cpr_estimate = None
         if turns_abs_imu > 1e-6:
             cpr_estimate = abs_encoder_travel / turns_abs_imu
+        r_estimate = None
+        if len(t_hist) >= 3 and len(wz_hist) >= 3 and len(ay_hist) >= 3:
+            alpha = []
+            for i in range(1, len(wz_hist)):
+                dt = max(t_hist[i] - t_hist[i - 1], 1e-4)
+                alpha.append((wz_hist[i] - wz_hist[i - 1]) / dt)
+            pairs = []
+            n = min(len(alpha), len(ay_hist) - 1)
+            for i in range(n):
+                if abs(alpha[i]) > 0.5:
+                    pairs.append(abs(ay_hist[i + 1]) / abs(alpha[i]))
+            if pairs:
+                pairs.sort()
+                r_estimate = pairs[len(pairs) // 2]
         return {
             "encoder_start": start_enc,
             "encoder_end": end_enc,
@@ -302,6 +314,7 @@ class CalibrationNode(Node):
             "turns_net_encoder": turns_net_enc,
             "turns_abs_imu": turns_abs_imu,
             "counts_per_revolution_est": cpr_estimate,
+            "moment_arm_r_est_m": r_estimate,
         }
 
 
@@ -344,7 +357,6 @@ def build_argparser():
     ap.add_argument("--sweep-pwm-step", type=float, default=10.0)
     ap.add_argument("--sweep-hold-sec", type=float, default=0.6)
     ap.add_argument("--dir-pause-sec", type=float, default=0.6)
-    ap.add_argument("--max-turns-one-side", type=float, default=1.9)
     ap.add_argument("--turn-slow-zone-turns", type=float, default=0.25)
     ap.add_argument("--slow-max-pwm", type=float, default=30.0)
     ap.add_argument("--hard-stop-hold-sec", type=float, default=0.15)
@@ -353,6 +365,7 @@ def build_argparser():
     ap.add_argument("--return-tol-rad", type=float, default=0.08)
     ap.add_argument("--return-kp", type=float, default=45.0)
     ap.add_argument("--return-min-pwm", type=float, default=28.0)
+    ap.add_argument("--no-imu-viewer", action="store_true")
     return ap
 
 
@@ -360,16 +373,19 @@ def host_main(args):
     node = CalibrationNode(args)
     host_csv = make_labeled_path(args.log_dir, "calibration_", "host", ".csv")
     node.send_status("host:adaptive_calibration:started")
-    print("[INFO] Calibration 시작")
+    print("[INFO] host adaptive calibration 시작")
     host_summary = node.run_protocol(host_csv)
     node.send_status("host:protocol:finished")
+    print(f"[CALIB] CPR_est={host_summary.get('counts_per_revolution_est')}")
+    print(f"[CALIB] delay_est_ms=0.0 (handled online in chrono_pendulum)")
+    print(f"[CALIB] r_est(m)={host_summary.get('moment_arm_r_est_m')}")
 
     result = {
         "version": 1,
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
         "workflow": "phase1_debuggable_scaffold",
         "counts_per_revolution": host_summary.get("counts_per_revolution_est"),
-        "r_sensor_from_center_m": None,
+        "r_sensor_from_center_m": host_summary.get("moment_arm_r_est_m"),
         "imu_mount": {
             "r_link_frame": None,
             "sensor_to_link_quat": None,
@@ -401,11 +417,17 @@ def host_main(args):
 def main():
     args = build_argparser().parse_args()
     rclpy.init()
+    viewer_proc = None
+    viewer_path = os.path.join(os.path.dirname(__file__), "imu_viewer.py")
+    if (not args.no_imu_viewer) and os.path.exists(viewer_path):
+        viewer_proc = subprocess.Popen([sys.executable, viewer_path])
     try:
         host_main(args)
     except KeyboardInterrupt:
         pass
     finally:
+        if viewer_proc is not None and viewer_proc.poll() is None:
+            viewer_proc.terminate()
         if rclpy.ok():
             rclpy.shutdown()
 

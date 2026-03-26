@@ -56,12 +56,15 @@ run_chrono_pendulum() {
     echo "2) Jetson mode (ROS input)"
     read -p "Enter number: " mode
 
+    json_file=$(select_json_file)
+    if [ -z "$json_file" ]; then return; fi
+
     if [ "$mode" == "1" ]; then
         echo "[INFO] chrono_pendulum (HOST mode)"
-        python3 $BASE_DIR/chrono_pendulum.py --mode host
+        python3 $BASE_DIR/chrono_pendulum.py --mode host --calibration-json "$json_file"
     elif [ "$mode" == "2" ]; then
         echo "[INFO] chrono_pendulum (JETSON mode)"
-        python3 $BASE_DIR/chrono_pendulum.py --mode jetson
+        python3 $BASE_DIR/chrono_pendulum.py --mode jetson --calibration-json "$json_file"
     else
         echo "[ERROR] Invalid selection"
     fi
@@ -70,22 +73,19 @@ run_chrono_pendulum() {
 run_system_identification() {
     echo "--------------------------------"
     echo "[INFO] System Identification 시작"
-    echo "[INFO] Calibration 실행"
+    echo "[INFO] host role로 adaptive calibration 실행"
     read -p "enter max-pwm (default 80): " input_max_pwm
     read -p "enter sweep-pwm-step (default 5): " input_sweep_step
     read -p "enter sweep-hold-sec (default 0.4): " input_sweep_hold
-    read -p "enter max-turn (default 1.2): " input_max_turn
 
     max_pwm="${input_max_pwm:-80}"
     sweep_step="${input_sweep_step:-5}"
     sweep_hold="${input_sweep_hold:-0.4}"
-    max_turn="${input_max_turn:-1.2}"
 
     common_args=(
         --max-calib-pwm "$max_pwm"
         --sweep-pwm-step "$sweep_step"
         --sweep-hold-sec "$sweep_hold"
-        --max-turns-one-side "$max_turn"
     )
 
     python3 $BASE_DIR/system_identification.py --role host "${common_args[@]}"
@@ -175,3 +175,25 @@ while true; do
             ;;
     esac
 done
+select_json_file() {
+    echo "--------------------------------" >&2
+    echo "[INFO] Parameter JSON 파일 선택" >&2
+    local files=("$BASE_DIR"/run_logs/*.json "$BASE_DIR"/rl_results/*.json)
+    local valid=()
+    for f in "${files[@]}"; do
+        [ -f "$f" ] && valid+=("$f")
+    done
+    if [ "${#valid[@]}" -eq 0 ]; then
+        echo "[ERROR] 선택 가능한 json 파일이 없습니다." >&2
+        return 1
+    fi
+    select file in "${valid[@]}"; do
+        if [ -n "$file" ]; then
+            echo "[INFO] Selected JSON: $file" >&2
+            echo "$file"
+            return 0
+        else
+            echo "[ERROR] 잘못된 선택" >&2
+        fi
+    done
+}

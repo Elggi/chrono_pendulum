@@ -35,15 +35,14 @@
 
 ### 핵심 로직
 - settle 구간에서 기준 yaw/encoder 확보
-- 양/음 방향으로 PWM을 단계적으로 증가
-- `max_turns_one_side` 도달 시 해당 방향 종료
+- 단일 방향으로 PWM을 단계적으로 증가
+- full rotation 2회 감지 시 sweep 정지
 - 종료 후 yaw 기준 복귀 제어
 
 ### CLI 주요 파라미터
 - `--max-calib-pwm`
 - `--sweep-pwm-step`
 - `--sweep-hold-sec`
-- `--max-turns-one-side`
 - `--return-kp`, `--return-timeout-sec`, `--return-tol-rad`
 
 ---
@@ -85,4 +84,3 @@
 - Host 통합 메뉴 엔트리 포인트
 - IMU viewer / calibration / RL / chrono / plot 실행
 - calibration role 및 safety 파라미터 입력 지원
-
