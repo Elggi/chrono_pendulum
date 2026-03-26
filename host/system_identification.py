@@ -10,6 +10,7 @@ import argparse
 import math
 import subprocess
 import sys
+import numpy as np
 
 import rclpy
 from rclpy.node import Node
@@ -33,6 +34,15 @@ def quat_to_yaw_rad(q):
     siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
     cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
     return math.atan2(siny_cosp, cosy_cosp)
+
+
+def quat_to_rotmat_ros(q):
+    w, x, y, z = float(q.w), float(q.x), float(q.y), float(q.z)
+    return np.array([
+        [1 - 2*(y*y + z*z),     2*(x*y - z*w),     2*(x*z + y*w)],
+        [    2*(x*y + z*w), 1 - 2*(x*x + z*z),     2*(y*z - x*w)],
+        [    2*(x*z - y*w),     2*(y*z + x*w), 1 - 2*(x*x + y*y)],
+    ], dtype=float)
 
 
 class CalibrationNode(Node):
@@ -147,11 +157,37 @@ class CalibrationNode(Node):
         abs_encoder_travel = 0.0
         yaw0 = None
         yaw_unwrapped = 0.0
-        last_yaw = None
         abs_yaw_travel = 0.0
+        imu_R0 = None
+        prev_tip_angle = None
         t_hist = []
         wz_hist = []
         ay_hist = []
+
+        def update_unwrapped_from_imu():
+            nonlocal yaw0, yaw_unwrapped, abs_yaw_travel, imu_R0, prev_tip_angle
+            if self.imu_msg is None:
+                return False
+            q = self.imu_msg.orientation
+            R_abs = quat_to_rotmat_ros(q)
+            if imu_R0 is None:
+                imu_R0 = R_abs.copy()
+                tip = np.array([0.0, -1.0, 0.0], dtype=float)
+                prev_tip_angle = math.atan2(tip[1], tip[0])
+                yaw0 = 0.0
+                return True
+            R_rel = imu_R0.T @ R_abs
+            tip = R_rel @ np.array([0.0, -1.0, 0.0], dtype=float)
+            ang = math.atan2(float(tip[1]), float(tip[0]))
+            dtheta = ang - prev_tip_angle
+            while dtheta > math.pi:
+                dtheta -= 2.0 * math.pi
+            while dtheta < -math.pi:
+                dtheta += 2.0 * math.pi
+            yaw_unwrapped += dtheta
+            abs_yaw_travel += abs(dtheta)
+            prev_tip_angle = ang
+            return True
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             wr = csv.writer(f)
             wr.writerow([
@@ -171,10 +207,7 @@ class CalibrationNode(Node):
                 self.publish_pwm(0.0)
                 rclpy.spin_once(self, timeout_sec=0.0)
                 snap = self._write_row(wr, "settle", 0.0)
-                yaw = quat_to_yaw_rad(self.imu_msg.orientation if self.imu_msg is not None else None)
-                if yaw is not None and yaw0 is None:
-                    yaw0 = yaw
-                    last_yaw = yaw
+                update_unwrapped_from_imu()
                 if snap["imu_wz"] is not None:
                     t_hist.append(time.time())
                     wz_hist.append(float(snap["imu_wz"]))
@@ -198,7 +231,6 @@ class CalibrationNode(Node):
             reached_turns = 0.0
             max_turns_observed = 0.0
             target_hit = False
-
             while cmd_mag <= self.args.max_calib_pwm and reached_turns < TARGET_FULL_TURNS:
                 cmd_mag_eff = cmd_mag
                 t_hold = time.time() + self.args.sweep_hold_sec
@@ -213,17 +245,7 @@ class CalibrationNode(Node):
                         abs_encoder_travel += abs(d_enc)
                     last_enc = snap["hw_enc"]
 
-                    yaw = quat_to_yaw_rad(self.imu_msg.orientation if self.imu_msg is not None else None)
-                    if yaw is not None and last_yaw is not None:
-                        dy = yaw - last_yaw
-                        while dy > math.pi:
-                            dy -= 2.0 * math.pi
-                        while dy < -math.pi:
-                            dy += 2.0 * math.pi
-                        yaw_unwrapped += dy
-                        abs_yaw_travel += abs(dy)
-                    if yaw is not None:
-                        last_yaw = yaw
+                    update_unwrapped_from_imu()
 
                     reached_turns = abs(yaw_unwrapped) / (2.0 * math.pi)
                     max_turns_observed = max(max_turns_observed, reached_turns)
@@ -241,17 +263,7 @@ class CalibrationNode(Node):
                 t_brake_until = time.time() + self.args.brake_timeout_sec
                 while time.time() < t_brake_until:
                     rclpy.spin_once(self, timeout_sec=0.0)
-                    yaw = quat_to_yaw_rad(self.imu_msg.orientation if self.imu_msg is not None else None)
-                    if yaw is not None and last_yaw is not None:
-                        dy = yaw - last_yaw
-                        while dy > math.pi:
-                            dy -= 2.0 * math.pi
-                        while dy < -math.pi:
-                            dy += 2.0 * math.pi
-                        yaw_unwrapped += dy
-                        abs_yaw_travel += abs(dy)
-                    if yaw is not None:
-                        last_yaw = yaw
+                    update_unwrapped_from_imu()
                     reached_turns = abs(yaw_unwrapped) / (2.0 * math.pi)
                     max_turns_observed = max(max_turns_observed, reached_turns)
                     omega = 0.0 if self.imu_msg is None else float(self.imu_msg.angular_velocity.z)
@@ -277,16 +289,7 @@ class CalibrationNode(Node):
                 t_until = time.time() + self.args.return_timeout_sec
                 while time.time() < t_until:
                     rclpy.spin_once(self, timeout_sec=0.0)
-                    yaw = quat_to_yaw_rad(self.imu_msg.orientation if self.imu_msg is not None else None)
-                    if yaw is not None and last_yaw is not None:
-                        dy = yaw - last_yaw
-                        while dy > math.pi:
-                            dy -= 2.0 * math.pi
-                        while dy < -math.pi:
-                            dy += 2.0 * math.pi
-                        yaw_unwrapped += dy
-                        abs_yaw_travel += abs(dy)
-                        last_yaw = yaw
+                    update_unwrapped_from_imu()
                     err = -yaw_unwrapped
                     if abs(err) <= self.args.return_tol_rad:
                         break
@@ -470,8 +473,11 @@ def main():
     finally:
         if viewer_proc is not None and viewer_proc.poll() is None:
             viewer_proc.terminate()
-        if rclpy.ok():
-            rclpy.shutdown()
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
