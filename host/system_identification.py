@@ -200,9 +200,6 @@ class CalibrationNode(Node):
                 cmd_mag_eff = cmd_mag
                 t_hold = time.time() + self.args.sweep_hold_sec
                 while time.time() < t_hold:
-                    remain_turns = TARGET_FULL_TURNS - reached_turns
-                    if remain_turns <= self.args.turn_slow_zone_turns:
-                        cmd_mag_eff = min(cmd_mag_eff, self.args.slow_max_pwm)
                     cmd = direction * cmd_mag_eff
                     self.publish_pwm(cmd)
                     rclpy.spin_once(self, timeout_sec=0.0)
@@ -357,8 +354,6 @@ def build_argparser():
     ap.add_argument("--sweep-pwm-step", type=float, default=10.0)
     ap.add_argument("--sweep-hold-sec", type=float, default=0.6)
     ap.add_argument("--dir-pause-sec", type=float, default=0.6)
-    ap.add_argument("--turn-slow-zone-turns", type=float, default=0.25)
-    ap.add_argument("--slow-max-pwm", type=float, default=30.0)
     ap.add_argument("--hard-stop-hold-sec", type=float, default=0.15)
     ap.add_argument("--return-to-origin", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--return-timeout-sec", type=float, default=20.0)

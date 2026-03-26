@@ -163,9 +163,17 @@ def ros_spin_thread(state, imu_topic, enc_topic):
     node = ViewerNode(state, imu_topic, enc_topic)
     try:
         rclpy.spin(node)
+    except Exception as exc:
+        # Ignore shutdown race during external termination.
+        if exc.__class__.__name__ != "ExternalShutdownException":
+            raise
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
 
 
 def make_box():
