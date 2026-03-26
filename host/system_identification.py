@@ -215,13 +215,14 @@ class CalibrationNode(Node):
         abs_yaw_travel = 0.0
         max_turns_observed = 0.0
         last_dtheta = 0.0
+        rev_index = 0
 
         t_hist, wz_hist, ay_tan_hist = [], [], []
         delay_est = DelayEstimator(max_delay_ms=self.args.delay_max_ms)
         cmd_delay_line = deque()
 
         def update_imu_kine():
-            nonlocal imu_R0, prev_tip_angle, yaw_unwrapped, abs_yaw_travel, max_turns_observed, last_dtheta
+            nonlocal imu_R0, prev_tip_angle, yaw_unwrapped, abs_yaw_travel, max_turns_observed, last_dtheta, rev_index
             if self.imu_msg is None:
                 return False
             q = self.imu_msg.orientation
@@ -231,6 +232,7 @@ class CalibrationNode(Node):
                 tip = np.array([0.0, -1.0, 0.0], dtype=float)
                 prev_tip_angle = math.atan2(tip[1], tip[0])
                 last_dtheta = 0.0
+                rev_index = 0
                 return True
 
             R_rel = imu_R0.T @ R_abs
@@ -246,6 +248,7 @@ class CalibrationNode(Node):
             abs_yaw_travel += abs(dtheta)
             prev_tip_angle = ang
             max_turns_observed = max(max_turns_observed, abs(yaw_unwrapped) / (2.0 * math.pi))
+            rev_index = int(math.floor(abs(yaw_unwrapped) / (2.0 * math.pi)))
 
             w = self.imu_msg.angular_velocity
             a = self.imu_msg.linear_acceleration
@@ -328,19 +331,16 @@ class CalibrationNode(Node):
                     step_io(label, cmd, apply_delay=False)
 
             def two_turn_segment(direction: float, seg_name: str):
-                nonlocal last_dtheta
                 cmd_mag = self.args.sweep_pwm_start
                 t_last_ramp = time.time()
                 t_timeout = time.time() + self.args.segment_timeout_sec
-                target_abs_travel = 2.0 * 2.0 * math.pi
-                seg_abs_travel = 0.0
-                while seg_abs_travel < target_abs_travel and time.time() < t_timeout:
+                rev_start = rev_index
+                rev_target = rev_start + 2
+                while rev_index < rev_target and time.time() < t_timeout:
                     if time.time() - t_last_ramp >= self.args.sweep_hold_sec:
                         cmd_mag = min(cmd_mag + self.args.sweep_pwm_step, self.args.max_calib_pwm)
                         t_last_ramp = time.time()
-                    cmd_raw = direction * cmd_mag
-                    step_io(seg_name, cmd_raw)
-                    seg_abs_travel += abs(last_dtheta)
+                    step_io(seg_name, direction * cmd_mag)
                 for _ in range(max(3, int(0.15 * self.args.loop_hz))):
                     step_io(f"{seg_name}_hold_zero", 0.0, apply_delay=False)
                 brake_until_stop(f"{seg_name}_brake")
@@ -401,6 +401,7 @@ class CalibrationNode(Node):
             "turns_net_encoder": None if start_enc is None else (end_enc - start_enc) / max(self.args.counts_per_rev, 1e-9),
             "turns_abs_imu": turns_abs_imu,
             "turns_peak_observed": max_turns_observed,
+            "revolutions_detected": rev_index,
             "counts_per_revolution_est": cpr_estimate,
             "moment_arm_r_est_m": r_estimate,
             "delay_est_ms": 1e3 * delay_est.delay_s,
@@ -504,11 +505,20 @@ def main():
     viewer_proc = None
     viewer_path = os.path.join(os.path.dirname(__file__), "imu_viewer.py")
     if (not args.no_imu_viewer) and os.path.exists(viewer_path):
-        viewer_proc = subprocess.Popen([
-            sys.executable, viewer_path,
-            "--imu_topic", args.imu_topic,
-            "--enc_topic", args.hw_enc_topic,
-        ])
+        preflight = subprocess.run(
+            [sys.executable, "-c", "import matplotlib.pyplot"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if preflight.returncode != 0:
+            print("[WARN] imu_viewer skipped: matplotlib/numpy runtime mismatch. run with --no-imu-viewer or fix local python env.")
+        else:
+            viewer_proc = subprocess.Popen([
+                sys.executable, viewer_path,
+                "--imu_topic", args.imu_topic,
+                "--enc_topic", args.hw_enc_topic,
+            ])
     try:
         host_main(args)
     except KeyboardInterrupt:
