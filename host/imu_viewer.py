@@ -344,6 +344,13 @@ def main():
 
         ax2d.legend(loc="lower left", fontsize=9)
 
+
+    def on_key(event):
+        if event is not None and event.key is not None and event.key.lower() == "q":
+            plt.close(fig)
+
+    fig.canvas.mpl_connect("key_press_event", on_key)
+
     ani = FuncAnimation(fig, update, interval=int(1000 / max(args.fps, 1)), cache_frame_data=False)
     plt.show()
 
