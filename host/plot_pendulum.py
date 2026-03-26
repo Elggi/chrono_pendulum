@@ -5,6 +5,7 @@ import os
 import json
 import argparse
 import csv
+import math
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -43,6 +44,50 @@ def moving_average(x: np.ndarray, win: int):
 
 def derive_theta_from_encoder(enc, counts_per_rev, sign=1.0, offset=0.0):
     return sign * (2.0 * np.pi / counts_per_rev) * (enc - enc[0]) + offset
+
+
+def derive_theta_from_imu_quat(qx, qy, qz, qw):
+    n = len(qw)
+    theta = np.full(n, np.nan, dtype=float)
+    valid0 = np.isfinite(qw) & np.isfinite(qx) & np.isfinite(qy) & np.isfinite(qz)
+    idx = np.where(valid0)[0]
+    if len(idx) == 0:
+        return theta
+
+    def rot(w, x, y, z):
+        return np.array([
+            [1 - 2*(y*y + z*z),     2*(x*y - z*w),     2*(x*z + y*w)],
+            [    2*(x*y + z*w), 1 - 2*(x*x + z*z),     2*(y*z - x*w)],
+            [    2*(x*z - y*w),     2*(y*z + x*w), 1 - 2*(x*x + y*y)],
+        ], dtype=float)
+
+    i0 = int(idx[0])
+    R0 = rot(qw[i0], qx[i0], qy[i0], qz[i0])
+    prev = math.atan2(-1.0, 0.0)
+    unwrapped = 0.0
+    for i in range(i0, n):
+        if not valid0[i]:
+            continue
+        R = rot(qw[i], qx[i], qy[i], qz[i])
+        tip = (R0.T @ R) @ np.array([0.0, -1.0, 0.0], dtype=float)
+        ang = math.atan2(float(tip[1]), float(tip[0]))
+        d = ang - prev
+        while d > np.pi:
+            d -= 2.0 * np.pi
+        while d < -np.pi:
+            d += 2.0 * np.pi
+        unwrapped += d
+        prev = ang
+        theta[i] = unwrapped
+
+    # forward-fill leading/trailing NaNs for plotting continuity
+    valid = np.where(np.isfinite(theta))[0]
+    if len(valid) > 0:
+        theta[:valid[0]] = theta[valid[0]]
+        for i in range(1, len(valid)):
+            theta[valid[i-1]:valid[i]] = theta[valid[i-1]]
+        theta[valid[-1]:] = theta[valid[-1]]
+    return theta
 
 
 class SimpleFrame:
@@ -122,11 +167,11 @@ def main():
         t = np.arange(n, dtype=float)
 
     n = len(t)
-    theta_sim = col_any(df, ["theta"], n)
-    omega_sim = col_any(df, ["omega"], n)
-    alpha_sim = col_any(df, ["alpha"], n)
+    theta_sim = col_any(df, ["theta", "sim_theta"], n)
+    omega_sim = col_any(df, ["omega", "sim_omega"], n)
+    alpha_sim = col_any(df, ["alpha", "sim_alpha"], n)
     cmd_u = col_any(df, ["cmd_u_raw", "cmd_u"], n)
-    cmd_used = col_any(df, ["cmd_u_used", "cmd_u"], n)
+    cmd_used = col_any(df, ["cmd_u_used", "cmd_u", "hw_pwm"], n)
     hw_pwm = col_any(df, ["hw_pwm"], n)
     enc = col_any(df, ["hw_enc"], n)
     ina_v = col_any(df, ["bus_v"], n)
@@ -136,6 +181,23 @@ def main():
     i_pred = col_any(df, ["i_pred"], n)
     p_pred = col_any(df, ["p_pred"], n)
     delay_ms = col_any(df, ["delay_ms"], n)
+
+    if not np.isfinite(theta_sim).any() and all(k in df.columns for k in ["imu_qx", "imu_qy", "imu_qz", "imu_qw"]):
+        qx = col_to_numpy(df, "imu_qx")
+        qy = col_to_numpy(df, "imu_qy")
+        qz = col_to_numpy(df, "imu_qz")
+        qw = col_to_numpy(df, "imu_qw")
+        theta_sim = derive_theta_from_imu_quat(qx, qy, qz, qw)
+
+    if not np.isfinite(omega_sim).any() and "imu_wz" in df.columns:
+        omega_sim = col_to_numpy(df, "imu_wz")
+
+    if not np.isfinite(alpha_sim).any() and np.isfinite(omega_sim).any():
+        dt = np.diff(t, prepend=t[0])
+        if len(dt) > 1:
+            dt[0] = dt[1]
+        dt[dt <= 0] = np.median(dt[dt > 0]) if np.any(dt > 0) else 0.01
+        alpha_sim = np.gradient(omega_sim, dt)
 
     theta_real = None
     omega_real = None
