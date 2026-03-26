@@ -214,13 +214,14 @@ class CalibrationNode(Node):
         yaw_unwrapped = 0.0
         abs_yaw_travel = 0.0
         max_turns_observed = 0.0
+        last_dtheta = 0.0
 
         t_hist, wz_hist, ay_tan_hist = [], [], []
         delay_est = DelayEstimator(max_delay_ms=self.args.delay_max_ms)
         cmd_delay_line = deque()
 
         def update_imu_kine():
-            nonlocal imu_R0, prev_tip_angle, yaw_unwrapped, abs_yaw_travel, max_turns_observed
+            nonlocal imu_R0, prev_tip_angle, yaw_unwrapped, abs_yaw_travel, max_turns_observed, last_dtheta
             if self.imu_msg is None:
                 return False
             q = self.imu_msg.orientation
@@ -229,6 +230,7 @@ class CalibrationNode(Node):
                 imu_R0 = R_abs.copy()
                 tip = np.array([0.0, -1.0, 0.0], dtype=float)
                 prev_tip_angle = math.atan2(tip[1], tip[0])
+                last_dtheta = 0.0
                 return True
 
             R_rel = imu_R0.T @ R_abs
@@ -239,6 +241,7 @@ class CalibrationNode(Node):
                 dtheta -= 2.0 * math.pi
             while dtheta < -math.pi:
                 dtheta += 2.0 * math.pi
+            last_dtheta = dtheta
             yaw_unwrapped += dtheta
             abs_yaw_travel += abs(dtheta)
             prev_tip_angle = ang
@@ -254,9 +257,9 @@ class CalibrationNode(Node):
             ay_tan_hist.append(ay_tan)
             return True
 
-        def command_with_delay_comp(cmd_raw: float):
+        def command_with_delay_comp(cmd_raw: float, apply_delay: bool = True):
             t_now = time.time()
-            delay_s = delay_est.delay_s
+            delay_s = delay_est.delay_s if apply_delay else 0.0
             cmd_delay_line.append((t_now, float(cmd_raw)))
             while cmd_delay_line and cmd_delay_line[0][0] < t_now - max(2.0, 4.0 * self.args.delay_max_ms * 1e-3):
                 cmd_delay_line.popleft()
@@ -268,10 +271,10 @@ class CalibrationNode(Node):
                     break
             return cmd_used, 1e3 * delay_s
 
-        def step_io(label: str, cmd_raw: float, loop_sleep: bool = True):
+        def step_io(label: str, cmd_raw: float, loop_sleep: bool = True, apply_delay: bool = True):
             nonlocal start_enc, last_enc, net_encoder_delta, abs_encoder_travel
             rclpy.spin_once(self, timeout_sec=0.0)
-            cmd_used, delay_ms = command_with_delay_comp(cmd_raw)
+            cmd_used, delay_ms = command_with_delay_comp(cmd_raw, apply_delay=apply_delay)
             self.publish_pwm(cmd_used)
             snap = self._write_row(wr, label, cmd_raw, cmd_used, delay_ms)
             if last_enc is not None:
@@ -314,22 +317,33 @@ class CalibrationNode(Node):
                 self.send_status(f"{self.args.role}:adaptive_calibration:imu_missing_abort")
                 raise RuntimeError("IMU orientation unavailable; aborting adaptive calibration for safety.")
 
+            def brake_until_stop(label: str, timeout_sec: float = 2.5):
+                t_end = time.time() + timeout_sec
+                while time.time() < t_end:
+                    omega = 0.0 if self.imu_msg is None else float(self.imu_msg.angular_velocity.z)
+                    if abs(omega) <= self.args.brake_omega_stop_thresh:
+                        break
+                    brake_pwm = max(self.args.brake_min_pwm, min(self.args.brake_kp * abs(omega), self.args.max_calib_pwm))
+                    cmd = -brake_pwm if omega > 0 else brake_pwm
+                    step_io(label, cmd, apply_delay=False)
+
             def two_turn_segment(direction: float, seg_name: str):
-                nonlocal yaw_unwrapped
-                yaw_start = yaw_unwrapped
+                nonlocal last_dtheta
                 cmd_mag = self.args.sweep_pwm_start
                 t_last_ramp = time.time()
                 t_timeout = time.time() + self.args.segment_timeout_sec
-                target = 2.0 * 2.0 * math.pi
-                while abs(yaw_unwrapped - yaw_start) < target and time.time() < t_timeout:
+                target_abs_travel = 2.0 * 2.0 * math.pi
+                seg_abs_travel = 0.0
+                while seg_abs_travel < target_abs_travel and time.time() < t_timeout:
                     if time.time() - t_last_ramp >= self.args.sweep_hold_sec:
                         cmd_mag = min(cmd_mag + self.args.sweep_pwm_step, self.args.max_calib_pwm)
                         t_last_ramp = time.time()
                     cmd_raw = direction * cmd_mag
                     step_io(seg_name, cmd_raw)
-                # command zero immediately once target reached to prevent post-target runaway.
-                for _ in range(max(2, int(0.10 * self.args.loop_hz))):
-                    step_io(f"{seg_name}_hold_zero", 0.0)
+                    seg_abs_travel += abs(last_dtheta)
+                for _ in range(max(3, int(0.15 * self.args.loop_hz))):
+                    step_io(f"{seg_name}_hold_zero", 0.0, apply_delay=False)
+                brake_until_stop(f"{seg_name}_brake")
 
             two_turn_segment(1.0, "forward_2turn")
 
@@ -338,15 +352,6 @@ class CalibrationNode(Node):
                 step_io("dir_pause", 0.0)
 
             two_turn_segment(-1.0, "reverse_2turn")
-
-            t_brake = time.time() + self.args.brake_timeout_sec
-            while time.time() < t_brake:
-                omega = 0.0 if self.imu_msg is None else float(self.imu_msg.angular_velocity.z)
-                if abs(omega) <= self.args.brake_omega_stop_thresh:
-                    break
-                brake_pwm = max(self.args.brake_min_pwm, min(self.args.brake_kp * abs(omega), self.args.max_calib_pwm))
-                cmd = -brake_pwm if omega > 0 else brake_pwm
-                step_io("brake_to_stop", cmd)
 
             self.publish_pwm(0.0)
             time.sleep(self.args.hard_stop_hold_sec)
@@ -360,11 +365,11 @@ class CalibrationNode(Node):
                         break
                     cmd_mag = max(self.args.return_min_pwm, min(self.args.return_kp * abs(err), self.args.max_calib_pwm))
                     cmd = cmd_mag if err > 0 else -cmd_mag
-                    step_io("return_to_origin", cmd)
+                    step_io("return_to_origin", cmd, apply_delay=False)
                 self.send_status(f"{self.args.role}:return_to_origin:done")
 
             for _ in range(5):
-                step_io("final_zero", 0.0, loop_sleep=False)
+                step_io("final_zero", 0.0, loop_sleep=False, apply_delay=False)
                 time.sleep(0.05)
 
         print()
