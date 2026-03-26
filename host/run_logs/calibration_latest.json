@@ -1,0 +1,13 @@
+{
+  "created_at_utc": "2026-03-26T23:34:29Z",
+  "user_pwm_limit": 80.0,
+  "pwm_step": 1.0,
+  "detected_full_rotations": 1,
+  "extra_rotations_after_stop": 2,
+  "reverse_turns_done": 0,
+  "mean_cpr": 512.4,
+  "r_from_imu_orientation": 0.5957987850521748,
+  "encoder_start": 0.0,
+  "encoder_end": -1995.0,
+  "yaw_unwrapped_rad": 11.104025134469413
+}
