@@ -4,18 +4,8 @@
 # 환경 세팅
 # ======================================================
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_WS_SETUP="$SCRIPT_DIR/../ros2_ws/install/setup.bash"
-WS_SETUP="${WS_SETUP:-$DEFAULT_WS_SETUP}"
 
 source /opt/ros/humble/setup.bash
-if [ ! -f "$WS_SETUP" ]; then
-    echo "[ERROR] Workspace setup not found: $WS_SETUP"
-    echo "[HINT] Build the ROS workspace first, then source it:"
-    echo "       cd \"$SCRIPT_DIR/../ros2_ws\" && colcon build"
-    echo "       source \"$SCRIPT_DIR/../ros2_ws/install/setup.bash\""
-    exit 1
-fi
-source "$WS_SETUP"
 export ROS_DOMAIN_ID=7
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
@@ -80,7 +70,7 @@ run_chrono_pendulum() {
 run_system_identification() {
     echo "--------------------------------"
     echo "[INFO] System Identification 시작"
-    echo "[INFO] host role로 adaptive calibration 실행"
+    echo "[INFO] Calibration 실행"
     read -p "enter max-pwm (default 80): " input_max_pwm
     read -p "enter sweep-pwm-step (default 5): " input_sweep_step
     read -p "enter sweep-hold-sec (default 0.4): " input_sweep_hold

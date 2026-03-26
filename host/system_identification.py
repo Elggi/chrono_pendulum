@@ -360,7 +360,7 @@ def host_main(args):
     node = CalibrationNode(args)
     host_csv = make_labeled_path(args.log_dir, "calibration_", "host", ".csv")
     node.send_status("host:adaptive_calibration:started")
-    print("[INFO] host adaptive calibration 시작")
+    print("[INFO] Calibration 시작")
     host_summary = node.run_protocol(host_csv)
     node.send_status("host:protocol:finished")
 
