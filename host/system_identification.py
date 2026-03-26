@@ -196,6 +196,11 @@ class CalibrationNode(Node):
             cmd_mag = self.args.sweep_pwm_start
             step_label = "sweep_until_2turn"
             reached_turns = 0.0
+<<<<<<< codex/update-calibration-host-terminal-output-55shfz
+            max_turns_observed = 0.0
+            target_hit = False
+=======
+>>>>>>> host-fix-pendulum
             while cmd_mag <= self.args.max_calib_pwm and reached_turns < TARGET_FULL_TURNS:
                 cmd_mag_eff = cmd_mag
                 t_hold = time.time() + self.args.sweep_hold_sec
@@ -223,30 +228,68 @@ class CalibrationNode(Node):
                         last_yaw = yaw
 
                     reached_turns = abs(yaw_unwrapped) / (2.0 * math.pi)
+                    max_turns_observed = max(max_turns_observed, reached_turns)
                     terminal_status_line(self.monitor_text(f"{step_label}:{reached_turns:.2f}turn", cmd))
                     if reached_turns >= TARGET_FULL_TURNS:
-                        self.publish_pwm(0.0)
-                        time.sleep(self.args.hard_stop_hold_sec)
+                        target_hit = True
                         break
                     time.sleep(1.0 / max(self.args.loop_hz, 1.0))
+                if target_hit:
+                    break
                 cmd_mag += self.args.sweep_pwm_step
-            self.publish_pwm(0.0)
-            time.sleep(self.args.dir_pause_sec)
 
-            # Return to origin using yaw priority.
+            # Active braking to reduce inertia-driven overshoot.
+            if target_hit:
+                t_brake_until = time.time() + self.args.brake_timeout_sec
+                while time.time() < t_brake_until:
+                    rclpy.spin_once(self, timeout_sec=0.0)
+                    yaw = quat_to_yaw_rad(self.imu_msg.orientation if self.imu_msg is not None else None)
+                    if yaw is not None and last_yaw is not None:
+                        dy = yaw - last_yaw
+                        while dy > math.pi:
+                            dy -= 2.0 * math.pi
+                        while dy < -math.pi:
+                            dy += 2.0 * math.pi
+                        yaw_unwrapped += dy
+                        abs_yaw_travel += abs(dy)
+                    if yaw is not None:
+                        last_yaw = yaw
+                    reached_turns = abs(yaw_unwrapped) / (2.0 * math.pi)
+                    max_turns_observed = max(max_turns_observed, reached_turns)
+                    omega = 0.0 if self.imu_msg is None else float(self.imu_msg.angular_velocity.z)
+                    if abs(omega) <= self.args.brake_omega_stop_thresh:
+                        break
+                    brake_pwm = max(self.args.brake_min_pwm, min(self.args.brake_kp * abs(omega), self.args.max_calib_pwm))
+                    cmd = -brake_pwm if omega > 0 else brake_pwm
+                    self.publish_pwm(cmd)
+                    snap = self._write_row(wr, "brake_to_stop", cmd)
+                    if last_enc is not None:
+                        d_enc = snap["hw_enc"] - last_enc
+                        net_encoder_delta += d_enc
+                        abs_encoder_travel += abs(d_enc)
+                    last_enc = snap["hw_enc"]
+                    terminal_status_line(self.monitor_text(f"brake:{reached_turns:.2f}turn", cmd))
+                    time.sleep(1.0 / max(self.args.loop_hz, 1.0))
+            self.publish_pwm(0.0)
+            time.sleep(self.args.hard_stop_hold_sec)
+
+            # Return to origin using unwrapped yaw error (supports multi-turn unwind).
             if self.args.return_to_origin and yaw0 is not None:
                 self.send_status(f"{self.args.role}:return_to_origin:start")
                 t_until = time.time() + self.args.return_timeout_sec
                 while time.time() < t_until:
                     rclpy.spin_once(self, timeout_sec=0.0)
                     yaw = quat_to_yaw_rad(self.imu_msg.orientation if self.imu_msg is not None else None)
-                    if yaw is None:
-                        break
-                    err = yaw0 - yaw
-                    while err > math.pi:
-                        err -= 2.0 * math.pi
-                    while err < -math.pi:
-                        err += 2.0 * math.pi
+                    if yaw is not None and last_yaw is not None:
+                        dy = yaw - last_yaw
+                        while dy > math.pi:
+                            dy -= 2.0 * math.pi
+                        while dy < -math.pi:
+                            dy += 2.0 * math.pi
+                        yaw_unwrapped += dy
+                        abs_yaw_travel += abs(dy)
+                        last_yaw = yaw
+                    err = -yaw_unwrapped
                     if abs(err) <= self.args.return_tol_rad:
                         break
                     cmd_mag = max(self.args.return_min_pwm, min(self.args.return_kp * abs(err), self.args.max_calib_pwm))
@@ -310,6 +353,7 @@ class CalibrationNode(Node):
             "encoder_abs_travel": abs_encoder_travel,
             "turns_net_encoder": turns_net_enc,
             "turns_abs_imu": turns_abs_imu,
+            "turns_peak_observed": max_turns_observed if 'max_turns_observed' in locals() else turns_abs_imu,
             "counts_per_revolution_est": cpr_estimate,
             "moment_arm_r_est_m": r_estimate,
         }
@@ -355,6 +399,10 @@ def build_argparser():
     ap.add_argument("--sweep-hold-sec", type=float, default=0.6)
     ap.add_argument("--dir-pause-sec", type=float, default=0.6)
     ap.add_argument("--hard-stop-hold-sec", type=float, default=0.15)
+    ap.add_argument("--brake-kp", type=float, default=22.0)
+    ap.add_argument("--brake-min-pwm", type=float, default=25.0)
+    ap.add_argument("--brake-timeout-sec", type=float, default=3.0)
+    ap.add_argument("--brake-omega-stop-thresh", type=float, default=0.25)
     ap.add_argument("--return-to-origin", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--return-timeout-sec", type=float, default=20.0)
     ap.add_argument("--return-tol-rad", type=float, default=0.08)
@@ -374,6 +422,7 @@ def host_main(args):
     print(f"[CALIB] CPR_est={host_summary.get('counts_per_revolution_est')}")
     print(f"[CALIB] delay_est_ms=0.0 (handled online in chrono_pendulum)")
     print(f"[CALIB] r_est(m)={host_summary.get('moment_arm_r_est_m')}")
+    print(f"[CALIB] turns_peak_observed={host_summary.get('turns_peak_observed')}")
 
     result = {
         "version": 1,
