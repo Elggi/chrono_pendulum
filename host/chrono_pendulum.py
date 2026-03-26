@@ -825,8 +825,9 @@ class PendulumModel:
         self.link = ch.ChBody()
         self.link.SetMass(cfg.link_mass)
         izz_com = (1.0 / 12.0) * cfg.link_mass * (cfg.link_L ** 2 + cfg.link_W ** 2)
-        izz_pivot = izz_com + cfg.link_mass * (cfg.link_L / 2.0) ** 2
-        self.link.SetInertiaXX(ch.ChVector3d(1e-5, 1e-5, izz_pivot))
+        self.link.SetInertiaXX(ch.ChVector3d(1e-5, 1e-5, izz_com))
+        # Body reference frame is at motor pivot; COM is at link center.
+        self.link.SetFrameCOMToRef(ch.ChFramed(ch.ChVector3d(0.0, -cfg.link_L / 2.0, 0.0), ch.QUNIT))
         self.link.SetPos(ch.ChVector3d(0.0, 0.0, cfg.motor_length / 2.0))
         self.link.SetRot(ch.QuatFromAngleZ(math.radians(cfg.theta0_deg)))
         self.sys.Add(self.link)
@@ -1070,6 +1071,11 @@ def apply_calibration_json(cfg: BridgeConfig, json_path: str | None):
         calib = json.load(f)
 
     model_init = calib.get("model_init", {})
+    if not model_init and "best_params" in calib:
+        # RL_fitting result schema compatibility
+        model_init = calib.get("best_params", {})
+        if "Rm" in model_init and "R" not in model_init:
+            model_init["R"] = model_init["Rm"]
     delay = calib.get("delay", {})
 
     cfg.J_init = float(model_init.get("J", cfg.J_init))
