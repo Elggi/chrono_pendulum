@@ -1,6 +1,5 @@
 # Chrono Pendulum: Sim2Real Digital Twin for a 1-DOF Rotary Pendulum
 
-## Abstract (논문 초록 수준 요약)
 본 프로젝트는 **1-DOF 회전 진자(rotary pendulum)**를 대상으로, 실제 하드웨어(Arduino+IMU+INA219)와 물리 시뮬레이터(PyChrono)를 ROS2 기반으로 결합한 **Sim2Real 디지털 트윈 프레임워크**를 제안한다. 시스템은 (1) 실시간 제어 입력/센서 스트리밍, (2) 적응형 캘리브레이션(adaptive calibration), (3) 온라인 파라미터 피팅(EKF-like), (4) 오프라인 강화학습 기반 파인튜닝(PPO/SAC)으로 구성된다. 캘리브레이션 단계에서는 고정 PWM 스크립트 대신 IMU yaw/엔코더 피드백 기반 sweep를 수행해 안전 제약(회전수/입력 제한)을 유지하면서 CPR(counts per revolution)과 동역학 초기 파라미터를 추정한다. 결과적으로 본 스택은 단순 시뮬레이션 재현을 넘어, 하드웨어 변동·지연·마찰·센서 노이즈를 포함한 **현실 적합형(sim-to-real consistent) 모델 업데이트**를 가능하게 한다.
 
 ---
@@ -16,7 +15,7 @@
               ▼
 [ROS2 topics]
               │
-              ├─ host/system_identification.py
+              ├─ host/calibration.py
               │    (adaptive calibration, CPR estimate, safety return)
               │
               ├─ host/chrono_pendulum.py
@@ -102,4 +101,3 @@ N_{turn} = \max\left(\frac{|\Delta\psi_{imu}|}{2\pi},\;\frac{|\Delta enc|}{CPR_{
 - `host/README.md`: Host 파이프라인 상세 동작
 - `jetson/README.md`: Jetson 제어/센서/노드 운영 상세
 - `motor_controller.ino`, `ros2_ws/`는 본 상위 README에서 상세 생략 (요청사항 반영)
-
