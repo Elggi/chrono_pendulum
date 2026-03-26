@@ -1070,6 +1070,11 @@ def apply_calibration_json(cfg: BridgeConfig, json_path: str | None):
         calib = json.load(f)
 
     model_init = calib.get("model_init", {})
+    if not model_init and "best_params" in calib:
+        # RL_fitting result schema compatibility
+        model_init = calib.get("best_params", {})
+        if "Rm" in model_init and "R" not in model_init:
+            model_init["R"] = model_init["Rm"]
     delay = calib.get("delay", {})
 
     cfg.J_init = float(model_init.get("J", cfg.J_init))
