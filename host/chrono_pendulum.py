@@ -822,12 +822,17 @@ class PendulumModel:
             ),
         )
 
-        self.link = ch.ChBody()
+        self.link = ch.ChBodyAuxRef() if hasattr(ch, "ChBodyAuxRef") else ch.ChBody()
         self.link.SetMass(cfg.link_mass)
         izz_com = (1.0 / 12.0) * cfg.link_mass * (cfg.link_L ** 2 + cfg.link_W ** 2)
-        self.link.SetInertiaXX(ch.ChVector3d(1e-5, 1e-5, izz_com))
+        izz_ref = izz_com
+        if not hasattr(self.link, "SetFrameCOMToRef"):
+            # 구버전 Chrono 호환: COM 오프셋 API가 없으면 평행축 정리로 ref 기준 관성을 사용.
+            izz_ref = izz_com + cfg.link_mass * (cfg.link_L * 0.5) ** 2
+        self.link.SetInertiaXX(ch.ChVector3d(1e-5, 1e-5, izz_ref))
         # Body reference frame is at motor pivot; COM is at link center.
-        self.link.SetFrameCOMToRef(ch.ChFramed(ch.ChVector3d(0.0, -cfg.link_L / 2.0, 0.0), ch.QUNIT))
+        if hasattr(self.link, "SetFrameCOMToRef"):
+            self.link.SetFrameCOMToRef(ch.ChFramed(ch.ChVector3d(0.0, -cfg.link_L / 2.0, 0.0), ch.QUNIT))
         self.link.SetPos(ch.ChVector3d(0.0, 0.0, cfg.motor_length / 2.0))
         self.link.SetRot(ch.QuatFromAngleZ(math.radians(cfg.theta0_deg)))
         self.sys.Add(self.link)

@@ -39,7 +39,7 @@ def moving_average(x: np.ndarray, win: int):
     pad = win // 2
     xpad = np.pad(x, (pad, pad), mode="edge")
     y = np.convolve(xpad, kernel, mode="valid")
-    return y[:len(x)]
+    return y[: len(x)]
 
 
 def derive_theta_from_encoder(enc, counts_per_rev, sign=1.0, offset=0.0):
@@ -55,11 +55,14 @@ def derive_theta_from_imu_quat(qx, qy, qz, qw):
         return theta
 
     def rot(w, x, y, z):
-        return np.array([
-            [1 - 2*(y*y + z*z),     2*(x*y - z*w),     2*(x*z + y*w)],
-            [    2*(x*y + z*w), 1 - 2*(x*x + z*z),     2*(y*z - x*w)],
-            [    2*(x*z - y*w),     2*(y*z + x*w), 1 - 2*(x*x + y*y)],
-        ], dtype=float)
+        return np.array(
+            [
+                [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+            ],
+            dtype=float,
+        )
 
     i0 = int(idx[0])
     R0 = rot(qw[i0], qx[i0], qy[i0], qz[i0])
@@ -80,13 +83,12 @@ def derive_theta_from_imu_quat(qx, qy, qz, qw):
         prev = ang
         theta[i] = unwrapped
 
-    # forward-fill leading/trailing NaNs for plotting continuity
     valid = np.where(np.isfinite(theta))[0]
     if len(valid) > 0:
-        theta[:valid[0]] = theta[valid[0]]
+        theta[: valid[0]] = theta[valid[0]]
         for i in range(1, len(valid)):
-            theta[valid[i-1]:valid[i]] = theta[valid[i-1]]
-        theta[valid[-1]:] = theta[valid[-1]]
+            theta[valid[i - 1] : valid[i]] = theta[valid[i - 1]]
+        theta[valid[-1] :] = theta[valid[-1]]
     return theta
 
 
@@ -138,19 +140,71 @@ def col_any(df, keys, n_default=None):
     return np.full(n_default, np.nan, dtype=float)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--csv", default=None)
-    ap.add_argument("--dir", default="./run_logs")
-    ap.add_argument("--counts-per-revolution", type=float, default=None)
-    ap.add_argument("--theta-sign", type=float, default=1.0)
-    ap.add_argument("--theta-offset", type=float, default=0.0)
-    ap.add_argument("--alpha-smooth", type=int, default=5)
-    ap.add_argument("--apply-cmd-delay-from-meta", action="store_true")
-    args = ap.parse_args()
+def is_calibration_dataframe(df):
+    calibration_cols = {"theta_rad", "omega_rad_s", "alpha_rad_s2", "mean_cpr_running", "r_running"}
+    return calibration_cols.issubset(set(df.columns))
 
-    csv_path = args.csv if args.csv is not None else find_latest_csv(args.dir)
-    df = load_csv_frame(csv_path)
+
+def plot_calibration(df, csv_path: str):
+    t = col_any(df, ["time_sec", "sim_time", "wall_time"])
+    theta = col_any(df, ["theta_rad", "theta"])
+    omega = col_any(df, ["omega_rad_s", "omega", "imu_wz"])
+    alpha = col_any(df, ["alpha_rad_s2", "alpha"])
+    delay_ms = col_any(df, ["delay_ms"])
+    mean_cpr = col_any(df, ["mean_cpr_running"])
+    r_running = col_any(df, ["r_running"])
+
+    print(f"csv  : {csv_path}")
+    print("mode : calibration")
+
+    fig, axes = plt.subplots(3, 2, figsize=(16, 10), num="Calibration Data Dashboard")
+    ax = axes.ravel()
+
+    ax[0].plot(t, theta, label="theta")
+    ax[0].grid(True)
+    ax[0].legend()
+    ax[0].set_xlabel("time [s]")
+    ax[0].set_ylabel("rad")
+    ax[0].set_title("Theta")
+
+    ax[1].plot(t, omega, label="omega", color="tab:orange")
+    ax[1].grid(True)
+    ax[1].legend()
+    ax[1].set_xlabel("time [s]")
+    ax[1].set_ylabel("rad/s")
+    ax[1].set_title("Omega")
+
+    ax[2].plot(t, alpha, label="alpha", color="tab:green")
+    ax[2].grid(True)
+    ax[2].legend()
+    ax[2].set_xlabel("time [s]")
+    ax[2].set_ylabel("rad/s²")
+    ax[2].set_title("Alpha")
+
+    ax[3].plot(t, delay_ms, label="delay_ms", color="tab:red")
+    ax[3].grid(True)
+    ax[3].legend()
+    ax[3].set_xlabel("time [s]")
+    ax[3].set_ylabel("ms")
+    ax[3].set_title("Delay")
+
+    ax[4].plot(t, mean_cpr, label="mean CPR over time", color="tab:purple")
+    ax[4].grid(True)
+    ax[4].legend()
+    ax[4].set_xlabel("time [s]")
+    ax[4].set_title("Mean CPR (running)")
+
+    ax[5].plot(t, r_running, label="r over time", color="tab:brown")
+    ax[5].grid(True)
+    ax[5].legend()
+    ax[5].set_xlabel("time [s]")
+    ax[5].set_title("r (running)")
+
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_simulation(df, csv_path: str, args):
     meta = load_meta_if_exists(csv_path)
 
     cpr = args.counts_per_revolution
@@ -174,11 +228,8 @@ def main():
     cmd_used = col_any(df, ["cmd_u_used", "cmd_u", "hw_pwm"], n)
     hw_pwm = col_any(df, ["hw_pwm"], n)
     enc = col_any(df, ["hw_enc"], n)
-    ina_v = col_any(df, ["bus_v"], n)
     ina_i = col_any(df, ["current_A", "current_ma"], n)
     ina_p = col_any(df, ["power_W", "power_mw"], n)
-    v_pred = col_any(df, ["v_pred"], n)
-    i_pred = col_any(df, ["i_pred"], n)
     p_pred = col_any(df, ["p_pred"], n)
     delay_ms = col_any(df, ["delay_ms"], n)
 
@@ -213,32 +264,12 @@ def main():
         alpha_real = np.gradient(omega_real, dt)
         alpha_real = moving_average(alpha_real, args.alpha_smooth)
 
-    if "inst_cost" in df.columns:
-        inst_cost = col_to_numpy(df, "inst_cost")
-        if not np.isfinite(inst_cost).any():
-            best_row = None
-        else:
-            best_idx = int(np.nanargmin(inst_cost))
-            best_row = df.iloc[best_idx] if pd is not None else df.row(best_idx)
-        if best_row is not None:
-            print("\n=== Best calibration point ===")
-            print(f"time      : {best_row['sim_time']:.6f} s")
-            print(f"inst_cost : {best_row['inst_cost']:.6e}")
-            print(f"delay_ms  : {best_row['delay_ms']:.3f}")
-            print(f"J         : {best_row['J_est']:.6f}")
-            print(f"b         : {best_row['b_est']:.6f}")
-            print(f"tau_c     : {best_row['tau_c_est']:.6f}")
-            print(f"mgl       : {best_row['mgl_est']:.6f}")
-            print(f"k_t       : {best_row['k_t_est']:.6f}")
-            print(f"i0        : {best_row['i0_est']:.6f}")
-    else:
-        best_row = None
-
     t_cmd = t.copy()
     if args.apply_cmd_delay_from_meta and meta is not None and meta.get("estimated_delay_ms_final") is not None:
         t_cmd = t + 0.001 * float(meta["estimated_delay_ms_final"])
 
     print(f"csv  : {csv_path}")
+    print("mode : simulation")
     print(f"CPR  : {cpr if cpr is not None else 'None'}")
     if meta is not None and meta.get("estimated_delay_ms_final") is not None:
         print(f"delay: {meta['estimated_delay_ms_final']:.3f} ms")
@@ -250,38 +281,82 @@ def main():
     ax[0].plot(t, cmd_used, label="cmd_used")
     ax[0].plot(t, hw_pwm, label="hw_pwm")
     ax[0].plot(t, delay_ms, label="delay_ms")
-    ax[0].grid(True); ax[0].legend(); ax[0].set_xlabel("time [s]"); ax[0].set_title("Command / PWM / delay")
+    ax[0].grid(True)
+    ax[0].legend()
+    ax[0].set_xlabel("time [s]")
+    ax[0].set_title("Command / PWM / delay")
 
     ax[1].plot(t, theta_sim, label="theta sim")
     if theta_real is not None:
         ax[1].plot(t, theta_real, label="theta real(enc)")
-    ax[1].grid(True); ax[1].legend(); ax[1].set_xlabel("time [s]"); ax[1].set_ylabel("rad"); ax[1].set_title("Theta")
+    ax[1].grid(True)
+    ax[1].legend()
+    ax[1].set_xlabel("time [s]")
+    ax[1].set_ylabel("rad")
+    ax[1].set_title("Theta")
 
     ax[2].plot(t, omega_sim, label="omega sim")
     if omega_real is not None:
         ax[2].plot(t, omega_real, label="omega real")
-    ax[2].grid(True); ax[2].legend(); ax[2].set_xlabel("time [s]"); ax[2].set_ylabel("rad/s"); ax[2].set_title("Omega")
+    ax[2].grid(True)
+    ax[2].legend()
+    ax[2].set_xlabel("time [s]")
+    ax[2].set_ylabel("rad/s")
+    ax[2].set_title("Omega")
 
     ax[3].plot(t, alpha_sim, label="alpha sim")
     if alpha_real is not None:
         ax[3].plot(t, alpha_real, label="alpha real")
-    ax[3].grid(True); ax[3].legend(); ax[3].set_xlabel("time [s]"); ax[3].set_ylabel("rad/s^2"); ax[3].set_title("Alpha")
+    ax[3].grid(True)
+    ax[3].legend()
+    ax[3].set_xlabel("time [s]")
+    ax[3].set_ylabel("rad/s^2")
+    ax[3].set_title("Alpha")
 
     ax[4].plot(t, ina_p, label="INA power")
     ax[4].plot(t, p_pred, label="pred power")
     ax[4].plot(t, ina_i, label="INA current", alpha=0.7)
-    ax[4].grid(True); ax[4].legend(); ax[4].set_xlabel("time [s]"); ax[4].set_title("Electrical (power/current)")
+    ax[4].grid(True)
+    ax[4].legend()
+    ax[4].set_xlabel("time [s]")
+    ax[4].set_title("Electrical (power/current)")
 
     theta_for_hys = theta_real if theta_real is not None else theta_sim
     omega_for_hys = omega_real if omega_real is not None else omega_sim
     valid = np.isfinite(theta_for_hys) & np.isfinite(omega_for_hys)
     ax[5].plot(theta_for_hys[valid], omega_for_hys[valid], linewidth=1.2)
-    ax[5].grid(True); ax[5].set_xlabel("theta [rad]"); ax[5].set_ylabel("omega [rad/s]")
+    ax[5].grid(True)
+    ax[5].set_xlabel("theta [rad]")
+    ax[5].set_ylabel("omega [rad/s]")
     ax[5].set_title("Hysteresis / phase portrait")
 
     fig.tight_layout()
-
     plt.show()
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--csv", default=None)
+    ap.add_argument("--dir", default="./run_logs")
+    ap.add_argument("--mode", choices=["auto", "calibration", "simulation"], default="auto")
+    ap.add_argument("--counts-per-revolution", type=float, default=None)
+    ap.add_argument("--theta-sign", type=float, default=1.0)
+    ap.add_argument("--theta-offset", type=float, default=0.0)
+    ap.add_argument("--alpha-smooth", type=int, default=5)
+    ap.add_argument("--apply-cmd-delay-from-meta", action="store_true")
+    args = ap.parse_args()
+
+    csv_path = args.csv if args.csv is not None else find_latest_csv(args.dir)
+    df = load_csv_frame(csv_path)
+
+    mode = args.mode
+    if mode == "auto":
+        mode = "calibration" if is_calibration_dataframe(df) else "simulation"
+
+    if mode == "calibration":
+        plot_calibration(df, csv_path)
+    else:
+        plot_simulation(df, csv_path, args)
 
 
 if __name__ == "__main__":
