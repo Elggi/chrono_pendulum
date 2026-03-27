@@ -631,6 +631,7 @@ class CPREstimator:
     def __init__(self):
         self.prev_angle = None
         self.angle_unwrapped = 0.0
+        self.angle_travel = 0.0
         self.rev_index = 0
         self.rev_enc_anchor = None
         self.samples = []
@@ -647,8 +648,9 @@ class CPREstimator:
         while d < -math.pi:
             d += 2.0 * math.pi
         self.angle_unwrapped += d
+        self.angle_travel += abs(d)
         self.prev_angle = angle_wrapped
-        new_rev = int(math.floor(abs(self.angle_unwrapped) / (2.0 * math.pi)))
+        new_rev = int(math.floor(self.angle_travel / (2.0 * math.pi)))
         if new_rev > self.rev_index:
             if self.rev_enc_anchor is not None:
                 delta = abs(enc_count - self.rev_enc_anchor)

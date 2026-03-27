@@ -10,15 +10,177 @@
 import argparse
 import json
 import os
+import select
 import subprocess
 import sys
+import termios
 import threading
 import time
+import tty
+from dataclasses import dataclass
 from statistics import mean
 
 import rclpy
+from rclpy.executors import SingleThreadedExecutor
+from rclpy.node import Node
+from std_msgs.msg import Float32, String
 
 from imu_viewer import SharedState, ViewerNode
+
+
+def terminal_status_line(msg: str, width: int = 140):
+    sys.stdout.write("\r\033[2K" + msg[:width].ljust(width))
+    sys.stdout.flush()
+
+
+class KeyboardReader:
+    def __init__(self):
+        self.fd = sys.stdin.fileno()
+        self.old_settings = termios.tcgetattr(self.fd)
+
+    def __enter__(self):
+        tty.setcbreak(self.fd)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old_settings)
+
+    def read_key_nonblocking(self, timeout=0.0):
+        rlist, _, _ = select.select([sys.stdin], [], [], timeout)
+        if not rlist:
+            return None
+        ch1 = sys.stdin.read(1)
+        if ch1 == "\x1b":
+            rlist, _, _ = select.select([sys.stdin], [], [], 0.001)
+            if rlist:
+                ch2 = sys.stdin.read(1)
+                rlist, _, _ = select.select([sys.stdin], [], [], 0.001)
+                if rlist:
+                    ch3 = sys.stdin.read(1)
+                    if ch2 == "[":
+                        if ch3 == "A":
+                            return "UP"
+                        if ch3 == "B":
+                            return "DOWN"
+                        if ch3 == "C":
+                            return "RIGHT"
+                        if ch3 == "D":
+                            return "LEFT"
+            return "ESC"
+        return ch1
+
+
+@dataclass
+class ControllerConfig:
+    topic_cmd_u: str = "/cmd/u"
+    topic_debug: str = "/cmd/keyboard_state"
+    loop_hz: float = 20.0
+    pwm_step: float = 10.0
+    pwm_max: float = 255.0
+
+
+class CalibrationKeyboardControllerNode(Node):
+    def __init__(self, cfg: ControllerConfig):
+        super().__init__("calibration_keyboard_controller")
+        self.cfg = cfg
+        self.pub_cmd = self.create_publisher(Float32, cfg.topic_cmd_u, 10)
+        self.pub_debug = self.create_publisher(String, cfg.topic_debug, 10)
+
+        self.current_u = 0.0
+        self.preset_mode = "manual"
+        self.preset_t0 = time.time()
+        self.sin_amp = 60.0
+        self.sin_freq = 0.5
+        self.square_amp = 60.0
+        self.square_freq = 0.5
+        self.burst_amp = 60.0
+        self.burst_period = 2.0
+        self.burst_on_time = 0.30
+        self.prbs_amp = 60.0
+        self.prbs_dt = 0.25
+
+    def clamp_u(self):
+        self.current_u = max(-self.cfg.pwm_max, min(self.cfg.pwm_max, self.current_u))
+
+    def set_manual_mode(self):
+        self.preset_mode = "manual"
+
+    def set_preset_mode(self, mode: str):
+        self.preset_mode = mode
+        self.preset_t0 = time.time()
+
+    def prbs_value(self, t, dt=0.25, seed=12345):
+        if dt <= 1e-9:
+            return 1.0
+        k = int(t / dt)
+        x = (1103515245 * (k + seed) + 12345) & 0x7FFFFFFF
+        return 1.0 if (x & 1) else -1.0
+
+    def update_auto_signal(self):
+        if self.preset_mode == "manual":
+            return
+        t = time.time() - self.preset_t0
+        if self.preset_mode == "sin":
+            self.current_u = self.sin_amp * math.sin(2.0 * math.pi * self.sin_freq * t)
+        elif self.preset_mode == "square":
+            self.current_u = self.square_amp if math.sin(2.0 * math.pi * self.square_freq * t) >= 0.0 else -self.square_amp
+        elif self.preset_mode == "burst":
+            phase = t % self.burst_period
+            self.current_u = self.burst_amp if phase < self.burst_on_time else 0.0
+        elif self.preset_mode == "prbs":
+            self.current_u = self.prbs_amp * self.prbs_value(t, self.prbs_dt)
+        self.clamp_u()
+
+    def publish_state(self, key_name=""):
+        msg = Float32()
+        msg.data = float(self.current_u)
+        self.pub_cmd.publish(msg)
+        dbg = String()
+        dbg.data = f"key={key_name}, mode={self.preset_mode}, cmd_u={self.current_u:.1f}"
+        self.pub_debug.publish(dbg)
+
+    def apply_key(self, key):
+        if key is None:
+            return False
+        changed = False
+        if key in ("w", "W", "UP"):
+            self.set_manual_mode(); self.current_u += self.cfg.pwm_step; changed = True
+        elif key in ("s", "S", "DOWN"):
+            self.set_manual_mode(); self.current_u -= self.cfg.pwm_step; changed = True
+        elif key in ("d", "D", "RIGHT"):
+            self.set_manual_mode(); self.current_u += self.cfg.pwm_step * 0.5; changed = True
+        elif key in ("a", "A", "LEFT"):
+            self.set_manual_mode(); self.current_u -= self.cfg.pwm_step * 0.5; changed = True
+        elif key == " ":
+            self.set_manual_mode(); self.current_u = 0.0; changed = True
+        elif key == "1":
+            self.set_manual_mode(); self.current_u = 60.0; changed = True
+        elif key == "2":
+            self.set_manual_mode(); self.current_u = -60.0; changed = True
+        elif key == "3":
+            self.set_manual_mode(); self.current_u = 120.0; changed = True
+        elif key == "4":
+            self.set_manual_mode(); self.current_u = -120.0; changed = True
+        elif key == "5":
+            self.set_preset_mode("sin"); changed = True
+        elif key == "6":
+            self.set_preset_mode("square"); changed = True
+        elif key == "7":
+            self.set_preset_mode("burst"); changed = True
+        elif key == "8":
+            self.set_preset_mode("prbs"); changed = True
+        elif key == "[":
+            self.cfg.pwm_step = max(1.0, self.cfg.pwm_step - 1.0)
+        elif key == "]":
+            self.cfg.pwm_step = min(100.0, self.cfg.pwm_step + 1.0)
+        elif key == "-":
+            self.cfg.pwm_max = max(20.0, self.cfg.pwm_max - 5.0); self.clamp_u(); changed = True
+        elif key == "=":
+            self.cfg.pwm_max = min(255.0, self.cfg.pwm_max + 5.0); self.clamp_u(); changed = True
+        elif key in ("x", "X"):
+            self.set_manual_mode(); self.current_u = 0.0; changed = True
+        self.clamp_u()
+        return changed
 
 
 class CprCollector:
@@ -27,21 +189,28 @@ class CprCollector:
     def __init__(self, imu_topic: str, enc_topic: str):
         self.state = SharedState()
         self._node = None
+        self._controller_node = None
+        self._executor = None
         self._thread = None
         self._running = False
         self.imu_topic = imu_topic
         self.enc_topic = enc_topic
+        self.ctrl_cfg = ControllerConfig()
 
     def start(self):
         if not rclpy.ok():
             rclpy.init()
 
         self._node = ViewerNode(self.state, self.imu_topic, self.enc_topic)
+        self._controller_node = CalibrationKeyboardControllerNode(self.ctrl_cfg)
+        self._executor = SingleThreadedExecutor()
+        self._executor.add_node(self._node)
+        self._executor.add_node(self._controller_node)
         self._running = True
 
         def _spin_loop():
             while self._running and rclpy.ok():
-                rclpy.spin_once(self._node, timeout_sec=0.1)
+                self._executor.spin_once(timeout_sec=0.05)
 
         self._thread = threading.Thread(target=_spin_loop, daemon=True)
         self._thread.start()
@@ -50,8 +219,15 @@ class CprCollector:
         self._running = False
         if self._thread is not None:
             self._thread.join(timeout=1.0)
+        if self._controller_node is not None:
+            self._controller_node.current_u = 0.0
+            self._controller_node.publish_state("exit")
+        if self._executor is not None:
+            self._executor.shutdown()
         if self._node is not None:
             self._node.destroy_node()
+        if self._controller_node is not None:
+            self._controller_node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
 
@@ -74,6 +250,7 @@ class CprCollector:
                 "last_cpr": self.state.last_cpr,
                 "full_rotations": int(self.state.rev_index),
                 "angle_unwrapped_rad": float(self.state.angle_unwrapped),
+                "angle_travel_rad": float(self.state.angle_travel),
                 "tip_hist": tip_hist,
                 "tip0": tip0,
             }
@@ -89,12 +266,61 @@ def _collect_cpr_and_r_from_imu(args) -> tuple[list[dict], float, list[dict], fl
         if not collector.wait_for_imu(timeout_sec=args.imu_wait_sec):
             raise RuntimeError("IMU 데이터를 받지 못했습니다. 토픽 연결 상태를 확인하세요.")
 
-        print("- 준비 완료. 수동으로 진자를 1회전 이상 회전시키세요.")
-        input("- 회전을 시작하려면 Enter를 누르세요...")
-        print("  [수집중] 회전 완료 후 Enter를 누르면 종료됩니다.")
-        input()
+        print("======================================================================")
+        print("Calibration Keyboard Controller")
+        print("======================================================================")
+        print("Controls:")
+        print("  w / Up Arrow      : increase forward PWM")
+        print("  s / Down Arrow    : increase reverse PWM")
+        print("  d / Right Arrow   : fine increase (+0.5 step)")
+        print("  a / Left Arrow    : fine decrease (-0.5 step)")
+        print("  space             : emergency stop (0)")
+        print("  x                 : set 0")
+        print("  1 2 3 4           : fixed PWM presets (+60 / -60 / +120 / -120)")
+        print("  5                 : sine preset")
+        print("  6                 : square preset")
+        print("  7                 : burst preset")
+        print("  8                 : PRBS preset")
+        print("  [ / ]             : decrease/increase pwm_step")
+        print("  - / =             : decrease/increase pwm_max")
+        print("  c                 : reset calibration sampling window")
+        print("  q                 : finish calibration and compute")
+        print("======================================================================")
+        baseline_cpr_idx = 0
+        baseline_tip_idx = 0
+        print("[INFO] 키보드 입력으로 모터를 조작하며 calibration 데이터를 수집합니다.")
+        with KeyboardReader() as kb:
+            while True:
+                snap = collector.snapshot()
+                key = kb.read_key_nonblocking(timeout=0.05)
+                changed = collector._controller_node.apply_key(key)
+                if key in ("c", "C"):
+                    baseline_cpr_idx = len(snap["cpr_samples"])
+                    baseline_tip_idx = len(snap["tip_hist"])
+                elif key in ("q", "Q"):
+                    break
+
+                collector._controller_node.update_auto_signal()
+                collector._controller_node.publish_state(key_name=key or "")
+                if changed:
+                    snap = collector.snapshot()
+
+                local_cpr_count = max(0, len(snap["cpr_samples"]) - baseline_cpr_idx)
+                ctrl = collector._controller_node
+                status = (
+                    f"cmd_u:{ctrl.current_u:7.1f} | step:{ctrl.cfg.pwm_step:5.1f} | max:{ctrl.cfg.pwm_max:6.1f} "
+                    f"| mode:{ctrl.preset_mode:7s} | full_rot:{snap['full_rotations']:4d} "
+                    f"| cpr_samples:{local_cpr_count:4d}"
+                )
+                terminal_status_line(status)
+
+                if key == " ":
+                    time.sleep(0.02)
+        print()
 
         snap = collector.snapshot()
+        snap["cpr_samples"] = snap["cpr_samples"][baseline_cpr_idx:]
+        snap["tip_hist"] = snap["tip_hist"][baseline_tip_idx:]
         cpr_samples = snap["cpr_samples"]
         if not cpr_samples:
             raise RuntimeError("full rotation이 감지되지 않아 CPR 샘플이 없습니다.")
@@ -149,7 +375,9 @@ def _estimate_r_trials_from_snapshot(snapshot: dict) -> tuple[list[dict], float 
                 "method": "tip_norm",
                 "radius_m": r_instant,
             }
-        )
+            for idx, cpr in enumerate(cpr_samples, start=1)
+        ]
+        mean_cpr = float(mean(cpr_samples))
 
         dot = tx * ref[0] + ty * ref[1] + tz * ref[2]
         cos_angle = dot / (tip_norm * ref_norm)

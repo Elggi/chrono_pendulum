@@ -112,19 +112,7 @@ run_plot() {
     file=$(select_csv_file)
     if [ -z "$file" ]; then return; fi
 
-    echo "--------------------------------"
-    echo "Select plot mode:"
-    echo "1) Calibration data plotting"
-    echo "2) Simulation data plotting (sim vs real)"
-    read -p "Enter number: " plot_mode
-
-    if [ "$plot_mode" == "1" ]; then
-        python3 $BASE_DIR/plot_pendulum.py --csv "$file" --mode calibration
-    elif [ "$plot_mode" == "2" ]; then
-        python3 $BASE_DIR/plot_pendulum.py --csv "$file" --mode simulation
-    else
-        echo "[ERROR] Invalid selection"
-    fi
+    python3 $BASE_DIR/plot_pendulum.py --csv "$file"
 }
 
 run_rl_fitting() {
