@@ -14,6 +14,7 @@ import sys
 import termios
 import tty
 import shutil
+import signal
 from dataclasses import dataclass, asdict
 from collections import deque
 
@@ -125,6 +126,7 @@ class BridgeConfig:
     shaft_length: float = 0.015
 
     link_L: float = 0.285
+    radius_m: float = 0.285
     link_W: float = 0.020
     link_T: float = 0.006
     link_mass: float = 0.200
@@ -217,6 +219,11 @@ class BridgeConfig:
     topic_sim_delay_ms: str = "/sim/delay_ms"
     topic_sim_status: str = "/sim/status"
     topic_imu: str = "/sim/imu/data"
+    topic_est_theta: str = "/est/theta"
+    topic_est_omega: str = "/est/omega"
+    topic_est_alpha: str = "/est/alpha"
+    topic_calib_status: str = "/calibration/status"
+    calibration_json: str = "./run_logs/calibration_latest.json"
 
     history_sec: float = 20.0
     log_dir: str = "./run_logs"
@@ -624,15 +631,24 @@ class CPREstimator:
     def __init__(self):
         self.prev_angle = None
         self.angle_unwrapped = 0.0
+        self.angle_travel = 0.0
         self.rev_index = 0
         self.rev_enc_anchor = None
+        self.rev_angle_anchor = 0.0
         self.samples = []
         self.last_cpr = np.nan
+        self.motion_started = False
+
+    def reset_revolution_window(self, enc_count):
+        self.rev_enc_anchor = enc_count
+        self.rev_angle_anchor = self.angle_unwrapped
+        self.last_cpr = np.nan
+        self.motion_started = False
 
     def update(self, angle_wrapped, enc_count):
         if self.prev_angle is None:
             self.prev_angle = angle_wrapped
-            self.rev_enc_anchor = enc_count
+            self.reset_revolution_window(enc_count)
             return
         d = angle_wrapped - self.prev_angle
         while d > math.pi:
@@ -640,16 +656,24 @@ class CPREstimator:
         while d < -math.pi:
             d += 2.0 * math.pi
         self.angle_unwrapped += d
+        self.angle_travel += abs(d)
         self.prev_angle = angle_wrapped
-        new_rev = int(math.floor(abs(self.angle_unwrapped) / (2.0 * math.pi)))
-        if new_rev > self.rev_index:
+        theta_window = self.angle_unwrapped - self.rev_angle_anchor
+        if not self.motion_started:
+            if abs(theta_window) < math.radians(5.0):
+                self.rev_enc_anchor = enc_count
+            else:
+                self.motion_started = True
+        while abs(theta_window) >= (2.0 * math.pi):
             if self.rev_enc_anchor is not None:
                 delta = abs(enc_count - self.rev_enc_anchor)
                 if delta > 1:
                     self.samples.append(float(delta))
                     self.last_cpr = float(delta)
             self.rev_enc_anchor = enc_count
-            self.rev_index = new_rev
+            self.rev_index += 1
+            self.rev_angle_anchor += math.copysign(2.0 * math.pi, theta_window)
+            theta_window = self.angle_unwrapped - self.rev_angle_anchor
 
     @property
     def mean(self):
@@ -819,8 +843,10 @@ class PendulumModel:
         self.link = ch.ChBody()
         self.link.SetMass(cfg.link_mass)
         izz_com = (1.0 / 12.0) * cfg.link_mass * (cfg.link_L ** 2 + cfg.link_W ** 2)
-        izz_pivot = izz_com + cfg.link_mass * (cfg.link_L / 2.0) ** 2
-        self.link.SetInertiaXX(ch.ChVector3d(1e-5, 1e-5, izz_pivot))
+        self.link.SetInertiaXX(ch.ChVector3d(1e-5, 1e-5, izz_com))
+        # Body reference frame is at motor pivot; COM is at link center.
+        com_frame = ch.ChFramed(ch.ChVector3d(0.0, -cfg.link_L / 2.0, 0.0), ch.QUNIT)
+        self.link.SetFrameCOMToRef(com_frame)
         self.link.SetPos(ch.ChVector3d(0.0, 0.0, cfg.motor_length / 2.0))
         self.link.SetRot(ch.QuatFromAngleZ(math.radians(cfg.theta0_deg)))
         self.sys.Add(self.link)
@@ -1041,12 +1067,74 @@ def ros_spin_thread(node: Node, stop_flag: threading.Event):
 
 
 def start_imu_viewer_process(imu_topic: str, enc_topic: str):
+    import subprocess
+
     script_path = os.path.join(os.path.dirname(__file__), "imu_viewer.py")
-    return subprocess.Popen(
-        [sys.executable, script_path, "--imu_topic", imu_topic, "--enc_topic", enc_topic],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    try:
+        return subprocess.Popen(
+            [sys.executable, script_path, "--imu_topic", imu_topic, "--enc_topic", enc_topic],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        print(f"[WARN] Failed to start IMU viewer: {exc}")
+        return None
+
+
+def apply_calibration_json(cfg: BridgeConfig, json_path: str | None):
+    if not json_path or not os.path.exists(json_path):
+        return None
+
+    with open(json_path, "r", encoding="utf-8") as f:
+        calib = json.load(f)
+
+    model_init = calib.get("model_init", {})
+    if not model_init and "best_params" in calib:
+        # RL_fitting result schema compatibility
+        model_init = calib.get("best_params", {})
+        if "Rm" in model_init and "R" not in model_init:
+            model_init["R"] = model_init["Rm"]
+    delay = calib.get("delay", {})
+
+    cfg.J_init = float(model_init.get("J", cfg.J_init))
+    cfg.b_init = float(model_init.get("b", cfg.b_init))
+    cfg.tau_c_init = float(model_init.get("tau_c", cfg.tau_c_init))
+    cfg.mgl_init = float(model_init.get("mgl", cfg.mgl_init))
+    cfg.k_t_init = float(model_init.get("k_t", cfg.k_t_init))
+    cfg.i0_init = float(model_init.get("i0", cfg.i0_init))
+    cfg.R_init = float(model_init.get("R", cfg.R_init))
+    cfg.k_e_init = float(model_init.get("k_e", cfg.k_e_init))
+    cfg.delay_init_ms = float(delay.get("effective_control_delay_ms", cfg.delay_init_ms))
+
+    cfg.calibration_json = json_path
+    return calib
+
+
+def extract_radius_from_json(json_path: str | None) -> float | None:
+    if not json_path or not os.path.exists(json_path):
+        return None
+
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    summary = data.get("summary", {}) if isinstance(data.get("summary", {}), dict) else {}
+    radius_candidates = [
+        summary.get("mean_radius_m"),
+        summary.get("r_m"),
+        data.get("mean_radius_m"),
+        data.get("r_from_imu_orientation"),
+    ]
+    for radius in radius_candidates:
+        if radius is None:
+            continue
+        try:
+            radius = float(radius)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(radius) and radius > 0.0:
+            return radius
+    return None
 
 
 # ============================================================
@@ -1069,6 +1157,10 @@ def main():
                     help="Compatibility option: host enables host-control, jetson uses external ROS input.")
     ap.add_argument("--delay-ms", type=float, default=0.0)
     ap.add_argument("--disable-auto-delay", action="store_true")
+    ap.add_argument("--enable-online-fit", action="store_true")
+    ap.add_argument("--calibration-json", default="./run_logs/calibration_latest.json")
+    ap.add_argument("--radius-json", default="./run_logs/calibration_latest.json",
+                    help="JSON file containing measured radius (e.g., calibration_latest.json).")
     ap.add_argument("--J", type=float, default=0.010)
     ap.add_argument("--b", type=float, default=0.030)
     ap.add_argument("--tau-c", type=float, default=0.080)
@@ -1092,6 +1184,7 @@ def main():
     cfg.omega0 = args.omega0
     cfg.link_mass = args.link_mass
     cfg.link_L = args.link_length
+    cfg.radius_m = args.link_length
     cfg.J_init = args.J
     cfg.b_init = args.b
     cfg.tau_c_init = args.tau_c
@@ -1102,6 +1195,12 @@ def main():
     cfg.k_e_init = args.k_e
     cfg.delay_init_ms = args.delay_ms
     cfg.auto_delay_comp = not args.disable_auto_delay
+    cfg.online_fit_enable = args.enable_online_fit
+
+    calib = apply_calibration_json(cfg, args.calibration_json)
+    radius_measured = extract_radius_from_json(args.radius_json)
+    if radius_measured is not None:
+        cfg.radius_m = float(radius_measured)
 
     log_csv = make_numbered_path(cfg.log_dir, cfg.log_prefix, ".csv")
     log_meta = log_csv[:-4] + ".meta.json"
@@ -1121,7 +1220,7 @@ def main():
 
     viewer_proc = None
     if cfg.enable_imu_viewer:
-        viewer_topic = cfg.topic_imu if args.host_control else "/imu/data"
+        viewer_topic = "/imu/data"
         viewer_proc = start_imu_viewer_process(viewer_topic, cfg.topic_hw_enc)
 
     vis = None
@@ -1163,8 +1262,18 @@ def main():
 
         if host_controller is not None:
             host_controller.__enter__()
+            terminal_status_line("cmd_u:    0.0 | used:    0.0 | mode: manual | waiting for keyboard input", width=cfg.terminal_status_width)
+            print()
         elif quit_watcher is not None:
             quit_watcher.__enter__()
+
+        if calib is not None:
+            print(f"[INFO] Loaded calibration json: {args.calibration_json}")
+        if radius_measured is not None:
+            print(f"[INFO] Loaded radius json: {args.radius_json}")
+        print(f"[INFO] Visual link length (--link-length): {cfg.link_L:.6f} m")
+        print(f"[INFO] Computation radius (from radius-json): {cfg.radius_m:.6f} m")
+        print(f"[INFO] online_fit_enable={cfg.online_fit_enable}")
 
         try:
             while model.sys.GetChTime() < args.duration:
@@ -1303,6 +1412,8 @@ def main():
     meta = {
         "log_csv": log_csv,
         "config": asdict(cfg),
+        "calibration_json": cfg.calibration_json if calib is not None else None,
+        "radius_json": args.radius_json,
         "estimated_delay_ms_final": 1000.0 * delay_comp.delay_sec,
         "cpr_last": None if not np.isfinite(cpr_est.last_cpr) else float(cpr_est.last_cpr),
         "cpr_mean": None if not np.isfinite(cpr_est.mean) else float(cpr_est.mean),
@@ -1314,11 +1425,16 @@ def main():
     print(f"saved meta : {log_meta}")
 
     if viewer_proc is not None:
-        viewer_proc.terminate()
         try:
+            os.killpg(viewer_proc.pid, signal.SIGTERM)
             viewer_proc.wait(timeout=2.0)
-        except subprocess.TimeoutExpired:
-            viewer_proc.kill()
+        except ProcessLookupError:
+            pass
+        except Exception:
+            try:
+                os.killpg(viewer_proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
     ros_stop.set()
     try:
         ros_node.destroy_node()

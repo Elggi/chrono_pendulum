@@ -8,15 +8,18 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 # ---- user-configurable ----
 ROS_SETUP="/opt/ros/humble/setup.bash"
-WS_SETUP="$HOME/ros2_ws/install/setup.bash"
+DEFAULT_WS_SETUP="/home/jetson/ros2_ws/install/setup.bash"
+WS_SETUP="${WS_SETUP:-$DEFAULT_WS_SETUP}"
 
 export ROS_DOMAIN_ID=7
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
-ARDUINO_PORT="/dev/ttyACM0"
+ARDUINO_PORT_PATTERN="${ARDUINO_PORT_PATTERN:-/dev/serial/by-id/*Arduino*}"
+ARDUINO_PORT_FALLBACK="${ARDUINO_PORT_FALLBACK:-/dev/ttyACM0}"
 ARDUINO_BAUD="115200"
 
-IMU_PORT="/dev/ttyUSB0"
+IMU_PORT_PATTERN="${IMU_PORT_PATTERN:-/dev/serial/by-id/*IMU*}"
+IMU_PORT_FALLBACK="${IMU_PORT_FALLBACK:-/dev/ttyUSB0}"
 IMU_BAUD="921600"
 
 LOG_DIR="$HOME/jetson_ros_logs"
@@ -37,9 +40,36 @@ load_env() {
 
     if [ ! -f "$WS_SETUP" ]; then
         echo "[ERROR] Workspace setup not found: $WS_SETUP"
+        echo "[HINT] Build the ROS workspace first, then source it:"
+        echo "       cd \"$(dirname "$(dirname "$WS_SETUP")")\" && colcon build"
+        echo "       source \"$WS_SETUP\""
         exit 1
     fi
     source "$WS_SETUP"
+}
+
+resolve_serial_port() {
+    local label="$1"
+    local pattern="$2"
+    local fallback="$3"
+    local resolved=""
+
+    shopt -s nullglob
+    local matches=( $pattern )
+    shopt -u nullglob
+
+    if [ "${#matches[@]}" -gt 0 ]; then
+        resolved="${matches[0]}"
+    else
+        resolved="$fallback"
+    fi
+
+    if [ ! -e "$resolved" ]; then
+        echo "[ERROR] $label serial device not found. pattern=$pattern fallback=$fallback resolved=$resolved"
+        exit 1
+    fi
+
+    printf '%s' "$resolved"
 }
 
 start_process() {
@@ -133,11 +163,16 @@ status_process() {
 start_nodes() {
     load_env
 
+    local arduino_port
+    local imu_port
+    arduino_port="$(resolve_serial_port "Arduino" "$ARDUINO_PORT_PATTERN" "$ARDUINO_PORT_FALLBACK")"
+    imu_port="$(resolve_serial_port "IMU" "$IMU_PORT_PATTERN" "$IMU_PORT_FALLBACK")"
+
     start_process "arduino_bridge" \
-        "ros2 run hw_arduino_bridge bridge_node --ros-args -p port:=$ARDUINO_PORT -p baud:=$ARDUINO_BAUD -p pwm_limit:=255.0"
+        "ros2 run hw_arduino_bridge bridge_node --ros-args -p port:=$arduino_port -p baud:=$ARDUINO_BAUD -p pwm_limit:=255.0"
 
     start_process "imu_node" \
-        "ros2 run wheeltec_n100_imu imu_node --ros-args -p serial_port:=$IMU_PORT -p serial_baud:=$IMU_BAUD -r imu:=/imu/data"
+        "ros2 run wheeltec_n100_imu imu_node --ros-args -p serial_port:=$imu_port -p serial_baud:=$IMU_BAUD -r imu:=/imu/data"
 
     echo
     echo "[$(timestamp)] All nodes started."
@@ -147,6 +182,7 @@ start_nodes() {
     echo "  $0 logs       # 로그 tail"
     echo "  $0 stop       # 전체 종료"
     echo "  $0 controller # 컨트롤러  실행"
+
 }
 
 stop_nodes() {
@@ -169,48 +205,70 @@ logs_nodes() {
     tail -n 50 "$LOG_DIR/imu_node.log" 2>/dev/null || true
 }
 
-monitor_menu() {
+monitor_live() {
     load_env
+    echo "[$(timestamp)] Starting one-line live monitor (Ctrl+C to exit)..."
+    python3 "$SCRIPT_DIR/live_monitor.py"
+}
 
-    echo "======================================="
-    echo " Jetson ROS topic monitor"
-    echo "======================================="
-    echo "1) /imu/data"
-    echo "2) /hw/enc"
-    echo "3) /cmd/u"
-    echo "4) /hw/pwm_applied"
-    echo "5) /hw/arduino_ms"
-    echo "6) /ina219/bus_voltage_v"
-    echo "7) /ina219/current_ma"
-    echo "8) /ina219/power_mw"
-    echo "9) topic list"
-    echo "10) topic hz /imu/data"
-    echo "11) topic hz /hw/enc"
-    echo "12) topic hz /ina219/bus_voltage_v"
-    echo "13) topic hz /ina219/current_ma"
-    echo "14) topic hz /ina219/power_mw"
-    echo "q) quit"
-    echo "======================================="
-    read -rp "Select: " choice
+diag_topic_once() {
+    local topic="$1"
+    local timeout_sec="${2:-2}"
+    local out
+    out="$(timeout "${timeout_sec}s" ros2 topic echo --once "$topic" 2>&1 || true)"
+    if echo "$out" | rg -q "data:|header:|orientation:|angular_velocity:|linear_acceleration:"; then
+        echo "[OK] topic has data: $topic"
+        return 0
+    fi
+    echo "[WARN] no sample received from $topic (timeout=${timeout_sec}s)"
+    return 1
+}
 
-    case "$choice" in
-        1) ros2 topic echo /imu/data ;;
-        2) ros2 topic echo /hw/enc ;;
-        3) ros2 topic echo /cmd/u ;;
-        4) ros2 topic echo /hw/pwm_applied ;;
-        5) ros2 topic echo /hw/arduino_ms ;;
-        6) ros2 topic echo /ina219/bus_voltage_v ;;
-        7) ros2 topic echo /ina219/current_ma ;;
-        8) ros2 topic echo /ina219/power_mw ;;
-        9) ros2 topic list ;;
-        10) ros2 topic hz /imu/data ;;
-        11) ros2 topic hz /hw/enc ;;
-        12) ros2 topic hz /ina219/bus_voltage_v ;;
-        13) ros2 topic hz /ina219/current_ma ;;
-        14) ros2 topic hz /ina219/power_mw ;;
-        q|Q) exit 0 ;;
-        *) echo "Invalid choice"; exit 1 ;;
-    esac
+diag_topic_pub() {
+    local topic="$1"
+    local info
+    info="$(ros2 topic info "$topic" 2>&1 || true)"
+    local pubs
+    pubs="$(echo "$info" | awk -F': ' '/Publisher count/ {print $2}' | tr -d '\r' | tail -n 1)"
+    if [ -n "${pubs:-}" ] && [ "$pubs" -ge 1 ] 2>/dev/null; then
+        echo "[OK] publisher count for $topic = $pubs"
+        return 0
+    fi
+    echo "[WARN] publisher missing for $topic"
+    return 1
+}
+
+diagnose_nodes_and_topics() {
+    load_env
+    echo "===== diagnose: node process status ====="
+    status_nodes
+    echo
+
+    echo "===== diagnose: ROS node graph ====="
+    ros2 node list || true
+    echo
+
+    echo "===== diagnose: key topic publishers ====="
+    diag_topic_pub "/cmd/u" || true
+    diag_topic_pub "/hw/pwm_applied" || true
+    diag_topic_pub "/hw/enc" || true
+    diag_topic_pub "/ina219/bus_voltage_v" || true
+    diag_topic_pub "/ina219/current_ma" || true
+    diag_topic_pub "/ina219/power_mw" || true
+    diag_topic_pub "/imu/data" || true
+    echo
+
+    echo "===== diagnose: sample data check ====="
+    diag_topic_once "/hw/pwm_applied" 2 || true
+    diag_topic_once "/hw/enc" 2 || true
+    diag_topic_once "/ina219/bus_voltage_v" 2 || true
+    diag_topic_once "/ina219/current_ma" 2 || true
+    diag_topic_once "/ina219/power_mw" 2 || true
+    diag_topic_once "/imu/data" 2 || true
+    echo
+
+    echo "===== diagnose: recent logs ====="
+    logs_nodes
 }
 
 
@@ -222,8 +280,14 @@ check_once() {
     echo
 
     echo "===== device check ====="
-    ls -l "$ARDUINO_PORT" 2>/dev/null || echo "Missing: $ARDUINO_PORT"
-    ls -l "$IMU_PORT" 2>/dev/null || echo "Missing: $IMU_PORT"
+    local arduino_port
+    local imu_port
+    arduino_port="$(resolve_serial_port "Arduino" "$ARDUINO_PORT_PATTERN" "$ARDUINO_PORT_FALLBACK")"
+    imu_port="$(resolve_serial_port "IMU" "$IMU_PORT_PATTERN" "$IMU_PORT_FALLBACK")"
+    echo "Arduino port: $arduino_port"
+    ls -l "$arduino_port" 2>/dev/null || true
+    echo "IMU port: $imu_port"
+    ls -l "$imu_port" 2>/dev/null || true
     echo
 
     echo "===== topic list ====="
@@ -232,7 +296,7 @@ check_once() {
 
 usage() {
     cat <<EOF
-Usage: $0 {start|stop|restart|status|logs|monitor|check|controller}
+Usage: $0 {start|stop|restart|status|logs|monitor|check|diagnose|controller}
 
 Commands:
   start    : 아두이노 브리지 + IMU 노드 실행
@@ -240,8 +304,9 @@ Commands:
   restart  : 재시작
   status   : 현재 프로세스 상태 확인
   logs     : 최근 로그 확인
-  monitor  : topic echo / hz 확인 메뉴
+  monitor  : 한줄 live monitor
   check    : 장치와 ROS 환경 간단 점검
+  diagnose : 어떤 노드/토픽이 비었는지 상세 점검
   controller : pendulum_controller.py 직접 실행
 EOF
 }
@@ -267,10 +332,13 @@ main() {
             logs_nodes
             ;;
         monitor)
-            monitor_menu
+            monitor_live
             ;;
         check)
             check_once
+            ;;
+        diagnose)
+            diagnose_nodes_and_topics
             ;;
         controller)
             load_env

@@ -1,139 +1,85 @@
-## Files
+# Host Layer 상세 문서
 
-- `chrono_pendulum.py`
-  - PyChrono 기반 1-DOF Pendulum 시뮬레이션
-  - ROS2 subscribe/publish
-  - host keyboard control
-  - INA219 전압/전류/전력 수신
-  - `/cmd/u` 와 `/hw/pwm_applied` 기반 자동 delay compensation
-  - online EKF-style parameter tuning
-  - CPR 추정 및 meta json 저장
-  - Chrono window + IMU viewer window 동시 실행
+이 폴더는 **디지털 트윈 시뮬레이션, 캘리브레이션, 로그 분석, RL 파인튜닝**의 중심 계층입니다.
 
-- `plot_pendulum.py`
-  - 최신 또는 지정 CSV 로그 시각화
-  - sim vs real 비교
-  - electrical model vs INA219 비교
-  - online parameter convergence plot
-  - 가장 cost가 낮았던 시점의 parameter 출력
-  - meta json에서 CPR 자동 사용 가능
+## 1) `chrono_pendulum.py`
 
-- `RL_fitting.py`
-  - PPO / SAC 기반 offline post fitting
-  - domain randomization
-  - J, b, tau_c, mgl, k_t, i0, Rm, k_e, delay 포함
-  - 최적 파라미터 json 및 추천 CLI 출력
+### 역할
+- PyChrono 기반 1-DOF 물리 모델 생성
+- ROS2로 하드웨어 신호(`/cmd/u`, `/hw/*`, `/ina219/*`) 수신
+- 시뮬레이터 상태(`/sim/*`) 퍼블리시
+- 온라인 EKF-like 파라미터 업데이트
+- 지연 보상(auto delay compensation)
 
-## Basic requirements
+### 동작 요약
+1. 초기 파라미터(`J,b,tau_c,mgl,k_t,i0,R,k_e`) 로딩
+2. 입력 PWM 수신 후 지연 보상 큐를 거쳐 모델에 적용
+3. 시뮬레이션 상태(각도/각속도/각가속도) 계산
+4. 실측 신호와의 오차를 기반으로 online fitting 수행
+5. CSV + meta JSON 기록
 
-예상 환경:
+### 주요 출력
+- `run_logs/chrono_run_N.csv`
+- `run_logs/chrono_run_N.meta.json`
 
-- Ubuntu 22.04
-- ROS2 Humble
-- Python 3.10+
-- `pychrono` 9.0.1
-- `rclpy`
-- `numpy`, `pandas`, `matplotlib`, `scipy`
-- `gymnasium`, `stable_baselines3` (`RL_fitting.py`용)
+---
 
-## ROS topics expected
+## 2) `calibration.py`
 
-### Subscribed by `chrono_pendulum.py`
+### 역할
+- IMU orientation + encoder 기반 calibration 수행
+- full rotation 감지 기반으로 회전/정지 제어
+- 사용자 입력 최대 PWM 한계 하에서 1 PWM step 증가 적용
+- 정지 후 overshoot 회전량을 반대 방향으로 보정
+- mean CPR, IMU 기반 `r` 추정치 출력 및 JSON 저장
 
-- `/cmd/u`
-- `/hw/pwm_applied`
-- `/hw/enc`
-- `/hw/arduino_ms`
-- `/ina219/bus_voltage_v`
-- `/ina219/current_ma`
-- `/ina219/power_mw`
+### 핵심 로직
+- IMU 수신 확인 후 초기 orientation 기준점 설정
+- 단일 방향으로 PWM을 1 step씩 증가
+- full rotation 2회 감지 시 즉시 정지
+- 정지 후 추가 회전량을 측정해 반대 방향으로 보정
 
-### Published by `chrono_pendulum.py`
+### CLI 주요 파라미터
+- `--max-pwm-hard-limit`
+- `--loop-hz`
+- `--imu-wait-sec`, `--stop-settle-sec`
 
-- `/sim/theta`
-- `/sim/omega`
-- `/sim/alpha`
-- `/sim/tau`
-- `/sim/cmd_used`
-- `/sim/delay_ms`
-- `/sim/status`
-- `/imu/data`
+---
 
-## Example usage
+## 3) `plot_pendulum.py`
 
-### 1) External hardware-controlled mode
+### 역할
+- 시뮬레이션/실측 비교 시각화
+- 전기 모델(전압/전류/전력) 비교
+- online calibration 비용/파라미터 추세 확인
 
-```bash
-python3 chrono_pendulum.py
-```
+### 특징
+- pandas가 없어도 동작하도록 CSV fallback 로더 내장
+- `sim_time` 없으면 `wall_time` 기반 시간축 구성
+- 컬럼명이 조금 달라도(`current_A` vs `current_ma`) 유연 매핑
 
-### 2) Host keyboard-controlled mode
+---
 
-```bash
-python3 chrono_pendulum.py --host-control
-```
+## 4) `RL_fitting.py`
 
-### 3) Headless run
+### 역할
+- 오프라인 파라미터 최적화 (PPO/SAC)
+- 실측 로그를 재현하는 파라미터 집합 탐색
+- 최적 파라미터/학습 산출물 저장
 
-```bash
-python3 chrono_pendulum.py --headless --no-imu-viewer --duration 15
-```
+---
 
-### 4) Fixed initial parameters
+## 5) `imu_viewer.py`
 
-```bash
-python3 chrono_pendulum.py \
-  --J 0.012 \
-  --b 0.035 \
-  --tau-c 0.09 \
-  --mgl 0.60 \
-  --k-t 0.23 \
-  --i0 0.06 \
-  --R 2.1 \
-  --k-e 0.025
-```
+### 역할
+- IMU orientation/가속도 기반 3D/2D 시각화
+- 링크 자세 및 tip trajectory 직관적 확인
 
-### 5) Plot latest log
+---
 
-```bash
-python3 plot_pendulum.py --dir ./run_logs
-```
+## 6) `pendulum_stack.sh`
 
-### 6) Plot specific log with manual CPR
-
-```bash
-python3 plot_pendulum.py --csv ./run_logs/chrono_run_3.csv --counts-per-revolution 8192
-```
-
-### 7) RL fitting
-
-```bash
-python3 RL_fitting.py --csv ./run_logs/chrono_run_3.csv --algo ppo
-```
-
-또는
-
-```bash
-python3 RL_fitting.py --csv ./run_logs/chrono_run_3.csv --algo sac
-```
-
-## Notes
-
-- `chrono_pendulum.py`는 Chrono의 실제 강체 동역학을 사용합니다.
-- online fitting용 governing equation은 진단/추정 모델로 사용됩니다.
-- `J`는 rise shape, alpha peak, omega slope에 큰 영향을 주므로 핵심 파라미터입니다.
-- delay는 기본적으로 auto compensation이 켜져 있습니다. 고정 delay만 쓰고 싶으면 `--disable-auto-delay --delay-ms ...`를 사용하세요.
-- CPR 자동 추정은 full rotation episode가 있을 때 가장 잘 작동합니다. 완전회전이 없는 실험은 `plot_pendulum.py --counts-per-revolution ...`로 수동 지정하세요.
-
-## Output files
-
-`chrono_pendulum.py` 실행 후:
-
-- `./run_logs/chrono_run_N.csv`
-- `./run_logs/chrono_run_N.meta.json`
-
-`RL_fitting.py` 실행 후:
-
-- `./rl_results/ppo_pendulum_fit.zip` 또는 `sac_pendulum_fit.zip`
-- `./rl_results/rl_result.json`
-- `./rl_results/rl_best_prediction.csv`
+### 역할
+- Host 통합 메뉴 엔트리 포인트
+- IMU viewer / calibration / RL / chrono / plot 실행
+- calibration 메뉴 실행 (max PWM은 calibration.py 내부에서 입력)

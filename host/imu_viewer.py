@@ -48,6 +48,7 @@ class SharedState:
         self.gyro = np.zeros(3, dtype=float)
         self.acc = np.zeros(3, dtype=float)
         self.enc = 0.0
+        self.enc_received = False
         self.seq = 0
 
         self.has_init = False
@@ -60,14 +61,23 @@ class SharedState:
 
         self.tip_hist = deque(maxlen=history_len)
         self.angle_unwrapped = 0.0
+        self.angle_travel = 0.0
         self.prev_angle = None
 
         self.rev_index = 0
         self.rev_enc_anchor = None
+        self.rev_angle_anchor = 0.0
         self.last_cpr = None
         self.cpr_samples = []
+        self.motion_started = False
 
         self.last_tip = self.ref_tip_local.copy()
+
+    def reset_revolution_window(self):
+        self.rev_enc_anchor = self.enc if self.enc_received else None
+        self.rev_angle_anchor = self.angle_unwrapped
+        self.last_cpr = None
+        self.motion_started = False
 
     def update_imu(self, q, gyro, acc):
         R_abs = quat_to_rotmat(*q)
@@ -85,8 +95,9 @@ class SharedState:
                 self.tip_hist.append(self.tip0.copy())
                 self.prev_angle = math.atan2(self.tip0[1], self.tip0[0])
                 self.angle_unwrapped = 0.0
+                self.angle_travel = 0.0
                 self.rev_index = 0
-                self.rev_enc_anchor = self.enc
+                self.reset_revolution_window()
                 self.last_tip = self.tip0.copy()
                 return
 
@@ -106,24 +117,37 @@ class SharedState:
                 dtheta += 2.0 * math.pi
 
             self.angle_unwrapped += dtheta
+            self.angle_travel += abs(dtheta)
             self.prev_angle = angle
 
             if self.rev_enc_anchor is None:
-                self.rev_enc_anchor = self.enc
+                self.reset_revolution_window()
 
-            new_rev_index = math.floor(abs(self.angle_unwrapped) / (2.0 * math.pi))
+            theta_window = self.angle_unwrapped - self.rev_angle_anchor
+            # Keep encoder anchor synced while still near start angle.
+            # This prevents counting from a stale anchor captured before encoder is initialized.
+            if not self.motion_started:
+                if abs(theta_window) < math.radians(5.0):
+                    if self.enc_received:
+                        self.rev_enc_anchor = self.enc
+                else:
+                    self.motion_started = True
 
-            if new_rev_index > self.rev_index:
-                delta_counts = abs(self.enc - self.rev_enc_anchor)
-                if delta_counts > 0:
-                    self.last_cpr = float(delta_counts)
-                    self.cpr_samples.append(float(delta_counts))
+            while abs(theta_window) >= (2.0 * math.pi):
+                if self.rev_enc_anchor is not None:
+                    delta_counts = abs(self.enc - self.rev_enc_anchor)
+                    if delta_counts > 0:
+                        self.last_cpr = float(delta_counts)
+                        self.cpr_samples.append(float(delta_counts))
                 self.rev_enc_anchor = self.enc
-                self.rev_index = new_rev_index
+                self.rev_index += 1
+                self.rev_angle_anchor += math.copysign(2.0 * math.pi, theta_window)
+                theta_window = self.angle_unwrapped - self.rev_angle_anchor
 
     def update_enc(self, enc):
         with self.lock:
             self.enc = float(enc)
+            self.enc_received = True
 
 
 class ViewerNode(Node):
@@ -163,9 +187,16 @@ def ros_spin_thread(state, imu_topic, enc_topic):
     node = ViewerNode(state, imu_topic, enc_topic)
     try:
         rclpy.spin(node)
+    except Exception:
+        # Ignore shutdown/context races during external termination.
+        pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
 
 
 def make_box():
@@ -336,6 +367,13 @@ def main():
         )
 
         ax2d.legend(loc="lower left", fontsize=9)
+
+
+    def on_key(event):
+        if event is not None and event.key is not None and event.key.lower() == "q":
+            plt.close(fig)
+
+    fig.canvas.mpl_connect("key_press_event", on_key)
 
     ani = FuncAnimation(fig, update, interval=int(1000 / max(args.fps, 1)), cache_frame_data=False)
     plt.show()
