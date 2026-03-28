@@ -60,10 +60,12 @@ class SharedState:
 
         self.tip_hist = deque(maxlen=history_len)
         self.angle_unwrapped = 0.0
+        self.angle_travel = 0.0
         self.prev_angle = None
 
         self.rev_index = 0
         self.rev_enc_anchor = None
+        self.rev_theta_accum = 0.0
         self.last_cpr = None
         self.cpr_samples = []
 
@@ -85,8 +87,10 @@ class SharedState:
                 self.tip_hist.append(self.tip0.copy())
                 self.prev_angle = math.atan2(self.tip0[1], self.tip0[0])
                 self.angle_unwrapped = 0.0
+                self.angle_travel = 0.0
                 self.rev_index = 0
                 self.rev_enc_anchor = self.enc
+                self.rev_theta_accum = 0.0
                 self.last_tip = self.tip0.copy()
                 return
 
@@ -106,20 +110,21 @@ class SharedState:
                 dtheta += 2.0 * math.pi
 
             self.angle_unwrapped += dtheta
+            self.angle_travel += abs(dtheta)
             self.prev_angle = angle
 
             if self.rev_enc_anchor is None:
                 self.rev_enc_anchor = self.enc
 
-            new_rev_index = math.floor(abs(self.angle_unwrapped) / (2.0 * math.pi))
-
-            if new_rev_index > self.rev_index:
+            self.rev_theta_accum += abs(dtheta)
+            while self.rev_theta_accum >= (2.0 * math.pi):
                 delta_counts = abs(self.enc - self.rev_enc_anchor)
                 if delta_counts > 0:
                     self.last_cpr = float(delta_counts)
                     self.cpr_samples.append(float(delta_counts))
                 self.rev_enc_anchor = self.enc
-                self.rev_index = new_rev_index
+                self.rev_theta_accum -= 2.0 * math.pi
+                self.rev_index += 1
 
     def update_enc(self, enc):
         with self.lock:
