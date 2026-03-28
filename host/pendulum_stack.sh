@@ -192,25 +192,3 @@ while true; do
             ;;
     esac
 done
-select_json_file() {
-    echo "--------------------------------" >&2
-    echo "[INFO] Parameter JSON 파일 선택" >&2
-    local files=("$BASE_DIR"/run_logs/*.json "$BASE_DIR"/rl_results/*.json)
-    local valid=()
-    for f in "${files[@]}"; do
-        [ -f "$f" ] && valid+=("$f")
-    done
-    if [ "${#valid[@]}" -eq 0 ]; then
-        echo "[ERROR] 선택 가능한 json 파일이 없습니다." >&2
-        return 1
-    fi
-    select file in "${valid[@]}"; do
-        if [ -n "$file" ]; then
-            echo "[INFO] Selected JSON: $file" >&2
-            echo "$file"
-            return 0
-        else
-            echo "[ERROR] 잘못된 선택" >&2
-        fi
-    done
-}

@@ -11,12 +11,91 @@
 - 온라인 EKF-like 파라미터 업데이트
 - 지연 보상(auto delay compensation)
 
+### Phase A 모듈화(동작 동일 리팩터)
+- `chrono_pendulum.py`는 실행 orchestration(ROS spin/메인 루프/상태 출력/로그 기록) 중심으로 축소.
+- 공통 유틸/설정/동역학/추정/캘리브레이션 JSON 로딩은 `host/chrono_core/` 하위 모듈로 분리:
+  - `chrono_core/config.py`: `BridgeConfig`
+  - `chrono_core/utils.py`: 유틸 함수(`clamp`, `sanitize_float`, `terminal_status_line` 등)
+  - `chrono_core/dynamics.py`: `PendulumModel`, 토크/전기모델, `enc_to_theta`
+  - `chrono_core/estimation.py`: `DelayCompensator`, `CPREstimator`, `OnlineParameterEKF`, `ObservationLPF`, `FitConvergenceMonitor`
+  - `chrono_core/calibration_io.py`: calibration/radius JSON 로딩
+- 목적: 기존 실행 결과를 유지하면서 파일 책임을 분리하고, 이후 RL 환경(`environment.py`)에서 재사용 가능한 단위 컴포넌트를 확보.
+
 ### 동작 요약
 1. 초기 파라미터(`J,b,tau_c,mgl,k_t,i0,R,k_e`) 로딩
 2. 입력 PWM 수신 후 지연 보상 큐를 거쳐 모델에 적용
 3. 시뮬레이션 상태(각도/각속도/각가속도) 계산
-4. 실측 신호와의 오차를 기반으로 online fitting 수행
+4. 실측 신호(EST/ENC)를 LPF 후 EKF 입력으로 사용
+5. LS 수렴 판정(window RMS + hold 시간) 만족 시 self-fitting LOCK
+6. fitting OFF 모드에서는 pure simulation만 수행(파라미터 업데이트 없음)
 5. CSV + meta JSON 기록
+
+### Sim2Real 반영 포인트 (최신 코드 기준)
+
+#### A) Low-pass observation filter (관측 LPF)
+- EKF 갱신 입력은 raw 값이 아니라 필터된 \(\theta,\omega,\alpha\) 관측치 사용:
+\[
+\hat y_k = (1-\alpha) \hat y_{k-1} + \alpha y_k,\quad
+\alpha = \frac{\Delta t}{\tau+\Delta t}
+\]
+- 센서 스파이크/미분 잡음을 줄여 EKF 파라미터 흔들림을 완화.
+
+#### B) Smoothness regularization
+- fitting cost에 입력 변화량 페널티 추가:
+\[
+\mathcal{L}=\cdots + w_{\Delta u}(\Delta u)^2 + w_{\Delta^2u}(\Delta^2u)^2
+\]
+- 급격한 제어 변화가 만든 과도응답에 과적합되는 현상을 억제.
+
+#### C) Least-squares 수렴 판정 + self-fitting lock
+- \((\theta,\omega,\alpha)\) sim-real 오차 RMS를 sliding window로 추적.
+- RMS가 임계치 이하 상태를 hold 시간 이상 유지하면 `fit_done=True`.
+- 이후 EKF update를 중단해 최종 파라미터를 고정(`fit:LOCK`).
+
+#### D) 터미널/로그 상태 확장
+- one-line 갱신(`\r + line clear`)은 유지.
+- 상태 문자열에 `LS`, `fit:RUN/LOCK/OFF` 표시.
+- CSV/meta에 `ls_cost`, `fit_done`, `fit_complete`, `fit_final_params` 기록.
+
+### Calibration JSON의 CPR / radius 사용처
+
+#### 1) CPR(counts per revolution)
+- 용도: encoder count를 각도로 변환.
+\[
+\theta_{\text{enc}} = \theta_{\text{ref}} + \frac{2\pi}{CPR}(enc-enc_{\text{ref}})
+\]
+- `est/theta`가 없을 때 fallback 실측 각도 생성에 사용됨.
+- 즉, CPR은 **센서 단위(count)→물리 단위(rad)** 스케일링 파라미터.
+
+#### 2) radius (mean_radius_m)
+- 용도: calibration 결과에서 얻은 실제 기구학 반경을 `cfg.radius_m`로 로딩.
+- 현재 `chrono_pendulum.py`에서는 반경을 출력/메타로 보존하고, 다른 분석/식별 단계에서 동일 실측 반경을 참조할 수 있도록 일관성 유지.
+- 정리하면 radius는 **실험 계측 기하값**, CPR은 **encoder 각도 환산값**.
+
+### COM(질량중심) 처리 로직 (구체화)
+
+최신 `chrono_pendulum.py`는 link를 균일 막대로만 보는 대신, **link + IMU 복합체**로 COM/관성을 계산함.
+
+```text
+motor pivot (body ref)
+   o-----------------------------  (link axis, -y)
+      [uniform link COM]
+                     [IMU center]
+=> composite COM = mass-weighted average
+```
+
+#### 계산식
+- 질량중심:
+\[
+\mathbf{r}_{com}=\frac{m_l\mathbf{r}_l + m_i\mathbf{r}_i}{m_l+m_i}
+\]
+- z축 관성(평행축 정리):
+\[
+I_{zz,com}=I_{zz,l}^{center}+m_l d_l^2 + I_{zz,i}^{center}+m_i d_i^2
+\]
+- 이 값을 `SetFrameCOMToRef`와 `SetInertiaXX`에 반영.
+
+> 참고: Chrono Python 바인딩에서 `SetFrameCOMToRef`가 없으면 경고 후 기본 COM으로 안전 fallback.
 
 ### 주요 출력
 - `run_logs/chrono_run_N.csv`
