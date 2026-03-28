@@ -634,7 +634,7 @@ class CPREstimator:
         self.angle_travel = 0.0
         self.rev_index = 0
         self.rev_enc_anchor = None
-        self.rev_theta_accum = 0.0
+        self.rev_angle_anchor = 0.0
         self.samples = []
         self.last_cpr = np.nan
 
@@ -642,7 +642,7 @@ class CPREstimator:
         if self.prev_angle is None:
             self.prev_angle = angle_wrapped
             self.rev_enc_anchor = enc_count
-            self.rev_theta_accum = 0.0
+            self.rev_angle_anchor = self.angle_unwrapped
             return
         d = angle_wrapped - self.prev_angle
         while d > math.pi:
@@ -651,17 +651,18 @@ class CPREstimator:
             d += 2.0 * math.pi
         self.angle_unwrapped += d
         self.angle_travel += abs(d)
-        self.rev_theta_accum += abs(d)
         self.prev_angle = angle_wrapped
-        while self.rev_theta_accum >= (2.0 * math.pi):
+        theta_window = self.angle_unwrapped - self.rev_angle_anchor
+        while abs(theta_window) >= (2.0 * math.pi):
             if self.rev_enc_anchor is not None:
                 delta = abs(enc_count - self.rev_enc_anchor)
                 if delta > 1:
                     self.samples.append(float(delta))
                     self.last_cpr = float(delta)
             self.rev_enc_anchor = enc_count
-            self.rev_theta_accum -= 2.0 * math.pi
             self.rev_index += 1
+            self.rev_angle_anchor += math.copysign(2.0 * math.pi, theta_window)
+            theta_window = self.angle_unwrapped - self.rev_angle_anchor
 
     @property
     def mean(self):

@@ -316,6 +316,9 @@ def _collect_cpr_and_r_from_imu(args) -> tuple[list[dict], float, list[dict], fl
                 snap = collector.snapshot()
                 key = kb.read_key_nonblocking(timeout=0.05)
                 changed = ctrl.apply_key(key)
+                if viewer_proc is not None and viewer_proc.poll() is not None:
+                    print("\n[INFO] IMU viewer가 종료되어 calibration도 함께 종료합니다.")
+                    break
                 if key in ("c", "C"):
                     baseline_cpr_idx = len(snap["cpr_samples"])
                     baseline_tip_idx = len(snap["tip_hist"])
@@ -361,6 +364,10 @@ def _collect_cpr_and_r_from_imu(args) -> tuple[list[dict], float, list[dict], fl
         collector.stop()
         if viewer_proc is not None and viewer_proc.poll() is None:
             viewer_proc.terminate()
+            try:
+                viewer_proc.wait(timeout=1.5)
+            except Exception:
+                viewer_proc.kill()
 
 
 def _estimate_r_trials_from_snapshot(snapshot: dict) -> tuple[list[dict], float | None]:
