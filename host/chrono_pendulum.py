@@ -637,11 +637,13 @@ class CPREstimator:
         self.rev_angle_anchor = 0.0
         self.samples = []
         self.last_cpr = np.nan
+        self.motion_started = False
 
     def reset_revolution_window(self, enc_count):
         self.rev_enc_anchor = enc_count
         self.rev_angle_anchor = self.angle_unwrapped
         self.last_cpr = np.nan
+        self.motion_started = False
 
     def update(self, angle_wrapped, enc_count):
         if self.prev_angle is None:
@@ -657,6 +659,11 @@ class CPREstimator:
         self.angle_travel += abs(d)
         self.prev_angle = angle_wrapped
         theta_window = self.angle_unwrapped - self.rev_angle_anchor
+        if not self.motion_started:
+            if abs(theta_window) < math.radians(5.0):
+                self.rev_enc_anchor = enc_count
+            else:
+                self.motion_started = True
         while abs(theta_window) >= (2.0 * math.pi):
             if self.rev_enc_anchor is not None:
                 delta = abs(enc_count - self.rev_enc_anchor)
@@ -839,12 +846,7 @@ class PendulumModel:
         self.link.SetInertiaXX(ch.ChVector3d(1e-5, 1e-5, izz_com))
         # Body reference frame is at motor pivot; COM is at link center.
         com_frame = ch.ChFramed(ch.ChVector3d(0.0, -cfg.link_L / 2.0, 0.0), ch.QUNIT)
-        if hasattr(self.link, "SetFrameCOMToRef"):
-            self.link.SetFrameCOMToRef(com_frame)
-        else:
-            # Older/newer Chrono python bindings may not expose SetFrameCOMToRef.
-            # In that case keep default COM frame to avoid runtime crash.
-            print("[WARN] ChBody.SetFrameCOMToRef is unavailable in this Chrono build; using default COM frame.")
+        self.link.SetFrameCOMToRef(com_frame)
         self.link.SetPos(ch.ChVector3d(0.0, 0.0, cfg.motor_length / 2.0))
         self.link.SetRot(ch.QuatFromAngleZ(math.radians(cfg.theta0_deg)))
         self.sys.Add(self.link)

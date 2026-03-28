@@ -302,6 +302,15 @@ class CprCollector:
                 self.state.rev_enc_anchor = self.state.enc
                 self.state.rev_angle_anchor = self.state.angle_unwrapped
                 self.state.last_cpr = None
+            if hasattr(self.state, "motion_started"):
+                self.state.motion_started = False
+            self.state.rev_index = 0
+            self.state.cpr_samples = []
+            if hasattr(self.state.tip_hist, "clear"):
+                self.state.tip_hist.clear()
+            tip_now = self.state.last_tip.copy() if hasattr(self.state, "last_tip") else self.state.tip0.copy()
+            self.state.tip0 = tip_now.copy()
+            self.state.tip_hist.append(tip_now.copy())
 
 
 def _collect_cpr_and_r_from_imu(args) -> tuple[list[dict], float, list[dict], float]:
@@ -315,12 +324,13 @@ def _collect_cpr_and_r_from_imu(args) -> tuple[list[dict], float, list[dict], fl
             raise RuntimeError("IMU 데이터를 받지 못했습니다. 토픽 연결 상태를 확인하세요.")
 
         print_help()
-        baseline_cpr_idx = 0
-        baseline_tip_idx = 0
+        collector.reset_revolution_window()
+        baseline = collector.snapshot()
+        baseline_cpr_idx = len(baseline["cpr_samples"])
+        baseline_tip_idx = len(baseline["tip_hist"])
         print("[INFO] 키보드 입력으로 모터를 조작하며 calibration 데이터를 수집합니다.")
         ctrl = collector._controller_node
         period = 1.0 / max(ctrl.cfg.loop_hz, 1e-6)
-        collector.reset_revolution_window()
         with KeyboardReader() as kb:
             while True:
                 snap = collector.snapshot()
@@ -331,8 +341,9 @@ def _collect_cpr_and_r_from_imu(args) -> tuple[list[dict], float, list[dict], fl
                     break
                 if key in ("c", "C"):
                     collector.reset_revolution_window()
-                    baseline_cpr_idx = len(snap["cpr_samples"])
-                    baseline_tip_idx = len(snap["tip_hist"])
+                    baseline = collector.snapshot()
+                    baseline_cpr_idx = len(baseline["cpr_samples"])
+                    baseline_tip_idx = len(baseline["tip_hist"])
                 elif key in ("q", "Q"):
                     break
 
@@ -410,9 +421,7 @@ def _estimate_r_trials_from_snapshot(snapshot: dict) -> tuple[list[dict], float 
                 "method": "tip_norm",
                 "radius_m": r_instant,
             }
-            for idx, cpr in enumerate(cpr_samples, start=1)
-        ]
-        mean_cpr = float(mean(cpr_samples))
+        )
 
         dot = tx * ref[0] + ty * ref[1] + tz * ref[2]
         cos_angle = dot / (tip_norm * ref_norm)
