@@ -41,8 +41,9 @@ select_csv_file() {
 }
 
 select_json_file() {
+    local label="${1:-JSON 파일}"
     echo "--------------------------------" >&2
-    echo "[INFO] Parameter JSON 파일 선택" >&2
+    echo "[INFO] ${label} 선택" >&2
 
     local files=("$BASE_DIR"/run_logs/*.json "$BASE_DIR"/rl_results/*.json)
     local valid=()
@@ -84,15 +85,18 @@ run_chrono_pendulum() {
     echo "2) Jetson mode (ROS input)"
     read -p "Enter number: " mode
 
-    json_file=$(select_json_file)
-    if [ -z "$json_file" ]; then return; fi
+    param_json=$(select_json_file "Model Parameter JSON")
+    if [ -z "$param_json" ]; then return; fi
+
+    radius_json=$(select_json_file "Calibration Radius JSON")
+    if [ -z "$radius_json" ]; then return; fi
 
     if [ "$mode" == "1" ]; then
         echo "[INFO] chrono_pendulum (HOST mode)"
-        python3 $BASE_DIR/chrono_pendulum.py --mode host --calibration-json "$json_file"
+        python3 $BASE_DIR/chrono_pendulum.py --mode host --calibration-json "$param_json" --radius-json "$radius_json"
     elif [ "$mode" == "2" ]; then
         echo "[INFO] chrono_pendulum (JETSON mode)"
-        python3 $BASE_DIR/chrono_pendulum.py --mode jetson --calibration-json "$json_file"
+        python3 $BASE_DIR/chrono_pendulum.py --mode jetson --calibration-json "$param_json" --radius-json "$radius_json"
     else
         echo "[ERROR] Invalid selection"
     fi
@@ -108,19 +112,7 @@ run_plot() {
     file=$(select_csv_file)
     if [ -z "$file" ]; then return; fi
 
-    echo "--------------------------------"
-    echo "Select plot mode:"
-    echo "1) Calibration data plotting"
-    echo "2) Simulation data plotting (sim vs real)"
-    read -p "Enter number: " plot_mode
-
-    if [ "$plot_mode" == "1" ]; then
-        python3 $BASE_DIR/plot_pendulum.py --csv "$file" --mode calibration
-    elif [ "$plot_mode" == "2" ]; then
-        python3 $BASE_DIR/plot_pendulum.py --csv "$file" --mode simulation
-    else
-        echo "[ERROR] Invalid selection"
-    fi
+    python3 $BASE_DIR/plot_pendulum.py --csv "$file"
 }
 
 run_rl_fitting() {
