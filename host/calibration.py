@@ -9,7 +9,6 @@
 
 import argparse
 import json
-import math
 import os
 import select
 import shutil
@@ -411,7 +410,9 @@ def _estimate_r_trials_from_snapshot(snapshot: dict) -> tuple[list[dict], float 
                 "method": "tip_norm",
                 "radius_m": r_instant,
             }
-        )
+            for idx, cpr in enumerate(cpr_samples, start=1)
+        ]
+        mean_cpr = float(mean(cpr_samples))
 
         dot = tx * ref[0] + ty * ref[1] + tz * ref[2]
         cos_angle = dot / (tip_norm * ref_norm)
