@@ -294,6 +294,15 @@ class CprCollector:
                 "tip0": tip0,
             }
 
+    def reset_revolution_window(self) -> None:
+        with self.state.lock:
+            if hasattr(self.state, "reset_revolution_window"):
+                self.state.reset_revolution_window()
+            else:
+                self.state.rev_enc_anchor = self.state.enc
+                self.state.rev_angle_anchor = self.state.angle_unwrapped
+                self.state.last_cpr = None
+
 
 def _collect_cpr_and_r_from_imu(args) -> tuple[list[dict], float, list[dict], float]:
     collector = CprCollector(imu_topic=args.imu_topic, enc_topic=args.hw_enc_topic)
@@ -311,6 +320,7 @@ def _collect_cpr_and_r_from_imu(args) -> tuple[list[dict], float, list[dict], fl
         print("[INFO] 키보드 입력으로 모터를 조작하며 calibration 데이터를 수집합니다.")
         ctrl = collector._controller_node
         period = 1.0 / max(ctrl.cfg.loop_hz, 1e-6)
+        collector.reset_revolution_window()
         with KeyboardReader() as kb:
             while True:
                 snap = collector.snapshot()
@@ -320,6 +330,7 @@ def _collect_cpr_and_r_from_imu(args) -> tuple[list[dict], float, list[dict], fl
                     print("\n[INFO] IMU viewer가 종료되어 calibration도 함께 종료합니다.")
                     break
                 if key in ("c", "C"):
+                    collector.reset_revolution_window()
                     baseline_cpr_idx = len(snap["cpr_samples"])
                     baseline_tip_idx = len(snap["tip_hist"])
                 elif key in ("q", "Q"):
@@ -340,8 +351,10 @@ def _collect_cpr_and_r_from_imu(args) -> tuple[list[dict], float, list[dict], fl
         snap["cpr_samples"] = snap["cpr_samples"][baseline_cpr_idx:]
         snap["tip_hist"] = snap["tip_hist"][baseline_tip_idx:]
         cpr_samples = snap["cpr_samples"]
-        if not cpr_samples:
-            raise RuntimeError("full rotation이 감지되지 않아 CPR 샘플이 없습니다. 최소 1회 이상 회전 후 q를 눌러주세요.")
+        if len(cpr_samples) < 1:
+            raise RuntimeError(
+                "CPR 샘플이 부족합니다. 최소 1회전 이상 수행 후 q를 눌러주세요."
+            )
 
         cpr_trials = [
             {
@@ -397,7 +410,9 @@ def _estimate_r_trials_from_snapshot(snapshot: dict) -> tuple[list[dict], float 
                 "method": "tip_norm",
                 "radius_m": r_instant,
             }
-        )
+            for idx, cpr in enumerate(cpr_samples, start=1)
+        ]
+        mean_cpr = float(mean(cpr_samples))
 
         dot = tx * ref[0] + ty * ref[1] + tz * ref[2]
         cos_angle = dot / (tip_norm * ref_norm)
