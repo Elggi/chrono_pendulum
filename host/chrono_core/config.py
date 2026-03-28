@@ -126,6 +126,8 @@ class BridgeConfig:
     topic_sim_delay_ms: str = "/sim/delay_ms"
     topic_sim_status: str = "/sim/status"
 
+    # Keep both names for backward compatibility with pre-modularized code paths.
+    topic_imu: str = "/sim/imu/data"
     topic_imu_data: str = "/sim/imu/data"
 
     log_dir: str = "./run_logs"

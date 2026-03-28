@@ -69,12 +69,12 @@
 
 #### 2) radius (mean_radius_m)
 - 용도: calibration 결과에서 얻은 실제 기구학 반경을 `cfg.radius_m`로 로딩.
-- 현재 `chrono_pendulum.py`에서는 반경을 출력/메타로 보존하고, 다른 분석/식별 단계에서 동일 실측 반경을 참조할 수 있도록 일관성 유지.
+- 최신 코드에서는 **시각 형상/IMU body 배치**는 `cfg.link_L`를 유지하고, **동역학 COM/관성 계산**은 `cfg.radius_m`(실측 반경)를 사용한다.
 - 정리하면 radius는 **실험 계측 기하값**, CPR은 **encoder 각도 환산값**.
 
 ### COM(질량중심) 처리 로직 (구체화)
 
-최신 `chrono_pendulum.py`는 link를 균일 막대로만 보는 대신, **link + IMU 복합체**로 COM/관성을 계산함.
+최신 `chrono_pendulum.py`는 link를 균일 막대로만 보는 대신, **link + IMU 복합체**로 COM/관성을 계산함. 이때 COM/관성 계산의 길이 스케일은 `radius_m`를 사용한다.
 
 ```text
 motor pivot (body ref)

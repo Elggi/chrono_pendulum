@@ -100,10 +100,14 @@ class PendulumModel:
 
     @staticmethod
     def _compute_composite_link_properties(cfg: BridgeConfig):
+        dyn_len = float(cfg.radius_m) if float(cfg.radius_m) > 1e-9 else float(cfg.link_L)
         m_link = max(float(cfg.link_mass), 1e-6)
         m_imu = max(float(cfg.imu_mass), 0.0)
-        r_link = np.array([0.0, -cfg.link_L / 2.0, 0.0], dtype=float)
-        imu_y = float(cfg.imu_offset_y) if abs(cfg.imu_offset_y) > 1e-9 else float(-cfg.link_L + cfg.imu_size_y / 2.0)
+        # NOTE:
+        #   - Visual geometry/IMU body placement still uses cfg.link_L in __init__.
+        #   - Dynamic COM/inertia modeling uses measured radius (cfg.radius_m) here.
+        r_link = np.array([0.0, -dyn_len / 2.0, 0.0], dtype=float)
+        imu_y = float(cfg.imu_offset_y) if abs(cfg.imu_offset_y) > 1e-9 else float(-dyn_len + cfg.imu_size_y / 2.0)
         r_imu = np.array([float(cfg.imu_offset_x), imu_y, float(cfg.imu_offset_z)], dtype=float)
         m_total = m_link + m_imu
         if m_total <= 1e-9:
@@ -112,7 +116,7 @@ class PendulumModel:
         r_com = (m_link * r_link + m_imu * r_imu) / m_total
 
         # z-axis inertia, with parallel-axis theorem for off-axis IMU offset.
-        izz_link_center = (1.0 / 12.0) * m_link * (cfg.link_L ** 2 + cfg.link_W ** 2)
+        izz_link_center = (1.0 / 12.0) * m_link * (dyn_len ** 2 + cfg.link_W ** 2)
         izz_imu_center = (1.0 / 12.0) * m_imu * (cfg.imu_size_x ** 2 + cfg.imu_size_y ** 2)
         d_link = r_link - r_com
         d_imu = r_imu - r_com
