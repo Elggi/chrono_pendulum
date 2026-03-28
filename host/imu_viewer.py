@@ -48,6 +48,7 @@ class SharedState:
         self.gyro = np.zeros(3, dtype=float)
         self.acc = np.zeros(3, dtype=float)
         self.enc = 0.0
+        self.enc_received = False
         self.seq = 0
 
         self.has_init = False
@@ -68,13 +69,15 @@ class SharedState:
         self.rev_angle_anchor = 0.0
         self.last_cpr = None
         self.cpr_samples = []
+        self.motion_started = False
 
         self.last_tip = self.ref_tip_local.copy()
 
     def reset_revolution_window(self):
-        self.rev_enc_anchor = self.enc
+        self.rev_enc_anchor = self.enc if self.enc_received else None
         self.rev_angle_anchor = self.angle_unwrapped
         self.last_cpr = None
+        self.motion_started = False
 
     def update_imu(self, q, gyro, acc):
         R_abs = quat_to_rotmat(*q)
@@ -121,11 +124,21 @@ class SharedState:
                 self.reset_revolution_window()
 
             theta_window = self.angle_unwrapped - self.rev_angle_anchor
+            # Keep encoder anchor synced while still near start angle.
+            # This prevents counting from a stale anchor captured before encoder is initialized.
+            if not self.motion_started:
+                if abs(theta_window) < math.radians(5.0):
+                    if self.enc_received:
+                        self.rev_enc_anchor = self.enc
+                else:
+                    self.motion_started = True
+
             while abs(theta_window) >= (2.0 * math.pi):
-                delta_counts = abs(self.enc - self.rev_enc_anchor)
-                if delta_counts > 0:
-                    self.last_cpr = float(delta_counts)
-                    self.cpr_samples.append(float(delta_counts))
+                if self.rev_enc_anchor is not None:
+                    delta_counts = abs(self.enc - self.rev_enc_anchor)
+                    if delta_counts > 0:
+                        self.last_cpr = float(delta_counts)
+                        self.cpr_samples.append(float(delta_counts))
                 self.rev_enc_anchor = self.enc
                 self.rev_index += 1
                 self.rev_angle_anchor += math.copysign(2.0 * math.pi, theta_window)
@@ -134,6 +147,7 @@ class SharedState:
     def update_enc(self, enc):
         with self.lock:
             self.enc = float(enc)
+            self.enc_received = True
 
 
 class ViewerNode(Node):
