@@ -215,14 +215,46 @@ class CalibrationNode(Node):
         abs_yaw_travel = 0.0
         max_turns_observed = 0.0
         last_dtheta = 0.0
-        rev_index = 0
+        full_rev_count = 0
+        rev_angle_accum = 0.0
+        rev_dir = 0.0
+        rev_enc_anchor = None
+        rev_tip_samples = []
+        cpr_samples = []
+        r_samples = []
 
         t_hist, wz_hist, ay_tan_hist = [], [], []
         delay_est = DelayEstimator(max_delay_ms=self.args.delay_max_ms)
         cmd_delay_line = deque()
 
+        def estimate_r_from_halfturn_pairs(samples):
+            # samples: [(angle_from_rev_start, x, y), ...]
+            if len(samples) < 8:
+                return None
+            pairs = []
+            for i in range(len(samples)):
+                ai, xi, yi = samples[i]
+                best_j = -1
+                best_err = 1e9
+                for j in range(i + 1, len(samples)):
+                    aj, xj, yj = samples[j]
+                    d = abs(abs(aj - ai) - math.pi)
+                    if d < best_err:
+                        best_err = d
+                        best_j = j
+                if best_j >= 0 and best_err < 0.25:  # ~14 deg tolerance
+                    _, xj, yj = samples[best_j]
+                    chord = math.hypot(xj - xi, yj - yi)
+                    if chord > 1e-6:
+                        pairs.append(0.5 * chord)
+            if not pairs:
+                return None
+            pairs.sort()
+            return float(pairs[len(pairs) // 2])
+
         def update_imu_kine():
-            nonlocal imu_R0, prev_tip_angle, yaw_unwrapped, abs_yaw_travel, max_turns_observed, last_dtheta, rev_index
+            nonlocal imu_R0, prev_tip_angle, yaw_unwrapped, abs_yaw_travel, max_turns_observed, last_dtheta
+            nonlocal full_rev_count, rev_angle_accum, rev_dir, rev_enc_anchor, rev_tip_samples, cpr_samples, r_samples
             if self.imu_msg is None:
                 return False
             q = self.imu_msg.orientation
@@ -232,7 +264,11 @@ class CalibrationNode(Node):
                 tip = np.array([0.0, -1.0, 0.0], dtype=float)
                 prev_tip_angle = math.atan2(tip[1], tip[0])
                 last_dtheta = 0.0
-                rev_index = 0
+                full_rev_count = 0
+                rev_angle_accum = 0.0
+                rev_dir = 0.0
+                rev_enc_anchor = self.hw_enc
+                rev_tip_samples = [(0.0, float(tip[0]), float(tip[1]))]
                 return True
 
             R_rel = imu_R0.T @ R_abs
@@ -248,7 +284,37 @@ class CalibrationNode(Node):
             abs_yaw_travel += abs(dtheta)
             prev_tip_angle = ang
             max_turns_observed = max(max_turns_observed, abs(yaw_unwrapped) / (2.0 * math.pi))
-            rev_index = int(math.floor(abs(yaw_unwrapped) / (2.0 * math.pi)))
+
+            if rev_enc_anchor is None:
+                rev_enc_anchor = self.hw_enc
+
+            sgn = np.sign(dtheta)
+            if abs(dtheta) > 1e-9:
+                if rev_dir == 0.0:
+                    rev_dir = sgn
+                elif sgn != rev_dir:
+                    # Direction changed before full turn -> reset turn tracking.
+                    rev_dir = sgn
+                    rev_angle_accum = 0.0
+                    rev_enc_anchor = self.hw_enc
+                    rev_tip_samples = [(0.0, float(tip[0]), float(tip[1]))]
+
+                rev_angle_accum += dtheta
+                rev_tip_samples.append((float(rev_angle_accum), float(tip[0]), float(tip[1])))
+
+                if abs(rev_angle_accum) >= 2.0 * math.pi:
+                    delta_counts = abs(self.hw_enc - rev_enc_anchor)
+                    if delta_counts > 1e-6:
+                        cpr_samples.append(float(delta_counts))
+                    r_est_one = estimate_r_from_halfturn_pairs(rev_tip_samples)
+                    if r_est_one is not None and np.isfinite(r_est_one):
+                        r_samples.append(float(r_est_one))
+                    full_rev_count += 1
+
+                    rev_enc_anchor = self.hw_enc
+                    rev_angle_accum = 0.0
+                    rev_dir = 0.0
+                    rev_tip_samples = [(0.0, float(tip[0]), float(tip[1]))]
 
             w = self.imu_msg.angular_velocity
             a = self.imu_msg.linear_acceleration
@@ -334,9 +400,9 @@ class CalibrationNode(Node):
                 cmd_mag = self.args.sweep_pwm_start
                 t_last_ramp = time.time()
                 t_timeout = time.time() + self.args.segment_timeout_sec
-                rev_start = rev_index
+                rev_start = full_rev_count
                 rev_target = rev_start + 2
-                while rev_index < rev_target and time.time() < t_timeout:
+                while full_rev_count < rev_target and time.time() < t_timeout:
                     if time.time() - t_last_ramp >= self.args.sweep_hold_sec:
                         cmd_mag = min(cmd_mag + self.args.sweep_pwm_step, self.args.max_calib_pwm)
                         t_last_ramp = time.time()
@@ -375,22 +441,8 @@ class CalibrationNode(Node):
         print()
         end_enc = self.hw_enc
         turns_abs_imu = abs_yaw_travel / (2.0 * math.pi)
-        cpr_estimate = abs_encoder_travel / turns_abs_imu if turns_abs_imu > 1e-6 else None
-
-        r_estimate = None
-        if len(t_hist) >= 6:
-            alpha = []
-            for i in range(1, len(wz_hist)):
-                dt = max(t_hist[i] - t_hist[i - 1], 1e-4)
-                alpha.append((wz_hist[i] - wz_hist[i - 1]) / dt)
-            pairs = []
-            n = min(len(alpha), len(ay_tan_hist) - 1)
-            for i in range(n):
-                if abs(alpha[i]) > 0.2:
-                    pairs.append(abs(ay_tan_hist[i + 1]) / abs(alpha[i]))
-            if pairs:
-                pairs.sort()
-                r_estimate = float(pairs[len(pairs) // 2])
+        cpr_estimate = float(np.mean(cpr_samples)) if len(cpr_samples) > 0 else (abs_encoder_travel / turns_abs_imu if turns_abs_imu > 1e-6 else None)
+        r_estimate = float(np.mean(r_samples)) if len(r_samples) > 0 else None
 
         return {
             "encoder_start": start_enc,
@@ -401,9 +453,13 @@ class CalibrationNode(Node):
             "turns_net_encoder": None if start_enc is None else (end_enc - start_enc) / max(self.args.counts_per_rev, 1e-9),
             "turns_abs_imu": turns_abs_imu,
             "turns_peak_observed": max_turns_observed,
-            "revolutions_detected": rev_index,
+            "revolutions_detected": full_rev_count,
             "counts_per_revolution_est": cpr_estimate,
+            "cpr_samples_count": len(cpr_samples),
+            "cpr_samples": cpr_samples,
             "moment_arm_r_est_m": r_estimate,
+            "r_samples_count": len(r_samples),
+            "r_samples": r_samples,
             "delay_est_ms": 1e3 * delay_est.delay_s,
         }
 
@@ -471,8 +527,10 @@ def host_main(args):
     host_summary = node.run_protocol(host_csv)
     node.send_status("host:protocol:finished")
     print(f"[CALIB] CPR_est={host_summary.get('counts_per_revolution_est')}")
+    print(f"[CALIB] CPR_samples={host_summary.get('cpr_samples_count')}")
     print(f"[CALIB] delay_est_ms={host_summary.get('delay_est_ms')}")
     print(f"[CALIB] r_est(m)={host_summary.get('moment_arm_r_est_m')}")
+    print(f"[CALIB] r_samples={host_summary.get('r_samples_count')}")
     print(f"[CALIB] turns_peak_observed={host_summary.get('turns_peak_observed')}")
 
     result = {

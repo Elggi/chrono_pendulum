@@ -62,8 +62,9 @@ class SharedState:
         self.angle_unwrapped = 0.0
         self.prev_angle = None
 
-        self.rev_index = 0
         self.rev_enc_anchor = None
+        self.rev_angle_accum = 0.0
+        self.rev_dir = 0.0
         self.last_cpr = None
         self.cpr_samples = []
 
@@ -85,8 +86,9 @@ class SharedState:
                 self.tip_hist.append(self.tip0.copy())
                 self.prev_angle = math.atan2(self.tip0[1], self.tip0[0])
                 self.angle_unwrapped = 0.0
-                self.rev_index = 0
                 self.rev_enc_anchor = self.enc
+                self.rev_angle_accum = 0.0
+                self.rev_dir = 0.0
                 self.last_tip = self.tip0.copy()
                 return
 
@@ -111,15 +113,26 @@ class SharedState:
             if self.rev_enc_anchor is None:
                 self.rev_enc_anchor = self.enc
 
-            new_rev_index = math.floor(abs(self.angle_unwrapped) / (2.0 * math.pi))
+            sgn = np.sign(dtheta)
+            if abs(dtheta) < 1e-9:
+                return
+            if self.rev_dir == 0.0:
+                self.rev_dir = sgn
+            elif sgn != self.rev_dir:
+                # Direction changed before full 360 deg -> restart accumulation.
+                self.rev_dir = sgn
+                self.rev_angle_accum = 0.0
+                self.rev_enc_anchor = self.enc
 
-            if new_rev_index > self.rev_index:
+            self.rev_angle_accum += dtheta
+            if abs(self.rev_angle_accum) >= 2.0 * math.pi:
                 delta_counts = abs(self.enc - self.rev_enc_anchor)
                 if delta_counts > 0:
                     self.last_cpr = float(delta_counts)
                     self.cpr_samples.append(float(delta_counts))
                 self.rev_enc_anchor = self.enc
-                self.rev_index = new_rev_index
+                self.rev_angle_accum = 0.0
+                self.rev_dir = 0.0
 
     def update_enc(self, enc):
         with self.lock:
@@ -233,7 +246,6 @@ def main():
             tip0 = state.tip0.copy()
             tip_hist = np.array(state.tip_hist) if len(state.tip_hist) > 0 else np.zeros((0, 3))
             angle_unwrapped = state.angle_unwrapped
-            rev_index = state.rev_index
             last_cpr = state.last_cpr
             cpr_samples = list(state.cpr_samples)
             link_length = state.link_length
@@ -327,10 +339,11 @@ def main():
         mean_cpr = float(np.mean(cpr_samples)) if len(cpr_samples) > 0 else None
         angle_deg = math.degrees(angle_unwrapped)
 
+        rev_count = len(cpr_samples)
         traj_info = [
             f"encoder count: {enc:.1f}",
             f"relative angle unwrapped [deg]: {angle_deg:.1f}",
-            f"full rotations detected: {rev_index}",
+            f"full rotations detected: {rev_count}",
             f"last counts / rotation: {last_cpr:.1f}" if last_cpr is not None else "last counts / rotation: n/a",
             f"mean counts / rotation: {mean_cpr:.1f}" if mean_cpr is not None else "mean counts / rotation: n/a",
         ]

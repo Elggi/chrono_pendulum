@@ -127,26 +127,30 @@ run_plot() {
 }
 
 run_rl_fitting() {
-    file=$(select_csv_file)
-    if [ -z "$file" ]; then return; fi
-
     echo "--------------------------------"
-    echo "Select RL Algorithm:"
-    echo "1) PPO (stable)"
-    echo "2) SAC (more exploration)"
-    read -p "Enter number: " algo_choice
+    read -p "num episodes (default 1000): " input_n
+    read -p "gamma (default 0.995): " input_gamma
+    read -p "lambda/GAE (default 0.98): " input_lam
+    read -p "target KL (default 0.003): " input_kl
+    read -p "batch size (default 20): " input_bs
+    read -p "render? [ON/OFF] (default OFF): " input_render
+    read -p "device [auto/cpu/cuda] (default auto): " input_device
 
-    if [ "$algo_choice" == "1" ]; then
-        algo="ppo"
-    elif [ "$algo_choice" == "2" ]; then
-        algo="sac"
-    else
-        echo "[ERROR] Invalid selection"
-        return
+    n_ep="${input_n:-1000}"
+    gamma="${input_gamma:-0.995}"
+    lam="${input_lam:-0.98}"
+    kl="${input_kl:-0.003}"
+    bs="${input_bs:-20}"
+    render="${input_render:-OFF}"
+    device="${input_device:-auto}"
+
+    render_flag="--renderOFF"
+    if [[ "$render" == "ON" || "$render" == "on" ]]; then
+        render_flag="--renderON"
     fi
 
-    echo "[INFO] RL fitting 실행 ($algo)"
-    python3 $BASE_DIR/RL_fitting.py --csv "$file" --algo $algo
+    echo "[INFO] RL training 실행 (PPO, episodes=$n_ep, gamma=$gamma, lam=$lam, kl=$kl, batch=$bs, device=$device, render=$render)"
+    python3 $BASE_DIR/RL_fitting.py -n "$n_ep" -g "$gamma" -l "$lam" -k "$kl" -b "$bs" $render_flag --device "$device"
 }
 
 run_full_pipeline() {
