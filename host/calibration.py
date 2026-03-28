@@ -297,9 +297,12 @@ class CprCollector:
 
     def reset_revolution_window(self) -> None:
         with self.state.lock:
-            self.state.rev_enc_anchor = self.state.enc
-            self.state.rev_angle_anchor = self.state.angle_unwrapped
-            self.state.last_cpr = None
+            if hasattr(self.state, "reset_revolution_window"):
+                self.state.reset_revolution_window()
+            else:
+                self.state.rev_enc_anchor = self.state.enc
+                self.state.rev_angle_anchor = self.state.angle_unwrapped
+                self.state.last_cpr = None
 
 
 def _collect_cpr_and_r_from_imu(args) -> tuple[list[dict], float, list[dict], float]:

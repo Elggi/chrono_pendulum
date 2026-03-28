@@ -638,11 +638,15 @@ class CPREstimator:
         self.samples = []
         self.last_cpr = np.nan
 
+    def reset_revolution_window(self, enc_count):
+        self.rev_enc_anchor = enc_count
+        self.rev_angle_anchor = self.angle_unwrapped
+        self.last_cpr = np.nan
+
     def update(self, angle_wrapped, enc_count):
         if self.prev_angle is None:
             self.prev_angle = angle_wrapped
-            self.rev_enc_anchor = enc_count
-            self.rev_angle_anchor = self.angle_unwrapped
+            self.reset_revolution_window(enc_count)
             return
         d = angle_wrapped - self.prev_angle
         while d > math.pi:

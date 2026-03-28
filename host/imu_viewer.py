@@ -71,6 +71,11 @@ class SharedState:
 
         self.last_tip = self.ref_tip_local.copy()
 
+    def reset_revolution_window(self):
+        self.rev_enc_anchor = self.enc
+        self.rev_angle_anchor = self.angle_unwrapped
+        self.last_cpr = None
+
     def update_imu(self, q, gyro, acc):
         R_abs = quat_to_rotmat(*q)
 
@@ -89,8 +94,7 @@ class SharedState:
                 self.angle_unwrapped = 0.0
                 self.angle_travel = 0.0
                 self.rev_index = 0
-                self.rev_enc_anchor = self.enc
-                self.rev_angle_anchor = 0.0
+                self.reset_revolution_window()
                 self.last_tip = self.tip0.copy()
                 return
 
@@ -114,8 +118,7 @@ class SharedState:
             self.prev_angle = angle
 
             if self.rev_enc_anchor is None:
-                self.rev_enc_anchor = self.enc
-                self.rev_angle_anchor = self.angle_unwrapped
+                self.reset_revolution_window()
 
             theta_window = self.angle_unwrapped - self.rev_angle_anchor
             while abs(theta_window) >= (2.0 * math.pi):
