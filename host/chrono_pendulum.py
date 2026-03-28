@@ -126,6 +126,7 @@ class BridgeConfig:
     shaft_length: float = 0.015
 
     link_L: float = 0.285
+    radius_m: float = 0.285
     link_W: float = 0.020
     link_T: float = 0.006
     link_mass: float = 0.200
@@ -630,8 +631,10 @@ class CPREstimator:
     def __init__(self):
         self.prev_angle = None
         self.angle_unwrapped = 0.0
+        self.angle_travel = 0.0
         self.rev_index = 0
         self.rev_enc_anchor = None
+        self.rev_angle_anchor = 0.0
         self.samples = []
         self.last_cpr = np.nan
 
@@ -639,6 +642,7 @@ class CPREstimator:
         if self.prev_angle is None:
             self.prev_angle = angle_wrapped
             self.rev_enc_anchor = enc_count
+            self.rev_angle_anchor = self.angle_unwrapped
             return
         d = angle_wrapped - self.prev_angle
         while d > math.pi:
@@ -646,16 +650,19 @@ class CPREstimator:
         while d < -math.pi:
             d += 2.0 * math.pi
         self.angle_unwrapped += d
+        self.angle_travel += abs(d)
         self.prev_angle = angle_wrapped
-        new_rev = int(math.floor(abs(self.angle_unwrapped) / (2.0 * math.pi)))
-        if new_rev > self.rev_index:
+        theta_window = self.angle_unwrapped - self.rev_angle_anchor
+        while abs(theta_window) >= (2.0 * math.pi):
             if self.rev_enc_anchor is not None:
                 delta = abs(enc_count - self.rev_enc_anchor)
                 if delta > 1:
                     self.samples.append(float(delta))
                     self.last_cpr = float(delta)
             self.rev_enc_anchor = enc_count
-            self.rev_index = new_rev
+            self.rev_index += 1
+            self.rev_angle_anchor += math.copysign(2.0 * math.pi, theta_window)
+            theta_window = self.angle_unwrapped - self.rev_angle_anchor
 
     @property
     def mean(self):
@@ -827,7 +834,13 @@ class PendulumModel:
         izz_com = (1.0 / 12.0) * cfg.link_mass * (cfg.link_L ** 2 + cfg.link_W ** 2)
         self.link.SetInertiaXX(ch.ChVector3d(1e-5, 1e-5, izz_com))
         # Body reference frame is at motor pivot; COM is at link center.
-        self.link.SetFrameCOMToRef(ch.ChFramed(ch.ChVector3d(0.0, -cfg.link_L / 2.0, 0.0), ch.QUNIT))
+        com_frame = ch.ChFramed(ch.ChVector3d(0.0, -cfg.link_L / 2.0, 0.0), ch.QUNIT)
+        if hasattr(self.link, "SetFrameCOMToRef"):
+            self.link.SetFrameCOMToRef(com_frame)
+        else:
+            # Older/newer Chrono python bindings may not expose SetFrameCOMToRef.
+            # In that case keep default COM frame to avoid runtime crash.
+            print("[WARN] ChBody.SetFrameCOMToRef is unavailable in this Chrono build; using default COM frame.")
         self.link.SetPos(ch.ChVector3d(0.0, 0.0, cfg.motor_length / 2.0))
         self.link.SetRot(ch.QuatFromAngleZ(math.radians(cfg.theta0_deg)))
         self.sys.Add(self.link)
@@ -1087,8 +1100,35 @@ def apply_calibration_json(cfg: BridgeConfig, json_path: str | None):
     cfg.R_init = float(model_init.get("R", cfg.R_init))
     cfg.k_e_init = float(model_init.get("k_e", cfg.k_e_init))
     cfg.delay_init_ms = float(delay.get("effective_control_delay_ms", cfg.delay_init_ms))
+
     cfg.calibration_json = json_path
     return calib
+
+
+def extract_radius_from_json(json_path: str | None) -> float | None:
+    if not json_path or not os.path.exists(json_path):
+        return None
+
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    summary = data.get("summary", {}) if isinstance(data.get("summary", {}), dict) else {}
+    radius_candidates = [
+        summary.get("mean_radius_m"),
+        summary.get("r_m"),
+        data.get("mean_radius_m"),
+        data.get("r_from_imu_orientation"),
+    ]
+    for radius in radius_candidates:
+        if radius is None:
+            continue
+        try:
+            radius = float(radius)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(radius) and radius > 0.0:
+            return radius
+    return None
 
 
 # ============================================================
@@ -1113,6 +1153,8 @@ def main():
     ap.add_argument("--disable-auto-delay", action="store_true")
     ap.add_argument("--enable-online-fit", action="store_true")
     ap.add_argument("--calibration-json", default="./run_logs/calibration_latest.json")
+    ap.add_argument("--radius-json", default="./run_logs/calibration_latest.json",
+                    help="JSON file containing measured radius (e.g., calibration_latest.json).")
     ap.add_argument("--J", type=float, default=0.010)
     ap.add_argument("--b", type=float, default=0.030)
     ap.add_argument("--tau-c", type=float, default=0.080)
@@ -1136,6 +1178,7 @@ def main():
     cfg.omega0 = args.omega0
     cfg.link_mass = args.link_mass
     cfg.link_L = args.link_length
+    cfg.radius_m = args.link_length
     cfg.J_init = args.J
     cfg.b_init = args.b
     cfg.tau_c_init = args.tau_c
@@ -1149,6 +1192,9 @@ def main():
     cfg.online_fit_enable = args.enable_online_fit
 
     calib = apply_calibration_json(cfg, args.calibration_json)
+    radius_measured = extract_radius_from_json(args.radius_json)
+    if radius_measured is not None:
+        cfg.radius_m = float(radius_measured)
 
     log_csv = make_numbered_path(cfg.log_dir, cfg.log_prefix, ".csv")
     log_meta = log_csv[:-4] + ".meta.json"
@@ -1217,6 +1263,10 @@ def main():
 
         if calib is not None:
             print(f"[INFO] Loaded calibration json: {args.calibration_json}")
+        if radius_measured is not None:
+            print(f"[INFO] Loaded radius json: {args.radius_json}")
+        print(f"[INFO] Visual link length (--link-length): {cfg.link_L:.6f} m")
+        print(f"[INFO] Computation radius (from radius-json): {cfg.radius_m:.6f} m")
         print(f"[INFO] online_fit_enable={cfg.online_fit_enable}")
 
         try:
@@ -1357,6 +1407,7 @@ def main():
         "log_csv": log_csv,
         "config": asdict(cfg),
         "calibration_json": cfg.calibration_json if calib is not None else None,
+        "radius_json": args.radius_json,
         "estimated_delay_ms_final": 1000.0 * delay_comp.delay_sec,
         "cpr_last": None if not np.isfinite(cpr_est.last_cpr) else float(cpr_est.last_cpr),
         "cpr_mean": None if not np.isfinite(cpr_est.mean) else float(cpr_est.mean),
