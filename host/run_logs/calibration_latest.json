@@ -1,13 +1,288 @@
 {
-  "created_at_utc": "2026-03-26T23:34:29Z",
-  "user_pwm_limit": 80.0,
-  "pwm_step": 1.0,
-  "detected_full_rotations": 1,
-  "extra_rotations_after_stop": 2,
-  "reverse_turns_done": 0,
-  "mean_cpr": 512.4,
-  "r_from_imu_orientation": 0.5957987850521748,
-  "encoder_start": 0.0,
-  "encoder_end": -1995.0,
-  "yaw_unwrapped_rad": 11.104025134469413
+  "created_at_utc": "2026-03-28T03:48:37Z",
+  "method": "manual_rotation_with_orientation",
+  "summary": {
+    "mean_cpr": 167.4375,
+    "mean_radius_m": 0.2497948937953783,
+    "trial_count_cpr": 16,
+    "trial_count_r": 42
+  },
+  "cpr_trials": [
+    {
+      "trial": 1,
+      "cpr": 192.0
+    },
+    {
+      "trial": 2,
+      "cpr": 217.0
+    },
+    {
+      "trial": 3,
+      "cpr": 11.0
+    },
+    {
+      "trial": 4,
+      "cpr": 191.0
+    },
+    {
+      "trial": 5,
+      "cpr": 213.0
+    },
+    {
+      "trial": 6,
+      "cpr": 212.0
+    },
+    {
+      "trial": 7,
+      "cpr": 137.0
+    },
+    {
+      "trial": 8,
+      "cpr": 193.0
+    },
+    {
+      "trial": 9,
+      "cpr": 180.0
+    },
+    {
+      "trial": 10,
+      "cpr": 260.0
+    },
+    {
+      "trial": 11,
+      "cpr": 200.0
+    },
+    {
+      "trial": 12,
+      "cpr": 65.0
+    },
+    {
+      "trial": 13,
+      "cpr": 162.0
+    },
+    {
+      "trial": 14,
+      "cpr": 219.0
+    },
+    {
+      "trial": 15,
+      "cpr": 144.0
+    },
+    {
+      "trial": 16,
+      "cpr": 83.0
+    }
+  ],
+  "radius_trials": [
+    {
+      "trial": 494,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24969825993052172
+    },
+    {
+      "trial": 495,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24994770576593128
+    },
+    {
+      "trial": 496,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.2499868971585779
+    },
+    {
+      "trial": 497,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.2497775666295809
+    },
+    {
+      "trial": 542,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24998933352967395
+    },
+    {
+      "trial": 543,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.249557722522346
+    },
+    {
+      "trial": 890,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.2498204047716292
+    },
+    {
+      "trial": 891,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24998876885004323
+    },
+    {
+      "trial": 892,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24970863176361896
+    },
+    {
+      "trial": 929,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24997243049600787
+    },
+    {
+      "trial": 967,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24962551537886882
+    },
+    {
+      "trial": 968,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24996736774372924
+    },
+    {
+      "trial": 969,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24989672680277622
+    },
+    {
+      "trial": 970,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24945619119306525
+    },
+    {
+      "trial": 1373,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24983948133813264
+    },
+    {
+      "trial": 1374,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24998576830926014
+    },
+    {
+      "trial": 1375,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24961774677826307
+    },
+    {
+      "trial": 1410,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24947840479616754
+    },
+    {
+      "trial": 1411,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24986267281156926
+    },
+    {
+      "trial": 1438,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.2497175994266485
+    },
+    {
+      "trial": 1439,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24940139438263956
+    },
+    {
+      "trial": 1466,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.2499772505913185
+    },
+    {
+      "trial": 1502,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.2499047300804659
+    },
+    {
+      "trial": 1503,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24983173813521106
+    },
+    {
+      "trial": 1980,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.2497605745951788
+    },
+    {
+      "trial": 1981,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24999579237406194
+    },
+    {
+      "trial": 1982,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24978857192789747
+    },
+    {
+      "trial": 2034,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.2495041113927139
+    },
+    {
+      "trial": 2035,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24968798477130746
+    },
+    {
+      "trial": 2036,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24981856547137277
+    },
+    {
+      "trial": 2037,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.2499041210182398
+    },
+    {
+      "trial": 2038,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24995054620985924
+    },
+    {
+      "trial": 2039,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24996305465975305
+    },
+    {
+      "trial": 2040,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24994325582175086
+    },
+    {
+      "trial": 2041,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24988920928061364
+    },
+    {
+      "trial": 2042,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24979997535645695
+    },
+    {
+      "trial": 2043,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24967558640145573
+    },
+    {
+      "trial": 2044,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24951603777603054
+    },
+    {
+      "trial": 2309,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24958716302291778
+    },
+    {
+      "trial": 2310,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24992557571084928
+    },
+    {
+      "trial": 2311,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24997509214739075
+    },
+    {
+      "trial": 2312,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.2496900122819924
+    }
+  ]
 }
