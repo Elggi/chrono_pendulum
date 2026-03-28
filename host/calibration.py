@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import select
+import shutil
 import subprocess
 import sys
 import termios
@@ -29,7 +30,9 @@ from imu_viewer import SharedState, ViewerNode
 
 
 def terminal_status_line(msg: str, width: int = 140):
-    sys.stdout.write("\r\033[2K" + msg[:width].ljust(width))
+    term_width = shutil.get_terminal_size((max(width, 80), 24)).columns
+    usable_width = max(20, min(width, term_width) - 1)
+    sys.stdout.write("\r\033[2K" + msg[:usable_width].ljust(usable_width))
     sys.stdout.flush()
 
 
@@ -89,6 +92,7 @@ class CalibrationKeyboardControllerNode(Node):
         self.current_u = 0.0
         self.preset_mode = "manual"
         self.preset_t0 = time.time()
+        self.last_pub_time = 0.0
         self.sin_amp = 60.0
         self.sin_freq = 0.5
         self.square_amp = 60.0
@@ -183,6 +187,41 @@ class CalibrationKeyboardControllerNode(Node):
         return changed
 
 
+def print_help():
+    print("\n" + "=" * 70)
+    print("Calibration Keyboard Controller")
+    print("=" * 70)
+    print("Controls:")
+    print("  w / Up Arrow      : increase forward PWM")
+    print("  s / Down Arrow    : increase reverse PWM")
+    print("  d / Right Arrow   : fine increase (+0.5 step)")
+    print("  a / Left Arrow    : fine decrease (-0.5 step)")
+    print("  space             : emergency stop (0)")
+    print("  x                 : set 0")
+    print("  1 2 3 4           : fixed PWM presets (+60 / -60 / +120 / -120)")
+    print("  5                 : sine preset")
+    print("  6                 : square preset")
+    print("  7                 : burst preset")
+    print("  8                 : PRBS preset")
+    print("  [ / ]             : decrease/increase pwm_step")
+    print("  - / =             : decrease/increase pwm_max")
+    print("  c                 : reset calibration sampling window")
+    print("  q                 : finish calibration and compute")
+    print("=" * 70)
+    print("Output topic:")
+    print("  /cmd/u  (std_msgs/Float32, signed PWM)")
+    print("=" * 70 + "\n")
+
+
+def print_status_line(node: CalibrationKeyboardControllerNode, full_rot: int, cpr_samples_count: int):
+    msg = (
+        f"cmd_u: {node.current_u:6.1f} | step: {node.cfg.pwm_step:4.1f} | "
+        f"max: {node.cfg.pwm_max:5.1f} | mode: {node.preset_mode:<6} | "
+        f"rot: {full_rot:4d} | cpr_samples: {cpr_samples_count:4d}"
+    )
+    terminal_status_line(msg)
+
+
 class CprCollector:
     """imu_viewer.py 내부 상태 추적 로직(SharedState)을 그대로 활용한 CPR 수집기."""
 
@@ -266,56 +305,32 @@ def _collect_cpr_and_r_from_imu(args) -> tuple[list[dict], float, list[dict], fl
         if not collector.wait_for_imu(timeout_sec=args.imu_wait_sec):
             raise RuntimeError("IMU 데이터를 받지 못했습니다. 토픽 연결 상태를 확인하세요.")
 
-        print("======================================================================")
-        print("Calibration Keyboard Controller")
-        print("======================================================================")
-        print("Controls:")
-        print("  w / Up Arrow      : increase forward PWM")
-        print("  s / Down Arrow    : increase reverse PWM")
-        print("  d / Right Arrow   : fine increase (+0.5 step)")
-        print("  a / Left Arrow    : fine decrease (-0.5 step)")
-        print("  space             : emergency stop (0)")
-        print("  x                 : set 0")
-        print("  1 2 3 4           : fixed PWM presets (+60 / -60 / +120 / -120)")
-        print("  5                 : sine preset")
-        print("  6                 : square preset")
-        print("  7                 : burst preset")
-        print("  8                 : PRBS preset")
-        print("  [ / ]             : decrease/increase pwm_step")
-        print("  - / =             : decrease/increase pwm_max")
-        print("  c                 : reset calibration sampling window")
-        print("  q                 : finish calibration and compute")
-        print("======================================================================")
+        print_help()
         baseline_cpr_idx = 0
         baseline_tip_idx = 0
         print("[INFO] 키보드 입력으로 모터를 조작하며 calibration 데이터를 수집합니다.")
+        ctrl = collector._controller_node
+        period = 1.0 / max(ctrl.cfg.loop_hz, 1e-6)
         with KeyboardReader() as kb:
             while True:
                 snap = collector.snapshot()
                 key = kb.read_key_nonblocking(timeout=0.05)
-                changed = collector._controller_node.apply_key(key)
+                changed = ctrl.apply_key(key)
                 if key in ("c", "C"):
                     baseline_cpr_idx = len(snap["cpr_samples"])
                     baseline_tip_idx = len(snap["tip_hist"])
                 elif key in ("q", "Q"):
                     break
 
-                collector._controller_node.update_auto_signal()
-                collector._controller_node.publish_state(key_name=key or "")
-                if changed:
-                    snap = collector.snapshot()
-
+                ctrl.update_auto_signal()
                 local_cpr_count = max(0, len(snap["cpr_samples"]) - baseline_cpr_idx)
-                ctrl = collector._controller_node
-                status = (
-                    f"cmd_u:{ctrl.current_u:7.1f} | step:{ctrl.cfg.pwm_step:5.1f} | max:{ctrl.cfg.pwm_max:6.1f} "
-                    f"| mode:{ctrl.preset_mode:7s} | full_rot:{snap['full_rotations']:4d} "
-                    f"| cpr_samples:{local_cpr_count:4d}"
-                )
-                terminal_status_line(status)
-
-                if key == " ":
-                    time.sleep(0.02)
+                now = time.time()
+                if (now - ctrl.last_pub_time) >= period:
+                    ctrl.publish_state(key_name=key or "")
+                    ctrl.last_pub_time = now
+                    print_status_line(ctrl, snap["full_rotations"], local_cpr_count)
+                elif changed:
+                    print_status_line(ctrl, snap["full_rotations"], local_cpr_count)
         print()
 
         snap = collector.snapshot()
@@ -323,7 +338,7 @@ def _collect_cpr_and_r_from_imu(args) -> tuple[list[dict], float, list[dict], fl
         snap["tip_hist"] = snap["tip_hist"][baseline_tip_idx:]
         cpr_samples = snap["cpr_samples"]
         if not cpr_samples:
-            raise RuntimeError("full rotation이 감지되지 않아 CPR 샘플이 없습니다.")
+            raise RuntimeError("full rotation이 감지되지 않아 CPR 샘플이 없습니다. 최소 1회 이상 회전 후 q를 눌러주세요.")
 
         cpr_trials = [
             {
@@ -375,9 +390,7 @@ def _estimate_r_trials_from_snapshot(snapshot: dict) -> tuple[list[dict], float 
                 "method": "tip_norm",
                 "radius_m": r_instant,
             }
-            for idx, cpr in enumerate(cpr_samples, start=1)
-        ]
-        mean_cpr = float(mean(cpr_samples))
+        )
 
         dot = tx * ref[0] + ty * ref[1] + tz * ref[2]
         cos_angle = dot / (tip_norm * ref_norm)
@@ -465,7 +478,10 @@ def maybe_launch_imu_viewer(args):
 
 def main():
     args = build_argparser().parse_args()
-    run_calibration(args)
+    try:
+        run_calibration(args)
+    except RuntimeError as exc:
+        print(f"[ERROR] {exc}")
 
 
 if __name__ == "__main__":
