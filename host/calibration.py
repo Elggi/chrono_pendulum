@@ -9,7 +9,6 @@
 
 import argparse
 import json
-import math
 import os
 import select
 import shutil
