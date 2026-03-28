@@ -140,70 +140,6 @@ def col_any(df, keys, n_default=None):
     return np.full(n_default, np.nan, dtype=float)
 
 
-def is_calibration_dataframe(df):
-    calibration_cols = {"theta_rad", "omega_rad_s", "alpha_rad_s2", "mean_cpr_running", "r_running"}
-    return calibration_cols.issubset(set(df.columns))
-
-
-def plot_calibration(df, csv_path: str):
-    t = col_any(df, ["time_sec", "sim_time", "wall_time"])
-    theta = col_any(df, ["theta_rad", "theta"])
-    omega = col_any(df, ["omega_rad_s", "omega", "imu_wz"])
-    alpha = col_any(df, ["alpha_rad_s2", "alpha"])
-    delay_ms = col_any(df, ["delay_ms"])
-    mean_cpr = col_any(df, ["mean_cpr_running"])
-    r_running = col_any(df, ["r_running"])
-
-    print(f"csv  : {csv_path}")
-    print("mode : calibration")
-
-    fig, axes = plt.subplots(3, 2, figsize=(16, 10), num="Calibration Data Dashboard")
-    ax = axes.ravel()
-
-    ax[0].plot(t, theta, label="theta")
-    ax[0].grid(True)
-    ax[0].legend()
-    ax[0].set_xlabel("time [s]")
-    ax[0].set_ylabel("rad")
-    ax[0].set_title("Theta")
-
-    ax[1].plot(t, omega, label="omega", color="tab:orange")
-    ax[1].grid(True)
-    ax[1].legend()
-    ax[1].set_xlabel("time [s]")
-    ax[1].set_ylabel("rad/s")
-    ax[1].set_title("Omega")
-
-    ax[2].plot(t, alpha, label="alpha", color="tab:green")
-    ax[2].grid(True)
-    ax[2].legend()
-    ax[2].set_xlabel("time [s]")
-    ax[2].set_ylabel("rad/s²")
-    ax[2].set_title("Alpha")
-
-    ax[3].plot(t, delay_ms, label="delay_ms", color="tab:red")
-    ax[3].grid(True)
-    ax[3].legend()
-    ax[3].set_xlabel("time [s]")
-    ax[3].set_ylabel("ms")
-    ax[3].set_title("Delay")
-
-    ax[4].plot(t, mean_cpr, label="mean CPR over time", color="tab:purple")
-    ax[4].grid(True)
-    ax[4].legend()
-    ax[4].set_xlabel("time [s]")
-    ax[4].set_title("Mean CPR (running)")
-
-    ax[5].plot(t, r_running, label="r over time", color="tab:brown")
-    ax[5].grid(True)
-    ax[5].legend()
-    ax[5].set_xlabel("time [s]")
-    ax[5].set_title("r (running)")
-
-    fig.tight_layout()
-    plt.show()
-
-
 def plot_simulation(df, csv_path: str, args):
     meta = load_meta_if_exists(csv_path)
 
@@ -338,7 +274,6 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", default=None)
     ap.add_argument("--dir", default="./run_logs")
-    ap.add_argument("--mode", choices=["auto", "calibration", "simulation"], default="auto")
     ap.add_argument("--counts-per-revolution", type=float, default=None)
     ap.add_argument("--theta-sign", type=float, default=1.0)
     ap.add_argument("--theta-offset", type=float, default=0.0)
@@ -348,15 +283,7 @@ def main():
 
     csv_path = args.csv if args.csv is not None else find_latest_csv(args.dir)
     df = load_csv_frame(csv_path)
-
-    mode = args.mode
-    if mode == "auto":
-        mode = "calibration" if is_calibration_dataframe(df) else "simulation"
-
-    if mode == "calibration":
-        plot_calibration(df, csv_path)
-    else:
-        plot_simulation(df, csv_path, args)
+    plot_simulation(df, csv_path, args)
 
 
 if __name__ == "__main__":
