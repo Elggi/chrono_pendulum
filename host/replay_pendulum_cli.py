@@ -8,13 +8,14 @@ import sys
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Replay-only CLI: export replay csv and optionally plot")
+    ap = argparse.ArgumentParser(description="Replay-only CLI: export replay csv and optionally visualize")
     ap.add_argument("--csv", required=True, help="source run log csv")
     ap.add_argument("--calibration_json", required=True)
     ap.add_argument("--parameter_json", default="")
     ap.add_argument("--out_csv", default="./rl_results/replay_best.csv")
     ap.add_argument("--delay_override", type=float, default=None)
     ap.add_argument("--plot", action="store_true", help="open plot_pendulum after export")
+    ap.add_argument("--viewer", action="store_true", help="open 3D replay viewer after export")
     args = ap.parse_args()
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -33,6 +34,10 @@ def main():
         raise SystemExit(f"Replay export failed with exit code {rc}")
 
     print(f"[INFO] replay export done: {args.out_csv}")
+    if args.viewer:
+        viewer_script = os.path.join(base_dir, "replay_pendulum_viewer.py")
+        cmd3 = [sys.executable, viewer_script, "--csv", args.out_csv]
+        os.execv(sys.executable, cmd3)
     if args.plot:
         plot_script = os.path.join(base_dir, "plot_pendulum.py")
         cmd2 = [sys.executable, plot_script, "--csv", args.out_csv]
