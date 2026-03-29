@@ -711,8 +711,9 @@ def main():
                         break
 
                 if vis is not None:
-                    if not vis.Run():
-                        break
+                    # Keep rendering loop alive regardless of vis.Run() return.
+                    # User requested no auto-stop/auto-fallback on render-window state.
+                    vis.Run()
                     vis.BeginScene(); vis.Render(); vis.EndScene()
 
                 if host_controller is not None:
@@ -881,13 +882,14 @@ def main():
             elif quit_watcher is not None:
                 quit_watcher.__exit__(None, None, None)
 
-    print()
-    print("=== best online calibration point ===")
-    print(f"time      : {best_eval['time']}")
-    print(f"best cost : {best_eval['cost']:.6e}")
     best_params_print = dict(best_eval["params"]) if isinstance(best_eval["params"], dict) else {}
     best_params_print.pop("mgl", None)
-    print(json.dumps(best_params_print, indent=2))
+    if cfg.self_fit_mode == "on":
+        print()
+        print("=== best online calibration point ===")
+        print(f"time      : {best_eval['time']}")
+        print(f"best cost : {best_eval['cost']:.6e}")
+        print(json.dumps(best_params_print, indent=2))
 
     meta = {
         "log_csv": log_csv,
@@ -912,26 +914,28 @@ def main():
     }
     with open(log_meta, "w", encoding="utf-8") as mf:
         json.dump(meta, mf, indent=2, ensure_ascii=False)
-    best_param_json = {
-        "log_csv": log_csv,
-        "model_init": best_params_print,
-        "delay": {
-            "effective_control_delay_ms": 1000.0 * delay_sec_used,
-            "locked": False,
-        },
-        "fit": {
-            "self_fit_mode": cfg.self_fit_mode,
-            "fit_done": bool(conv_mon.fit_done),
-            "fit_complete": bool(conv_mon.fit_complete),
-            "best_cost": best_eval["cost"],
-            "best_time": best_eval["time"],
-        },
-    }
-    with open(log_best_param, "w", encoding="utf-8") as bf:
-        json.dump(best_param_json, bf, indent=2, ensure_ascii=False)
+    if cfg.self_fit_mode == "on":
+        best_param_json = {
+            "log_csv": log_csv,
+            "model_init": best_params_print,
+            "delay": {
+                "effective_control_delay_ms": 1000.0 * delay_sec_used,
+                "locked": False,
+            },
+            "fit": {
+                "self_fit_mode": cfg.self_fit_mode,
+                "fit_done": bool(conv_mon.fit_done),
+                "fit_complete": bool(conv_mon.fit_complete),
+                "best_cost": best_eval["cost"],
+                "best_time": best_eval["time"],
+            },
+        }
+        with open(log_best_param, "w", encoding="utf-8") as bf:
+            json.dump(best_param_json, bf, indent=2, ensure_ascii=False)
     print(f"saved csv  : {log_csv}")
     print(f"saved meta : {log_meta}")
-    print(f"saved best : {log_best_param}")
+    if cfg.self_fit_mode == "on":
+        print(f"saved best : {log_best_param}")
     print(f"applied fixed delay: {1000.0 * delay_sec_used:.1f} ms (from parameter/calibration)")
 
     if viewer_proc is not None:

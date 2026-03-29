@@ -256,26 +256,17 @@ run_rl_fitting() {
 
 run_replay_validation() {
     echo "--------------------------------"
-    echo "[INFO] Replay Validation (export + 3D viewer)"
+    echo "[INFO] Replay Validation (Chrono + IMU dual viewer)"
     file=$(select_csv_file)
     if [ -z "$file" ]; then return; fi
 
-    calib_json=$(select_json_file "Calibration JSON (required)")
-    if [ -z "$calib_json" ]; then
-        if [ -f "$BASE_DIR/run_logs/calibration_latest.json" ]; then
-            calib_json="$BASE_DIR/run_logs/calibration_latest.json"
-            echo "[INFO] calibration json fallback: $calib_json"
-        else
-            echo "[ERROR] calibration json이 필요합니다."
-            return
-        fi
-    fi
+    calib_json=$(select_json_file "Calibration JSON (optional)")
     param_json=$(select_json_file "Parameter JSON (optional)")
+    read -p "Replay speed [1.0]: " replay_speed
+    replay_speed=${replay_speed:-1.0}
 
-    replay_id=$(date -u +"replay_%Y%m%d_%H%M%S")
-    out_csv="$BASE_DIR/rl_results/replays/${replay_id}.csv"
-    mkdir -p "$BASE_DIR/rl_results/replays"
-    cmd=(python3 "$BASE_DIR/replay_pendulum_cli.py" --csv "$file" --calibration_json "$calib_json" --out_csv "$out_csv" --viewer)
+    cmd=(python3 "$BASE_DIR/replay_pendulum_cli.py" --csv "$file" --speed "$replay_speed")
+    [ -n "$calib_json" ] && cmd+=(--calibration_json "$calib_json")
     [ -n "$param_json" ] && cmd+=(--parameter_json "$param_json")
 
     echo "[INFO] command: ${cmd[*]}"
@@ -300,7 +291,7 @@ while true; do
     echo "3) Parameter Optimization (Reinforcement Learning)"
     echo "4) Chrono Pendulum (Select Host/Jetson mode)"
     echo "5) Plot Data"
-    echo "6) Replay Validation (Export + 3D Viewer)"
+    echo "6) Replay Validation (Chrono + IMU Dual Viewer)"
     echo "7) Exit"
     echo "=========================================="
 
