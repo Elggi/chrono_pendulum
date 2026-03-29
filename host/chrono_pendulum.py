@@ -29,7 +29,7 @@ from std_msgs.msg import Float32, String
 from sensor_msgs.msg import Imu
 from chrono_core.config import BridgeConfig
 from chrono_core.utils import clamp, now_wall, terminal_status_line, sanitize_float, make_numbered_path
-from chrono_core.estimation import DelayCompensator, OnlineParameterEKF, ObservationLPF, FitConvergenceMonitor
+from chrono_core.estimation import DelayCompensator, OnlineParameterEKF, ObservationLPF, FitConvergenceMonitor, RobustSignalFilter
 from chrono_core.dynamics import PendulumModel, compute_model_torque_and_electrics, blend_parameters_for_sim, enc_to_theta
 from chrono_core.calibration_io import apply_calibration_json, extract_radius_from_json
 
@@ -479,7 +479,7 @@ def make_status_line(host_mode: bool, cmd_u_raw: float, cmd_u_used: float, hw_pw
             f"cmd_u: {cmd_u_raw:6.1f} | used: {cmd_u_used:6.1f} | mode: {mode_name:<6} | "
             f"step: {cfg.pwm_step:4.1f} | max: {cfg.pwm_limit:5.1f} | delay: {delay_ms:5.1f} ms | "
             f"LS: {ls_label} {rms_label} | fit:{fit_state_label:<4} | "
-            f"J: {fit_params['J']:.5f} | b: {fit_params['b']:.4f} | tc: {fit_params['tau_c']:.4f} | mgl:{fit_params['mgl']:.4f}"
+            f"l_com:{fit_params['l_com']:.4f} | b_eq:{fit_params['b_eq']:.4f} | tau_eq:{fit_params['tau_eq']:.4f}"
         )
     return (
         f"cmd_u: {cmd_u_used:6.1f} | hw_pwm: {hw_pwm:6.1f} | mode: external | "
@@ -536,10 +536,12 @@ def main():
     ap.add_argument("--calibration-json", default="./run_logs/calibration_latest.json")
     ap.add_argument("--radius-json", default="./run_logs/calibration_latest.json",
                     help="JSON file containing measured radius (e.g., calibration_latest.json).")
-    ap.add_argument("--J", type=float, default=0.010)
+    ap.add_argument("--J-cm-base", type=float, default=0.0020)
+    ap.add_argument("--l-com", type=float, default=0.1425)
     ap.add_argument("--b", type=float, default=0.030)
     ap.add_argument("--tau-c", type=float, default=0.080)
-    ap.add_argument("--mgl", type=float, default=0.550)
+    ap.add_argument("--mgl", type=float, default=0.550,
+                    help="Deprecated compatibility argument (ignored).")
     ap.add_argument("--k-t", type=float, default=0.250)
     ap.add_argument("--i0", type=float, default=0.050)
     ap.add_argument("--R", type=float, default=2.0)
@@ -557,12 +559,15 @@ def main():
     cfg.step = args.step
     cfg.theta0_deg = args.theta0_deg
     cfg.omega0 = args.omega0
-    cfg.link_mass = args.link_mass
+    # Keep masses fixed for physically consistent COM-based rigid body.
+    cfg.link_mass = 0.200
+    cfg.imu_mass = 0.020
     cfg.link_L = args.link_length
     cfg.radius_m = args.link_length
-    cfg.J_init = args.J
-    cfg.b_init = args.b
-    cfg.tau_c_init = args.tau_c
+    cfg.J_cm_base = args.J_cm_base
+    cfg.l_com_init = args.l_com
+    cfg.b_eq_init = args.b
+    cfg.tau_eq_init = args.tau_c
     cfg.mgl_init = args.mgl
     cfg.k_t_init = args.k_t
     cfg.i0_init = args.i0
@@ -597,6 +602,8 @@ def main():
     ekf = OnlineParameterEKF(cfg)
     obs_lpf = ObservationLPF(cfg.obs_lpf_tau_sec)
     conv_mon = FitConvergenceMonitor(cfg)
+    bus_filter = RobustSignalFilter(cfg.ina_bus_median_window, cfg.ina_bus_hampel_k, cfg.ina_bus_hampel_sigma, cfg.ina_bus_lpf_tau_sec)
+    current_filter = RobustSignalFilter(cfg.ina_current_median_window, cfg.ina_current_hampel_k, cfg.ina_current_hampel_sigma, cfg.ina_current_lpf_tau_sec)
     best_eval = {"cost": float("inf"), "time": None, "params": None}
     prev_u_eff = 0.0
     prev_du = 0.0
@@ -624,12 +631,14 @@ def main():
         wr = csv.writer(f)
         wr.writerow([
             "wall_time", "wall_elapsed", "sim_time", "mode",
-            "cmd_u_raw", "cmd_u_used", "tau_cmd",
+            "cmd_u_raw", "cmd_u_delayed", "hw_pwm", "delay_sec_est", "tau_cmd",
             "theta", "omega", "alpha",
-            "hw_pwm", "hw_enc", "hw_arduino_ms",
+            "hw_enc", "hw_arduino_ms",
             "theta_real", "omega_real", "alpha_real",
             "delay_ms",
-            "J_est", "b_est", "tau_c_est", "mgl_est", "k_t_est", "i0_est",
+            "l_com_est", "b_eq_est", "tau_eq_est", "k_t_est", "i0_est", "R_est", "k_e_est",
+            "bus_v_raw", "bus_v_filtered", "current_raw_A", "current_filtered_A", "power_raw_W",
+            "tau_motor", "tau_res", "tau_visc", "tau_coul", "i_pred", "v_applied",
             "inst_cost", "best_cost_so_far",
             "imu_qw", "imu_qx", "imu_qy", "imu_qz",
             "imu_wx", "imu_wy", "imu_wz",
@@ -701,15 +710,21 @@ def main():
 
                 fit_params = ekf.get_params()
                 sim_params = blend_parameters_for_sim(fit_params, cfg)
-                bus_v = snap["bus_v"] if np.isfinite(snap["bus_v"]) else 7.4
-                current_A = snap["current_ma"] / 1000.0 if np.isfinite(snap["current_ma"]) else 0.0
-                power_W = snap["power_mw"] / 1000.0 if np.isfinite(snap["power_mw"]) else 0.0
+                model.update_identified_structure(sim_params)
 
-                theta_before = model.get_theta()
+                bus_v_raw = snap["bus_v"] if np.isfinite(snap["bus_v"]) else float("nan")
+                current_A_raw = snap["current_ma"] / 1000.0 if np.isfinite(snap["current_ma"]) else float("nan")
+                power_W = snap["power_mw"] / 1000.0 if np.isfinite(snap["power_mw"]) else 0.0
+                if cfg.electrical_use_ina_bus_voltage and np.isfinite(bus_v_raw):
+                    bus_v = bus_filter.update(bus_v_raw, cfg.step) if cfg.ina_enable_bus_filter else bus_v_raw
+                else:
+                    bus_v = cfg.nominal_bus_voltage
+                if np.isfinite(current_A_raw):
+                    current_A = current_filter.update(current_A_raw, cfg.step) if cfg.ina_enable_current_filter else current_A_raw
+                else:
+                    current_A = 0.0
+
                 model_out = compute_model_torque_and_electrics(cmd_u_used, model.get_omega(), bus_v, sim_params, cfg)
-                if not model.com_frame_supported:
-                    # If COM frame API is unavailable, inject gravity surrogate torque.
-                    model_out["tau_net"] -= sim_params["mgl"] * math.sin(theta_before)
                 model.apply_torque(model_out["tau_net"])
                 model.step(cfg.step)
 
@@ -752,12 +767,12 @@ def main():
                 e_theta = theta - theta_real
                 e_omega = omega - omega_real
                 e_alpha = alpha - alpha_real
-                e_v = model_out["v_pred"] - bus_v
+                e_v = model_out["v_applied"] - bus_v
                 e_i = model_out["i_pred"] - current_A
                 e_p = model_out["p_pred"] - power_W
-                du = model_out["u_eff"] - prev_u_eff
+                du = cmd_u_used - prev_u_eff
                 d2u = du - prev_du
-                prev_u_eff = model_out["u_eff"]
+                prev_u_eff = cmd_u_used
                 prev_du = du
                 inst_cost = (
                     cfg.w_theta * (e_theta ** 2) +
@@ -780,7 +795,8 @@ def main():
                     conv_mon.fit_final_params = ekf.get_params().copy()
 
                 if cfg.online_fit_enable and (not conv_mon.fit_done) and abs(cmd_u_used) >= cfg.ekf_enable_min_pwm:
-                    ekf.update(theta_obs, omega_obs, model_out["u_eff"], cfg.step, inst_cost=inst_cost)
+                    # EKF update uses delay-compensated command (u_cmd(t - Δt_d)).
+                    ekf.update(theta_obs, omega_obs, cmd_u_used, cfg.step, inst_cost=inst_cost)
 
                 if inst_cost < best_eval["cost"]:
                     best_eval["cost"] = float(inst_cost)
@@ -810,12 +826,14 @@ def main():
 
                 wr.writerow([
                     wall_now, wall_now - wall_t0, sim_t, mode_name,
-                    cmd_u_raw, cmd_u_used, model_out["tau_net"],
+                    cmd_u_raw, cmd_u_used, snap["hw_pwm"], delay_comp.delay_sec, model_out["tau_net"],
                     theta, omega, alpha,
-                    snap["hw_pwm"], snap["hw_enc"], snap["hw_arduino_ms"],
+                    snap["hw_enc"], snap["hw_arduino_ms"],
                     theta_real, omega_real, alpha_real,
                     1000.0 * delay_comp.delay_sec,
-                    fit_params["J"], fit_params["b"], fit_params["tau_c"], fit_params["mgl"], fit_params["k_t"], fit_params["i0"],
+                    fit_params["l_com"], fit_params["b_eq"], fit_params["tau_eq"], fit_params["k_t"], fit_params["i0"], fit_params["R"], fit_params["k_e"],
+                    bus_v_raw, bus_v, current_A_raw, current_A, power_W,
+                    model_out["tau_motor"], model_out["tau_res"], model_out["tau_visc"], model_out["tau_coul"], model_out["i_pred"], model_out["v_applied"],
                     inst_cost, best_eval["cost"],
                     q_imu[0], q_imu[1], q_imu[2], q_imu[3],
                     w_imu[0], w_imu[1], w_imu[2],
