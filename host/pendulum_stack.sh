@@ -195,7 +195,7 @@ run_rl_fitting() {
     read -p "domain_randomization ON? (y/n) [y]: " dr_yn
     dr_yn=${dr_yn:-y}
 
-    cmd=(python3 "$BASE_DIR/train_pendulum_rl.py" --calibration_json "$calib_json" --outdir "$BASE_DIR/rl_results" --renderOFF --num_episodes "$num_episodes" --batch_size "$batch_size" --seed "$seed" --delay_jitter_ms "$delay_jitter_ms")
+    cmd=(python3 "$BASE_DIR/train_pendulum_rl.py" --calibration_json "$calib_json" --outdir "$BASE_DIR/rl_results" --num_episodes "$num_episodes" --batch_size "$batch_size" --seed "$seed" --delay_jitter_ms "$delay_jitter_ms")
     if [ "$use_csv_dir" == "1" ]; then
         cmd+=(--csv_dir "$CSV_DIR")
     else
@@ -217,6 +217,42 @@ run_rl_fitting() {
     else
         cmd+=(--domain_randomizationOFF)
     fi
+    echo "[INFO] command: ${cmd[*]}"
+    "${cmd[@]}"
+
+    if [ -f "$BASE_DIR/rl_results/rl_dashboard.png" ]; then
+        echo "[INFO] RL dashboard: $BASE_DIR/rl_results/rl_dashboard.png"
+    fi
+    if [ -f "$BASE_DIR/rl_results/replay_best.csv" ]; then
+        echo "[INFO] replay export CSV: $BASE_DIR/rl_results/replay_best.csv"
+        echo "[INFO] replay plot: python3 $BASE_DIR/plot_pendulum.py --csv $BASE_DIR/rl_results/replay_best.csv"
+    fi
+    if [ -f "$BASE_DIR/rl_results/history.csv" ]; then
+        echo "[INFO] RL+replay one-window plot: python3 $BASE_DIR/plot_pendulum.py --rl-dir $BASE_DIR/rl_results"
+    fi
+}
+
+run_replay_validation() {
+    echo "--------------------------------"
+    echo "[INFO] Replay Validation (export + plot)"
+    file=$(select_csv_file)
+    if [ -z "$file" ]; then return; fi
+
+    calib_json=$(select_json_file "Calibration JSON (required)")
+    if [ -z "$calib_json" ]; then
+        if [ -f "$BASE_DIR/run_logs/calibration_latest.json" ]; then
+            calib_json="$BASE_DIR/run_logs/calibration_latest.json"
+            echo "[INFO] calibration json fallback: $calib_json"
+        else
+            echo "[ERROR] calibration json이 필요합니다."
+            return
+        fi
+    fi
+    param_json=$(select_json_file "Parameter JSON (optional)")
+
+    out_csv="$BASE_DIR/rl_results/replay_best.csv"
+    cmd=(python3 "$BASE_DIR/replay_pendulum_cli.py" --csv "$file" --calibration_json "$calib_json" --out_csv "$out_csv" --plot)
+    [ -n "$param_json" ] && cmd+=(--parameter_json "$param_json")
 
     echo "[INFO] command: ${cmd[*]}"
     "${cmd[@]}"
@@ -240,7 +276,8 @@ while true; do
     echo "3) Parameter Optimization (Reinforcement Learning)"
     echo "4) Chrono Pendulum (Select Host/Jetson mode)"
     echo "5) Plot Data"
-    echo "6) Exit"
+    echo "6) Replay Validation (Export + Plot)"
+    echo "7) Exit"
     echo "=========================================="
 
     read -p "Select option: " choice
@@ -267,6 +304,10 @@ while true; do
             pause
             ;;
         6)
+            run_replay_validation
+            pause
+            ;;
+        7)
             echo "Bye!"
             exit 0
             ;;

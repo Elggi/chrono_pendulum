@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import argparse
+import csv
 import json
 import sys
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ import numpy as np
 
 from chrono_core.calibration_io import apply_calibration_json
 from chrono_core.config import BridgeConfig
+from chrono_core.log_schema import PENDULUM_LOG_COLUMNS
 from chrono_core.pendulum_rl_env import (
     PARAM_KEYS,
     PendulumRLEnv,
@@ -26,6 +28,7 @@ from chrono_core.pendulum_rl_plots import (
     plot_delay_diagnostics,
     plot_overlay,
     plot_param_convergence,
+    plot_rl_dashboard,
     plot_training_curves,
 )
 
@@ -168,6 +171,50 @@ def evaluate_dataset(env: PendulumRLEnv, params: dict[str, float]):
     return float(np.mean(losses)), {k: float(np.mean(v)) for k, v in rmses.items()}
 
 
+def sanitize_metric(x: float):
+    return float(x) if np.isfinite(x) else 0.0
+
+
+def sanitize_dict(metrics: dict[str, float]):
+    return {k: sanitize_metric(v) for k, v in metrics.items()}
+
+
+def save_history_csv(history: dict, outpath: Path):
+    keys = ["reward", "train_loss", "val_loss", "rmse_theta", "rmse_omega", "rmse_alpha",
+            "val_rmse_theta", "val_rmse_omega", "val_rmse_alpha"]
+    n = len(history.get("reward", []))
+    with outpath.open("w", newline="", encoding="utf-8") as f:
+        wr = csv.writer(f)
+        wr.writerow(["episode", *keys])
+        for i in range(n):
+            wr.writerow([i + 1, *[sanitize_metric(history.get(k, [0.0] * n)[i]) for k in keys]])
+
+
+def save_best_replay_csv(outpath: Path, traj, sim: dict[str, np.ndarray], params: dict[str, float], loss: float, delay_sec: float):
+    outpath.parent.mkdir(parents=True, exist_ok=True)
+    with outpath.open("w", newline="", encoding="utf-8") as f:
+        wr = csv.writer(f)
+        wr.writerow(PENDULUM_LOG_COLUMNS)
+        best_cost = float(loss)
+        for i in range(len(traj.t)):
+            wr.writerow([
+                0.0, traj.t[i], traj.t[i], "replay",
+                traj.cmd_u[i], sim["cmd_delayed"][i], traj.hw_pwm[i], traj.delay_sec_est, sim["tau_motor"][i] - sim["tau_res"][i],
+                sim["theta"][i], sim["omega"][i], sim["alpha"][i],
+                "", "",
+                traj.theta_real[i], traj.omega_real[i], traj.alpha_real[i],
+                delay_sec * 1000.0,
+                params["l_com"], params["b_eq"], params["tau_eq"], params["k_t"], params["i0"], params["R"], params["k_e"],
+                traj.bus_v[i], traj.bus_v[i], traj.current_a[i], traj.current_a[i], traj.power_w[i],
+                sim["tau_motor"][i], sim["tau_res"][i], sim["tau_visc"][i], sim["tau_coul"][i], sim["i_pred"][i], sim["v_applied"][i],
+                loss, best_cost,
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, sim["omega"][i],
+                0.0, 0.0, 0.0,
+                loss, 1, 1, json.dumps(params),
+            ])
+
+
 def main():
     ap = argparse.ArgumentParser(description="Offline PPO-style replay calibration for pendulum digital twin")
     ap.add_argument("--calibration_json", required=True)
@@ -177,9 +224,6 @@ def main():
     ap.add_argument("--outdir", default="rl_calibration_out")
 
     ap.add_argument("-n", "--num_episodes", type=int, default=1000)
-    ap.add_argument("--renderON", dest="render", action="store_true")
-    ap.add_argument("--renderOFF", dest="render", action="store_false")
-    ap.set_defaults(render=False)
     ap.add_argument("-g", "--gamma", type=float, default=0.995)
     ap.add_argument("-l", "--lam", type=float, default=0.98)
     ap.add_argument("-k", "--kl_targ", type=float, default=0.003)
@@ -284,6 +328,11 @@ def main():
 
         train_loss, train_rmse = evaluate_dataset(env, env.best_params)
         val_loss, val_rmse = evaluate_dataset(val_env, env.best_params)
+        ep_reward = sanitize_metric(ep_reward)
+        train_loss = sanitize_metric(train_loss)
+        val_loss = sanitize_metric(val_loss)
+        train_rmse = sanitize_dict(train_rmse)
+        val_rmse = sanitize_dict(val_rmse)
 
         history["reward"].append(float(ep_reward))
         history["train_loss"].append(float(train_loss))
@@ -329,14 +378,20 @@ def main():
 
     with open(outdir / "history.json", "w", encoding="utf-8") as f:
         json.dump(history, f, indent=2)
+    save_history_csv(history, outdir / "history.csv")
 
     plot_training_curves(history, outdir)
     plot_param_convergence(param_hist, outdir)
     plot_delay_diagnostics(delay_map, outdir)
+    plot_rl_dashboard(history, param_hist, outdir)
 
     # Representative overlay from first test trajectory
     rep = test_traj[0]
-    sim = simulate_trajectory(rep, best_params, cfg, delay_sec=best_params.get("delay_sec", rep.delay_sec_est))
+    rep_delay = best_params.get("delay_sec", rep.delay_sec_est)
+    sim = simulate_trajectory(rep, best_params, cfg, delay_sec=rep_delay)
+    rep_feat = compute_error_features(rep, sim)
+    rep_loss = weighted_loss(rep_feat, env.reward_weights)
+    save_best_replay_csv(outdir / "replay_best.csv", rep, sim, best_params, rep_loss, rep_delay)
     plot_overlay(rep.t, rep.theta_real, sim["theta"], "theta [rad]", outdir / "overlay_theta.png")
     plot_overlay(rep.t, rep.omega_real, sim["omega"], "omega [rad/s]", outdir / "overlay_omega.png")
     plot_overlay(rep.t, rep.alpha_real, sim["alpha"], "alpha [rad/s^2]", outdir / "overlay_alpha.png")
