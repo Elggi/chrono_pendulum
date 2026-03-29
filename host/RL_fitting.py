@@ -44,6 +44,24 @@ def compute_dt(df, time_col="sim_time", dt_col=""):
     return dt
 
 
+def robust_derivative(x, dt):
+    x = np.asarray(x, dtype=float)
+    dt = np.asarray(dt, dtype=float)
+    if len(x) < 2:
+        return np.zeros_like(x)
+    dt = np.where(np.isfinite(dt) & (dt > 1e-6), dt, np.nan)
+    med = np.nanmedian(dt) if np.any(np.isfinite(dt)) else 0.01
+    if not np.isfinite(med) or med <= 0.0:
+        med = 0.01
+    dt = np.where(np.isfinite(dt), dt, med)
+    t = np.cumsum(dt)
+    # ensure strictly increasing coordinates for np.gradient
+    t = np.maximum.accumulate(t + np.arange(len(t)) * 1e-9)
+    y = np.gradient(x, t)
+    y[~np.isfinite(y)] = 0.0
+    return y
+
+
 def robust_std(x, floor=1e-6):
     x = np.asarray(x, dtype=float)
     med = np.median(x)
@@ -113,7 +131,7 @@ def simulate_with_electromech(t, dt, pwm, bus_v, theta0, omega0, params, tanh_ep
     current[-1] = current[-2] if n > 1 else 0.0
     voltage_pred[-1] = voltage_pred[-2] if n > 1 else 0.0
     power_pred[-1] = power_pred[-2] if n > 1 else 0.0
-    alpha[:] = np.gradient(omega, dt)
+    alpha[:] = robust_derivative(omega, dt)
     return {
         "theta": theta,
         "omega": omega,
@@ -160,13 +178,13 @@ class PendulumFitEnv(gym.Env):
         self.win = self.df.iloc[i0:i0+self.horizon].reset_index(drop=True)
         self.t = self.win["time"].to_numpy(dtype=float)
         self.dt = self.win["dt"].to_numpy(dtype=float)
-        self.theta_meas = self.win["theta"].to_numpy(dtype=float)
-        self.omega_meas = self.win["omega"].to_numpy(dtype=float)
-        self.alpha_meas = self.win["alpha"].to_numpy(dtype=float)
-        self.pwm_meas = self.win["pwm"].to_numpy(dtype=float)
-        self.bus_v_meas = self.win["voltage"].to_numpy(dtype=float)
-        self.current_meas = self.win["current"].to_numpy(dtype=float)
-        self.power_meas = self.win["power"].to_numpy(dtype=float)
+        self.theta_meas = np.nan_to_num(self.win["theta"].to_numpy(dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+        self.omega_meas = np.nan_to_num(self.win["omega"].to_numpy(dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+        self.alpha_meas = np.nan_to_num(self.win["alpha"].to_numpy(dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+        self.pwm_meas = np.nan_to_num(self.win["pwm"].to_numpy(dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+        self.bus_v_meas = np.nan_to_num(self.win["voltage"].to_numpy(dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+        self.current_meas = np.nan_to_num(self.win["current"].to_numpy(dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+        self.power_meas = np.nan_to_num(self.win["power"].to_numpy(dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
 
     def _randomize_params(self):
         rnd = self.param_nom.copy()
@@ -176,12 +194,19 @@ class PendulumFitEnv(gym.Env):
 
     def _cost(self, p):
         sim = simulate_with_electromech(self.t, self.dt, self.pwm_meas, self.bus_v_meas, self.theta_meas[0], self.omega_meas[0], p, tanh_eps=self.tanh_eps, pwm_limit=self.pwm_limit)
-        e_theta = (sim["theta"] - self.theta_meas) / robust_std(self.theta_meas)
-        e_omega = (sim["omega"] - self.omega_meas) / robust_std(self.omega_meas)
-        e_alpha = (sim["alpha"] - self.alpha_meas) / robust_std(self.alpha_meas)
-        e_v = (sim["voltage"] - self.bus_v_meas) / robust_std(self.bus_v_meas)
-        e_i = (sim["current"] - self.current_meas) / robust_std(self.current_meas)
-        e_p = (sim["power"] - self.power_meas) / robust_std(self.power_meas)
+        sim_theta = np.nan_to_num(sim["theta"], nan=0.0, posinf=0.0, neginf=0.0)
+        sim_omega = np.nan_to_num(sim["omega"], nan=0.0, posinf=0.0, neginf=0.0)
+        sim_alpha = np.nan_to_num(sim["alpha"], nan=0.0, posinf=0.0, neginf=0.0)
+        sim_v = np.nan_to_num(sim["voltage"], nan=0.0, posinf=0.0, neginf=0.0)
+        sim_i = np.nan_to_num(sim["current"], nan=0.0, posinf=0.0, neginf=0.0)
+        sim_p = np.nan_to_num(sim["power"], nan=0.0, posinf=0.0, neginf=0.0)
+
+        e_theta = (sim_theta - self.theta_meas) / robust_std(self.theta_meas)
+        e_omega = (sim_omega - self.omega_meas) / robust_std(self.omega_meas)
+        e_alpha = (sim_alpha - self.alpha_meas) / robust_std(self.alpha_meas)
+        e_v = (sim_v - self.bus_v_meas) / robust_std(self.bus_v_meas)
+        e_i = (sim_i - self.current_meas) / robust_std(self.current_meas)
+        e_p = (sim_p - self.power_meas) / robust_std(self.power_meas)
         cost = (
             self.w_theta * np.mean(e_theta**2) +
             self.w_omega * np.mean(e_omega**2) +
@@ -190,16 +215,21 @@ class PendulumFitEnv(gym.Env):
             self.w_i * np.mean(e_i**2) +
             self.w_p * np.mean(e_p**2)
         )
+        if not np.isfinite(cost):
+            cost = 1e6
         return float(cost), {"cost": float(cost), "params": p.copy(), "sim": sim}
 
     def _obs(self):
-        return np.array([
+        obs = np.array([
             self.params[0], self.params[1], self.params[2], self.params[3], self.params[4],
             self.params[5], self.params[6], self.params[7], self.params[8],
             self.last_cost if self.last_cost is not None else 0.0,
             self.theta_meas[0], self.omega_meas[0],
             np.mean(np.abs(self.pwm_meas)), np.mean(self.bus_v_meas), np.mean(np.abs(self.current_meas)),
         ], dtype=np.float32)
+        obs = np.nan_to_num(obs, nan=0.0, posinf=1e6, neginf=-1e6)
+        obs = np.clip(obs, -1e6, 1e6)
+        return obs
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -264,9 +294,21 @@ def main():
     current_col = pick_col(args.current_col, ("current_filtered_A", "current_raw_A", "current"))
     power_col = pick_col(args.power_col, ("power_raw_W", "power"))
     dt = compute_dt(df_raw, time_col, args.dt_col)
-    theta = safe_savgol(df_raw[theta_col].to_numpy(dtype=float))
-    omega = safe_savgol(df_raw[omega_col].to_numpy(dtype=float)) if omega_col is not None else safe_savgol(np.gradient(theta, dt))
-    alpha = safe_savgol(df_raw[alpha_col].to_numpy(dtype=float)) if alpha_col is not None else safe_savgol(np.gradient(omega, dt))
+    theta_raw = pd.to_numeric(df_raw[theta_col], errors="coerce").to_numpy(dtype=float)
+    theta_raw = np.nan_to_num(theta_raw, nan=0.0, posinf=0.0, neginf=0.0)
+    theta = safe_savgol(theta_raw)
+    if omega_col is not None:
+        omega_raw = pd.to_numeric(df_raw[omega_col], errors="coerce").to_numpy(dtype=float)
+        omega_raw = np.nan_to_num(omega_raw, nan=0.0, posinf=0.0, neginf=0.0)
+        omega = safe_savgol(omega_raw)
+    else:
+        omega = safe_savgol(robust_derivative(theta, dt))
+    if alpha_col is not None:
+        alpha_raw = pd.to_numeric(df_raw[alpha_col], errors="coerce").to_numpy(dtype=float)
+        alpha_raw = np.nan_to_num(alpha_raw, nan=0.0, posinf=0.0, neginf=0.0)
+        alpha = safe_savgol(alpha_raw)
+    else:
+        alpha = safe_savgol(robust_derivative(omega, dt))
     df = pd.DataFrame({
         "time": df_raw[time_col].to_numpy(dtype=float),
         "dt": dt,
