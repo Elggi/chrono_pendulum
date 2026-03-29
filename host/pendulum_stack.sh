@@ -82,7 +82,7 @@ select_json_file() {
 
 run_imu_viewer() {
     echo "[INFO] imu_viewer 실행"
-    python3 $BASE_DIR/imu_viewer.py
+    python3 "$BASE_DIR/imu_viewer.py"
 }
 
 run_chrono_pendulum() {
@@ -137,7 +137,7 @@ run_plot() {
     file=$(select_csv_file)
     if [ -z "$file" ]; then return; fi
 
-    python3 $BASE_DIR/plot_pendulum.py --csv "$file"
+    python3 "$BASE_DIR/plot_pendulum.py" --csv "$file"
 }
 
 run_rl_fitting() {
@@ -160,7 +160,7 @@ run_rl_fitting() {
     fi
 
     echo "[INFO] RL fitting 실행 ($algo)"
-    python3 $BASE_DIR/RL_fitting.py --csv "$file" --algo $algo
+    python3 "$BASE_DIR/RL_fitting.py" --csv "$file" --algo "$algo"
 }
 
 run_full_pipeline() {
