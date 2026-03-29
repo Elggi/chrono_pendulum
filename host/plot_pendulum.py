@@ -147,7 +147,9 @@ def plot_simulation(df, csv_path: str, args):
     if cpr is None and meta is not None and meta.get("cpr_mean") is not None:
         cpr = float(meta["cpr_mean"])
 
-    if "sim_time" in df.columns:
+    if "wall_elapsed" in df.columns:
+        t = col_to_numpy(df, "wall_elapsed")
+    elif "sim_time" in df.columns:
         t = col_to_numpy(df, "sim_time")
     elif "wall_time" in df.columns:
         tw = col_to_numpy(df, "wall_time")
@@ -164,10 +166,11 @@ def plot_simulation(df, csv_path: str, args):
     cmd_used = col_any(df, ["cmd_u_used", "cmd_u", "hw_pwm"], n)
     hw_pwm = col_any(df, ["hw_pwm"], n)
     enc = col_any(df, ["hw_enc"], n)
-    ina_i = col_any(df, ["current_A", "current_ma"], n)
-    ina_p = col_any(df, ["power_W", "power_mw"], n)
-    p_pred = col_any(df, ["p_pred"], n)
     delay_ms = col_any(df, ["delay_ms"], n)
+    J_est = col_any(df, ["J_est"], n)
+    b_est = col_any(df, ["b_est"], n)
+    tau_c_est = col_any(df, ["tau_c_est"], n)
+    mgl_est = col_any(df, ["mgl_est"], n)
 
     if not np.isfinite(theta_sim).any() and all(k in df.columns for k in ["imu_qx", "imu_qy", "imu_qz", "imu_qw"]):
         qx = col_to_numpy(df, "imu_qx")
@@ -186,10 +189,11 @@ def plot_simulation(df, csv_path: str, args):
         dt[dt <= 0] = np.median(dt[dt > 0]) if np.any(dt > 0) else 0.01
         alpha_sim = np.gradient(omega_sim, dt)
 
-    theta_real = None
-    omega_real = None
-    alpha_real = None
-    if cpr is not None and np.isfinite(enc).any():
+    theta_real = col_any(df, ["theta_real", "est_theta"], n)
+    omega_real = col_any(df, ["omega_real", "est_omega"], n)
+    alpha_real = col_any(df, ["alpha_real", "est_alpha"], n)
+    has_real = np.isfinite(theta_real).any() or np.isfinite(omega_real).any() or np.isfinite(alpha_real).any()
+    if not has_real and cpr is not None and np.isfinite(enc).any():
         theta_real = derive_theta_from_encoder(enc, cpr, sign=args.theta_sign, offset=args.theta_offset)
         dt = np.diff(t, prepend=t[0])
         if len(dt) > 1:
@@ -223,8 +227,8 @@ def plot_simulation(df, csv_path: str, args):
     ax[0].set_title("Command / PWM / delay")
 
     ax[1].plot(t, theta_sim, label="theta sim")
-    if theta_real is not None:
-        ax[1].plot(t, theta_real, label="theta real(enc)")
+    if np.isfinite(theta_real).any():
+        ax[1].plot(t, theta_real, label="theta real")
     ax[1].grid(True)
     ax[1].legend()
     ax[1].set_xlabel("time [s]")
@@ -232,7 +236,7 @@ def plot_simulation(df, csv_path: str, args):
     ax[1].set_title("Theta")
 
     ax[2].plot(t, omega_sim, label="omega sim")
-    if omega_real is not None:
+    if np.isfinite(omega_real).any():
         ax[2].plot(t, omega_real, label="omega real")
     ax[2].grid(True)
     ax[2].legend()
@@ -241,7 +245,7 @@ def plot_simulation(df, csv_path: str, args):
     ax[2].set_title("Omega")
 
     ax[3].plot(t, alpha_sim, label="alpha sim")
-    if alpha_real is not None:
+    if np.isfinite(alpha_real).any():
         ax[3].plot(t, alpha_real, label="alpha real")
     ax[3].grid(True)
     ax[3].legend()
@@ -249,22 +253,32 @@ def plot_simulation(df, csv_path: str, args):
     ax[3].set_ylabel("rad/s^2")
     ax[3].set_title("Alpha")
 
-    ax[4].plot(t, ina_p, label="INA power")
-    ax[4].plot(t, p_pred, label="pred power")
-    ax[4].plot(t, ina_i, label="INA current", alpha=0.7)
+    e_theta = theta_sim - theta_real if np.isfinite(theta_real).any() else np.full(n, np.nan)
+    e_omega = omega_sim - omega_real if np.isfinite(omega_real).any() else np.full(n, np.nan)
+    e_alpha = alpha_sim - alpha_real if np.isfinite(alpha_real).any() else np.full(n, np.nan)
+    if np.isfinite(e_theta).any():
+        ax[4].plot(t, np.sqrt(np.maximum(e_theta * e_theta, 0.0)), label="|e_theta|")
+    if np.isfinite(e_omega).any():
+        ax[4].plot(t, np.sqrt(np.maximum(e_omega * e_omega, 0.0)), label="|e_omega|")
+    if np.isfinite(e_alpha).any():
+        ax[4].plot(t, np.sqrt(np.maximum(e_alpha * e_alpha, 0.0)), label="|e_alpha|")
     ax[4].grid(True)
     ax[4].legend()
     ax[4].set_xlabel("time [s]")
-    ax[4].set_title("Electrical (power/current)")
+    ax[4].set_title("Absolute tracking error")
 
-    theta_for_hys = theta_real if theta_real is not None else theta_sim
-    omega_for_hys = omega_real if omega_real is not None else omega_sim
-    valid = np.isfinite(theta_for_hys) & np.isfinite(omega_for_hys)
-    ax[5].plot(theta_for_hys[valid], omega_for_hys[valid], linewidth=1.2)
+    if np.isfinite(J_est).any():
+        ax[5].plot(t, J_est, label="J_est")
+    if np.isfinite(b_est).any():
+        ax[5].plot(t, b_est, label="b_est")
+    if np.isfinite(tau_c_est).any():
+        ax[5].plot(t, tau_c_est, label="tau_c_est")
+    if np.isfinite(mgl_est).any():
+        ax[5].plot(t, mgl_est, label="mgl_est")
     ax[5].grid(True)
-    ax[5].set_xlabel("theta [rad]")
-    ax[5].set_ylabel("omega [rad/s]")
-    ax[5].set_title("Hysteresis / phase portrait")
+    ax[5].legend()
+    ax[5].set_xlabel("time [s]")
+    ax[5].set_title("Estimated parameter trajectories")
 
     fig.tight_layout()
     plt.show()
