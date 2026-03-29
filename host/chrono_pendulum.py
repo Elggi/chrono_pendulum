@@ -30,7 +30,7 @@ from sensor_msgs.msg import Imu
 from chrono_core.config import BridgeConfig
 from chrono_core.utils import clamp, now_wall, terminal_status_line, sanitize_float, make_numbered_path
 from chrono_core.estimation import OnlineParameterEKF, ObservationLPF, FitConvergenceMonitor, RobustSignalFilter
-from chrono_core.dynamics import PendulumModel, compute_model_torque_and_electrics, blend_parameters_for_sim, enc_to_theta
+from chrono_core.dynamics import PendulumModel, compute_model_torque_and_electrics, blend_parameters_for_sim
 from chrono_core.calibration_io import apply_calibration_json, extract_radius_from_json
 from chrono_core.pendulum_rl_env import build_init_params
 from chrono_core.log_schema import PENDULUM_LOG_COLUMNS
@@ -678,12 +678,9 @@ def main():
         omega_prev = model.get_omega()
         t_prev = 0.0
         enc_ref = None
-        theta_ref = None
         theta_real_prev = None
         omega_real_prev = 0.0
         t_real_prev = None
-        est_theta_ref = None
-        est_theta_model_ref = None
         run_limit_sec = float("inf") if args.duration <= 0.0 else float(args.duration)
 
         if host_controller is not None:
@@ -778,16 +775,15 @@ def main():
 
                 if enc_ref is None and np.isfinite(snap["hw_enc"]):
                     enc_ref = float(snap["hw_enc"])
-                    theta_ref = float(theta)
-                theta_from_enc = enc_to_theta(snap["hw_enc"], enc_ref, theta_ref, cfg.cpr) if enc_ref is not None else None
-                if est_theta_ref is None and np.isfinite(snap["est_theta"]):
-                    est_theta_ref = float(snap["est_theta"])
-                    est_theta_model_ref = float(theta)
 
-                if np.isfinite(snap["est_theta"]) and est_theta_ref is not None and est_theta_model_ref is not None:
-                    theta_real = est_theta_model_ref + (float(snap["est_theta"]) - est_theta_ref)
-                else:
-                    theta_real = theta_from_enc if theta_from_enc is not None else theta
+                theta_from_enc = None
+                if enc_ref is not None and np.isfinite(snap["hw_enc"]) and np.isfinite(cfg.cpr) and cfg.cpr > 1.0:
+                    cur_enc = float(snap["hw_enc"])
+                    # Always treat startup encoder value as offset only.
+                    theta_from_enc = float((2.0 * math.pi / float(cfg.cpr)) * (cur_enc - enc_ref))
+                # Prefer encoder-based real angle so startup offset is always zeroed from
+                # the current encoder baseline; this avoids absolute-angle jumps.
+                theta_real = theta_from_enc if theta_from_enc is not None else theta
 
                 if theta_real_prev is not None and t_real_prev is not None:
                     omega_real = (theta_real - theta_real_prev) / max(sim_t - t_real_prev, cfg.step)
