@@ -30,7 +30,10 @@ def main():
 
     params = build_init_params(cfg, calib, param)
     traj = load_replay_csv(args.csv, cfg, delay_override=args.delay_override)
-    delay = params.get("delay_sec", traj.delay_sec_est if args.delay_override is None else args.delay_override)
+    delay = params.get(
+        "delay_sec",
+        (traj.delay_sec_est if args.delay_override is None else args.delay_override),
+    )
     sim = simulate_trajectory(traj, params, cfg, delay_sec=delay)
     feat = compute_error_features(traj, sim)
     loss = weighted_loss(feat, {})
@@ -43,7 +46,7 @@ def main():
         best_cost = loss
         for i in range(len(traj.t)):
             wr.writerow([
-                0.0, traj.t[i], traj.t[i], "replay",
+                0.0, traj.t[i], "replay",
                 traj.cmd_u[i], sim["cmd_delayed"][i], traj.hw_pwm[i], traj.delay_sec_est, sim["tau_motor"][i] - sim["tau_res"][i],
                 sim["theta"][i], sim["omega"][i], sim["alpha"][i],
                 "", "",

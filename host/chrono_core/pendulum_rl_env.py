@@ -202,18 +202,13 @@ def weighted_loss(feat: dict[str, float], weights: dict[str, float]):
 def load_replay_csv(path: str | Path, cfg: BridgeConfig, delay_override: float | None = None):
     p = Path(path)
     df = pd.read_csv(p)
-    # sim_time is the canonical timeline in current logs and is synchronized
-    # to wall-clock elapsed time at runtime. Keep wall_elapsed as fallback for
-    # backward compatibility with older files/tools.
-    if "sim_time" in df.columns:
-        t = _safe_col(df, "sim_time")
-    elif "wall_elapsed" in df.columns:
+    if "wall_elapsed" in df.columns:
         t = _safe_col(df, "wall_elapsed")
     elif "wall_time" in df.columns:
         wt = _safe_col(df, "wall_time")
         t = wt - wt[0] if len(wt) > 0 else wt
     else:
-        t = _safe_col(df, "sim_time")
+        t = np.arange(len(df), dtype=float) * cfg.step
     if len(t) < 2:
         t = np.arange(len(df), dtype=float) * cfg.step
     dt = np.diff(t, prepend=t[0])
@@ -242,9 +237,16 @@ def load_replay_csv(path: str | Path, cfg: BridgeConfig, delay_override: float |
     current_a = _safe_col(df, "current_filtered_A", 0.0)
     power_w = _safe_col(df, "power_raw_W", 0.0)
 
-    delay_sec = estimate_delay_from_signals(t, cmd_u, hw_pwm)
     if delay_override is not None:
         delay_sec = float(delay_override)
+    elif "delay_sec_est" in df.columns:
+        delay_arr = _safe_col(df, "delay_sec_est", cfg.delay_init_ms / 1000.0)
+        delay_sec = float(np.median(delay_arr)) if len(delay_arr) > 0 else (cfg.delay_init_ms / 1000.0)
+    elif "delay_ms" in df.columns:
+        delay_ms_arr = _safe_col(df, "delay_ms", cfg.delay_init_ms)
+        delay_sec = 1e-3 * float(np.median(delay_ms_arr)) if len(delay_ms_arr) > 0 else (cfg.delay_init_ms / 1000.0)
+    else:
+        delay_sec = cfg.delay_init_ms / 1000.0
 
     return ReplayTrajectory(
         name=p.name,
@@ -441,6 +443,7 @@ def build_init_params(cfg: BridgeConfig, calibration: dict[str, Any] | None = No
         "i0": float(cfg.i0_init),
         "R": float(cfg.R_init),
         "k_e": float(cfg.k_e_init),
+        "delay_sec": float(cfg.delay_init_ms) / 1000.0,
     }
 
     def _merge(src):
@@ -452,6 +455,10 @@ def build_init_params(cfg: BridgeConfig, calibration: dict[str, Any] | None = No
 
     if calibration:
         _merge(calibration.get("model_init", calibration.get("best_params", {})))
+        if isinstance(calibration.get("delay"), dict) and "effective_control_delay_ms" in calibration["delay"]:
+            out["delay_sec"] = float(calibration["delay"]["effective_control_delay_ms"]) / 1000.0
     if parameter_json:
         _merge(parameter_json.get("model_init", parameter_json.get("best_params", parameter_json)))
+        if isinstance(parameter_json.get("delay"), dict) and "effective_control_delay_ms" in parameter_json["delay"]:
+            out["delay_sec"] = float(parameter_json["delay"]["effective_control_delay_ms"]) / 1000.0
     return out

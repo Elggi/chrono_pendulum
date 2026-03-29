@@ -150,6 +150,7 @@ def plot_simulation(df, csv_path: str, args):
     if "wall_elapsed" in df.columns:
         t = col_to_numpy(df, "wall_elapsed")
     elif "sim_time" in df.columns:
+        # backward compatibility with old logs only
         t = col_to_numpy(df, "sim_time")
     elif "wall_time" in df.columns:
         tw = col_to_numpy(df, "wall_time")
@@ -308,7 +309,7 @@ def plot_rl_summary(history_csv: str, replay_csv: str):
     axs[0, 1].legend(loc="best")
     axs[0, 1].grid(True, alpha=0.3)
 
-    t = r["sim_time"].to_numpy(dtype=float) if "sim_time" in r.columns else r["wall_elapsed"].to_numpy(dtype=float)
+    t = r["wall_elapsed"].to_numpy(dtype=float) if "wall_elapsed" in r.columns else r["sim_time"].to_numpy(dtype=float)
     axs[1, 0].plot(t, r["theta_real"].to_numpy(dtype=float), label="theta_real")
     axs[1, 0].plot(t, r["theta"].to_numpy(dtype=float), label="theta_sim")
     axs[1, 0].set_title("Replay Theta Overlay")
