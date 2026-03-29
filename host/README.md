@@ -16,7 +16,7 @@ This layer runs the host-side digital twin, online identification, logging, and 
 #### 1) Gravity representation
 Gravity is **not** identified via surrogate `mgl` anymore.
 
-Gravity is represented only by Chrono rigid-body dynamics using:
+Gravity is represented using COM physics with:
 - total mass `m_total = link_mass + imu_mass = 0.220 kg`
 - COM offset from pivot `l_com`
 - system gravity `g`
@@ -32,9 +32,9 @@ Pivot inertia follows:
 J_{pivot} = J_{cm\_base} + m_{total} l_{com}^2
 \]
 
-Chrono receives this through COM frame + COM inertia:
-- `SetFrameCOMToRef([0, -l_com, 0])`
-- `Izz_at_COM = J_cm_base`
+Pivot-space dynamics:
+- `J_pivot = J_cm_base + m_total*l_com^2` set directly on the rigid body inertia
+- explicit gravity torque term `tau_gravity = m_total*g*l_com*sin(theta)` in motor-side torque composition
 
 Visual geometry still uses `link_L`, while dynamic modeling uses `l_com` and fixed masses.
 

@@ -53,7 +53,6 @@ class PendulumModel:
         )
 
         self.link = ch.ChBody()
-        self.com_frame_supported = hasattr(self.link, "SetFrameCOMToRef")
         self.link.SetPos(ch.ChVector3d(0.0, 0.0, cfg.motor_length / 2.0))
         self.link.SetRot(ch.QuatFromAngleZ(math.radians(cfg.theta0_deg)))
         self.sys.Add(self.link)
@@ -100,18 +99,11 @@ class PendulumModel:
         """Apply COM-based rigid-body properties.
 
         Pivot inertia is J_pivot = J_cm_base + m_total * l_com^2.
-        Chrono uses COM frame + COM inertia, so we set:
-        - COM offset by l_com from pivot
-        - Izz at COM = J_cm_base
         """
         l_com = max(float(l_com), 1e-4)
         self.link.SetMass(max(self.m_total, 1e-6))
-        self.link.SetInertiaXX(ch.ChVector3d(1e-5, 1e-5, max(float(self.cfg.J_cm_base), 1e-8)))
-        com_frame = ch.ChFramed(ch.ChVector3d(0.0, -l_com, 0.0), ch.QUNIT)
-        if self.com_frame_supported:
-            self.link.SetFrameCOMToRef(com_frame)
-        else:
-            print("[WARN] ChBody.SetFrameCOMToRef unavailable; COM-based gravity cannot be represented accurately.")
+        j_pivot = float(self.cfg.J_cm_base + self.m_total * (l_com ** 2))
+        self.link.SetInertiaXX(ch.ChVector3d(1e-5, 1e-5, max(j_pivot, 1e-8)))
 
     def update_identified_structure(self, params: dict):
         self._apply_dynamic_properties(params["l_com"])
@@ -146,7 +138,7 @@ class PendulumModel:
         self.sys.DoStepDynamics(h)
 
 
-def compute_model_torque_and_electrics(cmd_u, omega, bus_v, p, cfg: BridgeConfig):
+def compute_model_torque_and_electrics(cmd_u, theta, omega, bus_v, p, cfg: BridgeConfig):
     duty = clamp(cmd_u / max(cfg.pwm_limit, 1e-9), -1.0, 1.0)
     v_applied = duty * float(bus_v)
     i_raw = (v_applied - p["k_e"] * omega) / max(p["R"], 1e-6)
@@ -160,7 +152,8 @@ def compute_model_torque_and_electrics(cmd_u, omega, bus_v, p, cfg: BridgeConfig
     tau_visc = p["b_eq"] * omega
     tau_coul = p["tau_eq"] * math.tanh(omega / max(cfg.tanh_eps, 1e-9))
     tau_res = tau_visc + tau_coul
-    tau_net = tau_motor - tau_res
+    tau_gravity = (cfg.link_mass + cfg.imu_mass) * cfg.gravity * p["l_com"] * math.sin(theta)
+    tau_net = tau_motor - tau_res - tau_gravity
     p_pred = v_applied * i_eff
     return {
         "duty": duty,
@@ -172,6 +165,7 @@ def compute_model_torque_and_electrics(cmd_u, omega, bus_v, p, cfg: BridgeConfig
         "tau_visc": tau_visc,
         "tau_coul": tau_coul,
         "tau_res": tau_res,
+        "tau_gravity": tau_gravity,
         "tau_net": tau_net,
     }
 

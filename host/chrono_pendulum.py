@@ -724,7 +724,8 @@ def main():
                 else:
                     current_A = 0.0
 
-                model_out = compute_model_torque_and_electrics(cmd_u_used, model.get_omega(), bus_v, sim_params, cfg)
+                theta_before = model.get_theta()
+                model_out = compute_model_torque_and_electrics(cmd_u_used, theta_before, model.get_omega(), bus_v, sim_params, cfg)
                 model.apply_torque(model_out["tau_net"])
                 model.step(cfg.step)
 
