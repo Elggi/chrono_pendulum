@@ -118,3 +118,80 @@ CSV/meta logs now include (when available):
 - `plot_pendulum.py`: log plotting
 - `RL_fitting.py`: offline parameter optimization
 - `imu_viewer.py`: IMU visualization
+
+## Offline RL replay calibration workflow (new)
+
+Use `train_pendulum_rl.py` for episodic/offline parameter calibration from recorded CSV logs.
+
+### Inputs
+- `--calibration_json <path>` (required)
+- `--parameter_json <path>` (optional)
+  - if omitted, initial parameters are built from `calibration.json` + `BridgeConfig` defaults
+- `--csv <path>` (repeatable) or `--csv_dir <dir>`
+
+### Core design
+- This workflow **does not** control hardware in real-time.
+- It replays logged trajectories and updates model parameters to reduce sim-vs-real mismatch.
+- Default calibrated vector:
+  - `[l_com, J_cm_base, b_eq, tau_eq, k_t, i0, R, k_e]`
+- `delay_sec` is excluded by default and treated as replay-alignment metadata.
+
+### Delay policy (default)
+1. Estimate delay per trajectory from `cmd_u_raw` vs `hw_pwm`.
+2. Replay with fixed aligned command `u_sim(t) = u_cmd(t - delay_est)`.
+3. Compute loss/reward on aligned replay basis.
+
+Advanced mode:
+- `--learn_delay` enables joint learning of `delay_sec` as an extra parameter.
+
+Robustness option:
+- `--delay_jitter_ms` adds only small random delay jitter around pre-estimated delay during training domain randomization.
+
+### Deterministic pre-fit + PPO fine-tune
+- Optional pre-fit local random search (`--prefitON`/`--prefitOFF`) generates a strong initialization.
+- PPO then performs episodic parameter-delta refinement in `PendulumReplayCalibrationEnv`.
+- State includes normalized parameter vector + compact replay error features (`RMSE`, bias, loss progress).
+- Reward follows improvement-based structure: improvement − weighted loss − action penalty.
+
+### Domain randomization
+Enable/disable with:
+- `--domain_randomizationON` / `--domain_randomizationOFF`
+
+Randomization includes bounded perturbations around calibrated centers and optional delay jitter.
+
+### PPO-style interface
+Supports Chrono-like arguments:
+- `-n/--num_episodes`
+- `-g/--gamma`
+- `-l/--lam`
+- `-k/--kl_targ`
+- `-b/--batch_size`
+- `--renderON/--renderOFF`
+
+Additional calibration controls:
+- `--prefitON/--prefitOFF`
+- `--learn_delay`
+- `--delay_override`
+- `--delay_jitter_ms`
+- `--seed`
+- `--interactive` (prompt mode; pressing Enter keeps defaults)
+
+### Train/validation/test split
+- Multiple CSVs: split by file.
+- Single CSV: current implementation reuses the single file for train/val/test.
+
+### Outputs
+Written under `--outdir`:
+- `params_initial.json`
+- `params_prefit.json` (if enabled)
+- `params_final_rl.json`
+- `metadata.json` (settings, files, reward weights, randomization ranges, best validation score, timestamp, per-trajectory delay estimates)
+- `training_history.json`
+- plots:
+  - reward/loss curves
+  - RMSE curves (`theta`, `omega`, `alpha` + validation)
+  - parameter convergence
+  - delay diagnostics
+
+### Replay/export CSV compatibility
+Use `replay_pendulum_export.py` to export replayed trajectories with the **same column names and order** used by `chrono_pendulum.py`, enabling direct use with existing `plot_pendulum.py` tooling.
