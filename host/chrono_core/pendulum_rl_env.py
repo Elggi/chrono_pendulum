@@ -64,6 +64,16 @@ def _sanitize_timeseries(arr: np.ndarray):
     return out
 
 
+def _winsorize_abs(x: np.ndarray, q: float = 99.5):
+    y = np.asarray(x, dtype=float).copy()
+    if len(y) == 0:
+        return y
+    lim = float(np.nanpercentile(np.abs(y), q))
+    if np.isfinite(lim) and lim > 0.0:
+        y = np.clip(y, -lim, lim)
+    return y
+
+
 def estimate_delay_from_signals(t: np.ndarray, cmd_u: np.ndarray, hw_pwm: np.ndarray, max_delay_sec: float = 0.25):
     if len(t) < 3:
         return 0.0
@@ -164,9 +174,9 @@ def simulate_trajectory(traj: ReplayTrajectory, params: dict[str, float], cfg: B
 
 
 def compute_error_features(traj: ReplayTrajectory, sim: dict[str, np.ndarray], delay_quality: float = 1.0):
-    e_th = sim["theta"] - traj.theta_real
-    e_om = sim["omega"] - traj.omega_real
-    e_al = sim["alpha"] - traj.alpha_real
+    e_th = _winsorize_abs(sim["theta"] - traj.theta_real, q=99.5)
+    e_om = _winsorize_abs(sim["omega"] - traj.omega_real, q=99.5)
+    e_al = _winsorize_abs(sim["alpha"] - traj.alpha_real, q=99.5)
 
     rmse_theta = float(np.sqrt(np.mean(e_th ** 2)))
     rmse_omega = float(np.sqrt(np.mean(e_om ** 2)))
@@ -232,6 +242,17 @@ def load_replay_csv(path: str | Path, cfg: BridgeConfig, delay_override: float |
     theta_real = _sanitize_timeseries(theta_real)
     omega_real = _sanitize_timeseries(omega_real)
     alpha_real = _sanitize_timeseries(alpha_real)
+    omega_from_theta = _gradient(theta_real, dt)
+    alpha_from_omega = _gradient(omega_from_theta, dt)
+
+    # If runtime logging briefly broke real-state channels, repair them from theta.
+    if float(np.nanpercentile(np.abs(omega_real), 99.5)) > 80.0 and float(np.nanpercentile(np.abs(omega_from_theta), 99.5)) < 50.0:
+        omega_real = omega_from_theta
+    if float(np.nanpercentile(np.abs(alpha_real), 99.5)) > 800.0 and float(np.nanpercentile(np.abs(alpha_from_omega), 99.5)) < 300.0:
+        alpha_real = alpha_from_omega
+
+    omega_real = _winsorize_abs(omega_real, q=99.5)
+    alpha_real = _winsorize_abs(alpha_real, q=99.5)
 
     bus_v = _safe_col(df, "bus_v_filtered", cfg.nominal_bus_voltage)
     current_a = _safe_col(df, "current_filtered_A", 0.0)
