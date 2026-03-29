@@ -32,8 +32,7 @@ Pivot inertia follows:
 J_{pivot} = J_{cm\_base} + m_{total} l_{com}^2
 \]
 
-In this environment, `SetFrameCOMToRef` is unavailable in Python bindings.
-So runtime uses equivalent pivot-space dynamics:
+Pivot-space dynamics:
 - `J_pivot = J_cm_base + m_total*l_com^2` set directly on the rigid body inertia
 - explicit gravity torque term `tau_gravity = m_total*g*l_com*sin(theta)` in motor-side torque composition
 
