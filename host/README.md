@@ -116,7 +116,7 @@ CSV/meta logs now include (when available):
 - `chrono_core/estimation.py`: delay estimator, robust filters, EKF, convergence monitor
 - `chrono_core/calibration_io.py`: calibration/radius JSON loading
 - `plot_pendulum.py`: log plotting
-- `RL_fitting.py`: offline parameter optimization
+- `RL_fitting.py`: legacy compatibility wrapper (forwards to `train_pendulum_rl.py`)
 - `imu_viewer.py`: IMU visualization
 
 ## Offline RL Replay Calibration (new)
