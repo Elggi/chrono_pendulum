@@ -78,7 +78,10 @@ def build_replay_series(args):
         param_data = json.load(open(args.parameter_json, "r", encoding="utf-8"))
         traj = load_replay_csv(args.csv, cfg, delay_override=args.delay_override)
         params = build_init_params(cfg, parameter_json=param_data)
-        delay_sec = params.get("delay_sec", traj.delay_sec_est if args.delay_override is None else float(args.delay_override))
+        delay_sec = params.get(
+            "delay_sec",
+            (traj.delay_sec_est if args.delay_override is None else float(args.delay_override)),
+        )
         sim = simulate_trajectory(traj, params, cfg, delay_sec=delay_sec)
         theta_sim = sim["theta"]
         theta_real = traj.theta_real

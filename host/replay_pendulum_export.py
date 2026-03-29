@@ -30,7 +30,10 @@ def main():
 
     params = build_init_params(cfg, calib, param)
     traj = load_replay_csv(args.csv, cfg, delay_override=args.delay_override)
-    delay = params.get("delay_sec", traj.delay_sec_est if args.delay_override is None else args.delay_override)
+    delay = params.get(
+        "delay_sec",
+        (traj.delay_sec_est if args.delay_override is None else args.delay_override),
+    )
     sim = simulate_trajectory(traj, params, cfg, delay_sec=delay)
     feat = compute_error_features(traj, sim)
     loss = weighted_loss(feat, {})

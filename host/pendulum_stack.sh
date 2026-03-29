@@ -199,8 +199,6 @@ run_rl_fitting() {
     read -p "seed [7]: " seed
     seed=${seed:-7}
 
-    read -p "prefit ON? (y/n) [y]: " prefit_yn
-    prefit_yn=${prefit_yn:-y}
     read -p "learn_delay ON? (y/n) [n]: " learn_delay_yn
     learn_delay_yn=${learn_delay_yn:-n}
     read -p "delay_override sec (blank=auto): " delay_override
@@ -222,11 +220,6 @@ run_rl_fitting() {
     [ -n "$param_json" ] && cmd+=(--parameter_json "$param_json")
     [ -n "$delay_override" ] && cmd+=(--delay_override "$delay_override")
 
-    if [[ "$prefit_yn" =~ ^[Yy]$ ]]; then
-        cmd+=(--prefitON)
-    else
-        cmd+=(--prefitOFF)
-    fi
     if [[ "$learn_delay_yn" =~ ^[Yy]$ ]]; then
         cmd+=(--learn_delay)
     fi

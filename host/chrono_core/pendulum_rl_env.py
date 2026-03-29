@@ -443,6 +443,7 @@ def build_init_params(cfg: BridgeConfig, calibration: dict[str, Any] | None = No
         "i0": float(cfg.i0_init),
         "R": float(cfg.R_init),
         "k_e": float(cfg.k_e_init),
+        "delay_sec": float(cfg.delay_init_ms) / 1000.0,
     }
 
     def _merge(src):
@@ -454,6 +455,10 @@ def build_init_params(cfg: BridgeConfig, calibration: dict[str, Any] | None = No
 
     if calibration:
         _merge(calibration.get("model_init", calibration.get("best_params", {})))
+        if isinstance(calibration.get("delay"), dict) and "effective_control_delay_ms" in calibration["delay"]:
+            out["delay_sec"] = float(calibration["delay"]["effective_control_delay_ms"]) / 1000.0
     if parameter_json:
         _merge(parameter_json.get("model_init", parameter_json.get("best_params", parameter_json)))
+        if isinstance(parameter_json.get("delay"), dict) and "effective_control_delay_ms" in parameter_json["delay"]:
+            out["delay_sec"] = float(parameter_json["delay"]["effective_control_delay_ms"]) / 1000.0
     return out
