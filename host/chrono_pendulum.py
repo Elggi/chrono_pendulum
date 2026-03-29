@@ -682,8 +682,6 @@ def main():
         theta_real_prev = None
         omega_real_prev = 0.0
         t_real_prev = None
-        est_theta_ref = None
-        est_theta_model_ref = None
         run_limit_sec = float("inf") if args.duration <= 0.0 else float(args.duration)
 
         if host_controller is not None:
@@ -778,16 +776,12 @@ def main():
 
                 if enc_ref is None and np.isfinite(snap["hw_enc"]):
                     enc_ref = float(snap["hw_enc"])
-                    theta_ref = float(theta)
+                    # Real angle must be tracked as encoder delta from startup baseline.
+                    theta_ref = 0.0
                 theta_from_enc = enc_to_theta(snap["hw_enc"], enc_ref, theta_ref, cfg.cpr) if enc_ref is not None else None
-                if est_theta_ref is None and np.isfinite(snap["est_theta"]):
-                    est_theta_ref = float(snap["est_theta"])
-                    est_theta_model_ref = float(theta)
-
-                if np.isfinite(snap["est_theta"]) and est_theta_ref is not None and est_theta_model_ref is not None:
-                    theta_real = est_theta_model_ref + (float(snap["est_theta"]) - est_theta_ref)
-                else:
-                    theta_real = theta_from_enc if theta_from_enc is not None else theta
+                # Prefer encoder-based real angle so startup offset is always zeroed from
+                # the current encoder baseline; this avoids absolute-angle jumps.
+                theta_real = theta_from_enc if theta_from_enc is not None else theta
 
                 if theta_real_prev is not None and t_real_prev is not None:
                     omega_real = (theta_real - theta_real_prev) / max(sim_t - t_real_prev, cfg.step)

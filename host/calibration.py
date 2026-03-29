@@ -90,6 +90,7 @@ class ControllerConfig:
 class DelayConfig:
     topic_cmd_u: str = "/cmd/u"
     topic_hw_pwm: str = "/hw/pwm_applied"
+    enable_estimation: bool = False
     max_delay_ms: float = 150.0
     update_hz: float = 4.0
     buffer_sec: float = 4.0
@@ -276,6 +277,10 @@ class DelayLockEstimator:
         self._trim(wall_t)
 
     def estimate(self, wall_now: float):
+        if not self.cfg.enable_estimation:
+            self.delay_sec = 0.0
+            self.delay_locked = False
+            return 0.0
         if self.delay_locked:
             return self.delay_sec
         if wall_now - self.last_update_wall < 1.0 / max(self.cfg.update_hz, 1e-9):
