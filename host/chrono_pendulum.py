@@ -194,11 +194,11 @@ class HostCommandController:
         elif key == "8":
             self.set_mode("prbs")
         elif key == "[":
-            self.cfg.pwm_step = max(0.5, self.cfg.pwm_step - 0.5)
+            self.cfg.pwm_step = max(1.0, self.cfg.pwm_step - 1.0)
         elif key == "]":
-            self.cfg.pwm_step = min(100.0, self.cfg.pwm_step + 0.5)
+            self.cfg.pwm_step = min(100.0, self.cfg.pwm_step + 1.0)
         elif key == "-":
-            self.cfg.pwm_limit = max(10.0, self.cfg.pwm_limit - 5.0)
+            self.cfg.pwm_limit = max(20.0, self.cfg.pwm_limit - 5.0)
         elif key == "=":
             self.cfg.pwm_limit = min(255.0, self.cfg.pwm_limit + 5.0)
         elif key in ("q", "Q", "ESC"):
@@ -211,14 +211,14 @@ class HostCommandController:
         if self.mode == "manual":
             return self.current_u
         if self.mode == "sin":
-            return self.cfg.pwm_limit * 0.60 * math.sin(2.0 * math.pi * self.cfg.wave_freq * t)
+            return 60.0 * math.sin(2.0 * math.pi * 0.5 * t)
         if self.mode == "square":
-            return self.cfg.pwm_limit * 0.60 * (1.0 if math.sin(2.0 * math.pi * self.cfg.wave_freq * t) >= 0.0 else -1.0)
+            return 60.0 if math.sin(2.0 * math.pi * 0.5 * t) >= 0.0 else -60.0
         if self.mode == "burst":
-            tau = t % self.cfg.burst_period
-            return self.cfg.pwm_limit * 0.75 if tau < self.cfg.burst_on_time else 0.0
+            tau = t % 2.0
+            return 60.0 if tau < 0.30 else 0.0
         if self.mode == "prbs":
-            return self.cfg.pwm_limit * 0.45 * prbs_value(t, self.cfg.prbs_dt, self.cfg.prbs_seed)
+            return 60.0 * prbs_value(t, 0.25, self.cfg.prbs_seed)
         return self.current_u
 
     def poll(self):
