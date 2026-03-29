@@ -678,8 +678,6 @@ def main():
         omega_prev = model.get_omega()
         t_prev = 0.0
         enc_ref = None
-        theta_ref = None
-        last_hw_enc = None
         theta_real_prev = None
         omega_real_prev = 0.0
         t_real_prev = None
@@ -777,23 +775,12 @@ def main():
 
                 if enc_ref is None and np.isfinite(snap["hw_enc"]):
                     enc_ref = float(snap["hw_enc"])
-                    # Real angle must be tracked as encoder delta from startup baseline.
-                    theta_ref = 0.0
-                    last_hw_enc = float(snap["hw_enc"])
+
                 theta_from_enc = None
                 if enc_ref is not None and np.isfinite(snap["hw_enc"]) and np.isfinite(cfg.cpr) and cfg.cpr > 1.0:
                     cur_enc = float(snap["hw_enc"])
-                    if theta_ref is None:
-                        theta_ref = 0.0
-                    if last_hw_enc is None:
-                        last_hw_enc = cur_enc
-                    delta_count = cur_enc - last_hw_enc
-                    # Reject abrupt encoder jumps (reset/glitch) that create hundreds-rad spikes.
-                    jump_thresh = 0.25 * float(cfg.cpr)
-                    if abs(delta_count) <= jump_thresh:
-                        theta_ref += (2.0 * math.pi / float(cfg.cpr)) * delta_count
-                        last_hw_enc = cur_enc
-                    theta_from_enc = float(theta_ref)
+                    # Always treat startup encoder value as offset only.
+                    theta_from_enc = float((2.0 * math.pi / float(cfg.cpr)) * (cur_enc - enc_ref))
                 # Prefer encoder-based real angle so startup offset is always zeroed from
                 # the current encoder baseline; this avoids absolute-angle jumps.
                 theta_real = theta_from_enc if theta_from_enc is not None else theta

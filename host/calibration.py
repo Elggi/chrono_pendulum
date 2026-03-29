@@ -100,6 +100,9 @@ class DelayConfig:
     min_corr: float = 0.30
     min_activity_std: float = 5.0
     lock_near_max_ratio: float = 0.90
+    sample_window_sec: float = 1.0
+    activity_abs_cmd: float = 15.0
+    activity_abs_pwm: float = 10.0
 
 
 class CalibrationKeyboardControllerNode(Node):
@@ -264,6 +267,7 @@ class DelayLockEstimator:
         self.delay_locked = False
         self.measured_hist = deque(maxlen=max(int(cfg.lock_hold_updates), 1))
         self.last_corr = 0.0
+        self.activity_start_wall = None
 
     def _trim(self, now_wall: float):
         tmin = now_wall - self.cfg.buffer_sec
@@ -322,28 +326,39 @@ class DelayLockEstimator:
         pwm = np.array([interp(self.pwm_hist, t) for t in ts], dtype=float)
         if np.std(cmd) < self.cfg.min_activity_std or np.std(pwm) < self.cfg.min_activity_std:
             return self.delay_sec
-        # Use first-difference signal to track response timing robustly.
-        cmd_d = np.diff(cmd)
-        pwm_d = np.diff(pwm)
-        if len(cmd_d) < 20 or len(pwm_d) < 20:
+        cmd_abs = np.abs(cmd)
+        pwm_abs = np.abs(pwm)
+        active_idx = np.where((cmd_abs >= self.cfg.activity_abs_cmd) | (pwm_abs >= self.cfg.activity_abs_pwm))[0]
+        if len(active_idx) == 0:
+            self.activity_start_wall = None
             return self.delay_sec
-        cmd_d -= np.mean(cmd_d)
-        pwm_d -= np.mean(pwm_d)
-        cmd_std = float(np.std(cmd_d))
-        pwm_std = float(np.std(pwm_d))
+        active_t0 = float(ts[int(active_idx[0])])
+        if self.activity_start_wall is None:
+            self.activity_start_wall = active_t0
+        win_start = self.activity_start_wall
+        win_end = win_start + max(self.cfg.sample_window_sec, 0.3)
+        sel = (ts >= win_start) & (ts <= win_end)
+        if np.count_nonzero(sel) < 25:
+            return self.delay_sec
+        cmd_w = cmd[sel]
+        pwm_w = pwm[sel]
+        cmd_w -= np.mean(cmd_w)
+        pwm_w -= np.mean(pwm_w)
+        cmd_std = float(np.std(cmd_w))
+        pwm_std = float(np.std(pwm_w))
         if cmd_std < 1e-6 or pwm_std < 1e-6:
             return self.delay_sec
-        cmd_d /= cmd_std
-        pwm_d /= pwm_std
+        cmd_w /= cmd_std
+        pwm_w /= pwm_std
 
         max_lag = int((self.cfg.max_delay_ms / 1000.0) / dt)
         best_lag = 0
         best_score = -1e18
         for lag in range(max_lag + 1):
-            if lag >= len(cmd_d) - 2:
+            if lag >= len(cmd_w) - 2:
                 break
-            a = cmd_d[:-lag] if lag > 0 else cmd_d
-            b = pwm_d[lag:] if lag > 0 else pwm_d
+            a = cmd_w[:-lag] if lag > 0 else cmd_w
+            b = pwm_w[lag:] if lag > 0 else pwm_w
             score = float(np.dot(a, b)) / max(len(a), 1)
             if score > best_score:
                 best_score = score
@@ -357,13 +372,9 @@ class DelayLockEstimator:
         if best_lag >= int(max_lag * self.cfg.lock_near_max_ratio):
             # Boundary-hit estimates are frequently artifacts; avoid locking there.
             return self.delay_sec
-        self.measured_hist.append(measured)
-        self.delay_sec = (1.0 - self.cfg.smooth_alpha) * self.delay_sec + self.cfg.smooth_alpha * measured
-        if len(self.measured_hist) >= max(int(self.cfg.lock_hold_updates), 1):
-            hist = np.array(self.measured_hist, dtype=float)
-            if float(np.std(hist)) <= (self.cfg.lock_std_ms / 1000.0):
-                self.delay_sec = float(np.mean(hist))
-                self.delay_locked = True
+        # Use a fixed-offset estimate from the first active window and lock it.
+        self.delay_sec = measured
+        self.delay_locked = True
         return self.delay_sec
 
 
