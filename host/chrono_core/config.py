@@ -12,20 +12,32 @@ class BridgeConfig:
     win_w: int = 1280
     win_h: int = 900
     window_title: str = "Chrono Pendulum | Online Calibration"
-    terminal_status_width: int = 160
+    terminal_status_width: int = 180
 
     motor_radius: float = 0.020
     motor_length: float = 0.050
     shaft_radius: float = 0.004
     shaft_length: float = 0.015
 
+    # Visual geometry (rendering / IMU widget placement)
     link_L: float = 0.285
-    radius_m: float = 0.285
-    cpr: float = float("nan")
     link_W: float = 0.020
     link_T: float = 0.006
+
+    # Dynamic geometry and encoder scaling
+    radius_m: float = 0.285
+    cpr: float = float("nan")
+
+    # Fixed masses (physical model)
     link_mass: float = 0.200
-    imu_mass: float = 0.010
+    imu_mass: float = 0.020
+
+    # Effective COM model: J_pivot = J_cm_base + m_total * l_com**2
+    J_cm_base: float = 0.0020
+    l_com_init: float = 0.1425
+
+    # Deprecated compatibility field (loaded but ignored in model/fit)
+    mgl_init: float = 0.550
 
     imu_offset_x: float = 0.220
     imu_offset_y: float = 0.000
@@ -40,17 +52,32 @@ class BridgeConfig:
     pwm_limit: float = 255.0
     pwm_step: float = 10.0
 
-    # online model parameters (important: J included)
-    J_init: float = 0.010
-    b_init: float = 0.030
-    tau_c_init: float = 0.080
-    mgl_init: float = 0.550
+    # Unified resistance/electrical model parameters
+    b_eq_init: float = 0.030
+    tau_eq_init: float = 0.080
     k_t_init: float = 0.250
     i0_init: float = 0.050
     R_init: float = 2.0
     k_e_init: float = 0.020
     tanh_eps: float = 0.05
-    j_min: float = 1e-4
+
+    # Electrical options
+    electrical_use_ina_bus_voltage: bool = True
+    nominal_bus_voltage: float = 7.4
+    current_clip_enable: bool = True
+    current_clip_A: float = 3.0
+
+    # INA219 robust filtering
+    ina_enable_bus_filter: bool = True
+    ina_bus_median_window: int = 7
+    ina_bus_hampel_k: int = 7
+    ina_bus_hampel_sigma: float = 3.0
+    ina_bus_lpf_tau_sec: float = 0.20
+    ina_enable_current_filter: bool = True
+    ina_current_median_window: int = 5
+    ina_current_hampel_k: int = 5
+    ina_current_hampel_sigma: float = 3.5
+    ina_current_lpf_tau_sec: float = 0.15
 
     # automatic delay compensation
     auto_delay_comp: bool = True
@@ -67,12 +94,9 @@ class BridgeConfig:
     self_fit_mode: str = "on"
     q_theta: float = 1e-5
     q_omega: float = 1e-3
-    q_J: float = 1e-8
-    q_b: float = 1e-7
-    q_tauc: float = 1e-7
-    q_mgl: float = 1e-7
-    q_kt: float = 1e-7
-    q_i0: float = 1e-7
+    q_l_com: float = 1e-7
+    q_b_eq: float = 1e-7
+    q_tau_eq: float = 1e-7
     q_delay: float = 1e-6
     r_theta: float = 2e-4
     r_omega: float = 2e-3
@@ -83,12 +107,11 @@ class BridgeConfig:
     fit_conv_rms_theta: float = 0.060
     fit_conv_rms_omega: float = 0.450
     fit_conv_rms_alpha: float = 1.600
-    J_max: float = 0.2
-    b_max: float = 5.0
-    tau_c_max: float = 2.0
-    mgl_max: float = 5.0
-    k_t_max: float = 5.0
-    i0_max: float = 255.0
+
+    l_com_min: float = 0.03
+    l_com_max: float = 0.45
+    b_eq_max: float = 5.0
+    tau_eq_max: float = 2.0
 
     # cost weights
     w_theta: float = 5.0

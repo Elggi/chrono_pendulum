@@ -62,12 +62,14 @@ class DelayCompensator:
         ts = np.arange(t0, t1, dt)
         if len(ts) < 20:
             return self.delay_sec
+
         cmd = np.array([self._interp(self.cmd_hist, t) for t in ts], dtype=float)
         pwm = np.array([self._interp(self.pwm_hist, t) for t in ts], dtype=float)
         cmd -= np.mean(cmd)
         pwm -= np.mean(pwm)
         if np.std(cmd) < 1e-6 or np.std(pwm) < 1e-6:
             return self.delay_sec
+
         max_lag = int((self.cfg.delay_max_ms / 1000.0) / dt)
         best_lag = 0
         best_score = -1e18
@@ -80,138 +82,127 @@ class DelayCompensator:
             if score > best_score:
                 best_score = score
                 best_lag = lag
+
         measured = best_lag * dt
         self._measured_hist.append(measured)
         self.delay_sec = (1.0 - self.cfg.delay_smooth_alpha) * self.delay_sec + self.cfg.delay_smooth_alpha * measured
         need_n = max(int(self.cfg.delay_lock_hold_updates), 1)
         if len(self._measured_hist) >= need_n:
             std_thr = max(float(self.cfg.delay_lock_std_ms), 0.0) / 1000.0
-            if float(np.std(np.array(self._measured_hist, dtype=float))) <= std_thr:
-                self.delay_sec = float(np.mean(np.array(self._measured_hist, dtype=float)))
+            hist_arr = np.array(self._measured_hist, dtype=float)
+            if float(np.std(hist_arr)) <= std_thr:
+                self.delay_sec = float(np.mean(hist_arr))
                 self.delay_locked = True
         return self.delay_sec
 
     def get_delayed_cmd(self, wall_now: float, fallback: float):
+        # Delay the faster command side so simulation/fitting sees the same effective actuation timing as hardware.
         target = wall_now - self.delay_sec
         if len(self.cmd_hist) < 2:
             return fallback
         return self._interp(self.cmd_hist, target)
 
 
-class CPREstimator:
-    def __init__(self):
-        self.prev_angle = None
-        self.angle_unwrapped = 0.0
-        self.angle_travel = 0.0
-        self.rev_index = 0
-        self.rev_enc_anchor = None
-        self.rev_angle_anchor = 0.0
-        self.samples = []
-        self.last_cpr = np.nan
-        self.motion_started = False
+class RobustSignalFilter:
+    def __init__(self, median_window: int, hampel_k: int, hampel_sigma: float, lpf_tau_sec: float):
+        self.median_window = max(int(median_window), 1)
+        self.hampel_k = max(int(hampel_k), 1)
+        self.hampel_sigma = max(float(hampel_sigma), 0.1)
+        self.lpf_tau_sec = max(float(lpf_tau_sec), 1e-4)
+        self.raw = deque(maxlen=max(self.median_window, self.hampel_k))
+        self.lpf_state = None
 
-    def reset_revolution_window(self, enc_count):
-        self.rev_enc_anchor = enc_count
-        self.rev_angle_anchor = self.angle_unwrapped
-        self.last_cpr = np.nan
-        self.motion_started = False
+    def update(self, value: float, dt: float) -> float:
+        val = float(value)
+        self.raw.append(val)
+        med_src = list(self.raw)[-self.median_window:]
+        med = float(np.median(np.array(med_src, dtype=float)))
 
-    def update(self, angle_wrapped, enc_count):
-        if self.prev_angle is None:
-            self.prev_angle = angle_wrapped
-            self.reset_revolution_window(enc_count)
-            return
-        d = angle_wrapped - self.prev_angle
-        while d > math.pi:
-            d -= 2.0 * math.pi
-        while d < -math.pi:
-            d += 2.0 * math.pi
-        self.angle_unwrapped += d
-        self.angle_travel += abs(d)
-        self.prev_angle = angle_wrapped
-        theta_window = self.angle_unwrapped - self.rev_angle_anchor
-        if not self.motion_started:
-            if abs(theta_window) < math.radians(5.0):
-                self.rev_enc_anchor = enc_count
-            else:
-                self.motion_started = True
-        while abs(theta_window) >= (2.0 * math.pi):
-            if self.rev_enc_anchor is not None:
-                delta = abs(enc_count - self.rev_enc_anchor)
-                if delta > 1:
-                    self.samples.append(float(delta))
-                    self.last_cpr = float(delta)
-            self.rev_enc_anchor = enc_count
-            self.rev_index += 1
-            self.rev_angle_anchor += math.copysign(2.0 * math.pi, theta_window)
-            theta_window = self.angle_unwrapped - self.rev_angle_anchor
+        hampel_src = np.array(list(self.raw)[-self.hampel_k:], dtype=float)
+        center = float(np.median(hampel_src))
+        mad = float(np.median(np.abs(hampel_src - center)))
+        scale = 1.4826 * mad
+        cleaned = med
+        if scale > 1e-9 and abs(val - center) <= self.hampel_sigma * scale:
+            cleaned = val
 
-    @property
-    def mean(self):
-        if len(self.samples) == 0:
-            return np.nan
-        return float(np.mean(self.samples))
+        if self.lpf_state is None:
+            self.lpf_state = cleaned
+        else:
+            dt = max(float(dt), 1e-6)
+            alpha = dt / (self.lpf_tau_sec + dt)
+            self.lpf_state = (1.0 - alpha) * self.lpf_state + alpha * cleaned
+        return float(self.lpf_state)
 
 
 class OnlineParameterEKF:
-    """
-    augmented state:
-    x = [theta, omega, J, b, tau_c, mgl, delay_sec]
-    """
+    """Augmented state: [theta, omega, l_com, b_eq, tau_eq, delay_sec]."""
+
     def __init__(self, cfg: BridgeConfig):
         self.cfg = cfg
         self.x = np.array([
-            0.0, 0.0,
-            cfg.J_init,
-            cfg.b_init,
-            cfg.tau_c_init,
-            cfg.mgl_init,
+            0.0,
+            0.0,
+            cfg.l_com_init,
+            cfg.b_eq_init,
+            cfg.tau_eq_init,
             cfg.delay_init_ms / 1000.0,
         ], dtype=float)
-        self.P = np.diag([1e-3, 1e-2, 1e-3, 1e-3, 1e-3, 1e-3, 1e-4])
-        self.Q = np.diag([
-            cfg.q_theta, cfg.q_omega, cfg.q_J, cfg.q_b, cfg.q_tauc,
-            cfg.q_mgl, cfg.q_delay
-        ])
+        self.P = np.diag([1e-3, 1e-2, 1e-3, 1e-3, 1e-3, 1e-4])
+        self.Q = np.diag([cfg.q_theta, cfg.q_omega, cfg.q_l_com, cfg.q_b_eq, cfg.q_tau_eq, cfg.q_delay])
         self.R = np.diag([cfg.r_theta, cfg.r_omega])
         self.best_cost = np.inf
         self.best_params = None
 
+    def _calc_alpha(self, th, om, l_com, b_eq, tau_eq, u_cmd):
+        l_com = max(float(l_com), self.cfg.l_com_min)
+        b_eq = max(float(b_eq), 0.0)
+        tau_eq = max(float(tau_eq), 0.0)
+        j_pivot = self.cfg.J_cm_base + (self.cfg.link_mass + self.cfg.imu_mass) * (l_com ** 2)
+        j_pivot = max(j_pivot, 1e-6)
+
+        duty = clamp(u_cmd / max(self.cfg.pwm_limit, 1e-9), -1.0, 1.0)
+        v_applied = duty * self.cfg.nominal_bus_voltage
+        i_raw = (v_applied - self.cfg.k_e_init * om) / max(self.cfg.R_init, 1e-6)
+        i_eff = math.copysign(max(abs(i_raw) - self.cfg.i0_init, 0.0), i_raw)
+        if self.cfg.current_clip_enable:
+            i_eff = clamp(i_eff, -self.cfg.current_clip_A, self.cfg.current_clip_A)
+
+        tau_motor = self.cfg.k_t_init * i_eff
+        tau_res = b_eq * om + tau_eq * math.tanh(om / max(self.cfg.tanh_eps, 1e-9))
+        tau_gravity = (self.cfg.link_mass + self.cfg.imu_mass) * self.cfg.gravity * l_com * math.sin(th)
+        return (tau_motor - tau_res - tau_gravity) / j_pivot
+
     def f_disc(self, x, u, dt):
-        th, om, J, b, tau_c, mgl, dly = x
-        J = max(J, self.cfg.j_min)
-        kt = max(float(self.cfg.k_t_init), 0.0)
-        i0 = max(float(self.cfg.i0_init), 0.0)
-        i_eff = math.copysign(max(abs(u) - i0, 0.0), u)
-        alpha = (kt * i_eff - b * om - tau_c * math.tanh(om / max(self.cfg.tanh_eps, 1e-9)) - mgl * math.sin(th)) / J
+        th, om, l_com, b_eq, tau_eq, dly = x
+        alpha = self._calc_alpha(th, om, l_com, b_eq, tau_eq, u)
         xn = np.array([
             th + dt * om,
             om + dt * alpha,
-            J,
-            max(b, 0.0),
-            max(tau_c, 0.0),
-            max(mgl, 0.0),
+            l_com,
+            max(b_eq, 0.0),
+            max(tau_eq, 0.0),
             max(dly, 0.0),
         ], dtype=float)
-        xn[2] = max(xn[2], self.cfg.j_min)
         return xn
 
     def h_meas(self, x):
         return np.array([x[0], x[1]], dtype=float)
 
-    def numeric_jacobian(self, fun, x, eps=1e-6):
+    @staticmethod
+    def numeric_jacobian(fun, x, eps=1e-6):
         x = np.asarray(x, dtype=float)
         y0 = np.asarray(fun(x), dtype=float)
         m, n = len(y0), len(x)
-        J = np.zeros((m, n), dtype=float)
+        jac = np.zeros((m, n), dtype=float)
         for i in range(n):
             dx = np.zeros(n, dtype=float)
             step = eps * max(1.0, abs(x[i]))
             dx[i] = step
             y1 = np.asarray(fun(x + dx), dtype=float)
             y2 = np.asarray(fun(x - dx), dtype=float)
-            J[:, i] = (y1 - y2) / (2.0 * step)
-        return J
+            jac[:, i] = (y1 - y2) / (2.0 * step)
+        return jac
 
     def update(self, theta_meas, omega_meas, u_eff, dt, inst_cost=None):
         f_local = lambda xx: self.f_disc(xx, u_eff, dt)
@@ -227,30 +218,33 @@ class OnlineParameterEKF:
         self.x = x_pred + K @ y
         self.P = (np.eye(len(self.x)) - K @ H) @ P_pred
         self._clip_state()
+
         if inst_cost is not None and inst_cost < self.best_cost:
             self.best_cost = float(inst_cost)
             self.best_params = self.get_params()
 
     def _clip_state(self):
-        self.x[2] = clamp(self.x[2], self.cfg.j_min, self.cfg.J_max)
-        self.x[3] = clamp(self.x[3], 0.0, self.cfg.b_max)
-        self.x[4] = clamp(self.x[4], 0.0, self.cfg.tau_c_max)
-        self.x[5] = clamp(self.x[5], 0.0, self.cfg.mgl_max)
-        self.x[6] = clamp(self.x[6], 0.0, self.cfg.delay_max_ms / 1000.0)
+        self.x[2] = clamp(self.x[2], self.cfg.l_com_min, self.cfg.l_com_max)
+        self.x[3] = clamp(self.x[3], 0.0, self.cfg.b_eq_max)
+        self.x[4] = clamp(self.x[4], 0.0, self.cfg.tau_eq_max)
+        self.x[5] = clamp(self.x[5], 0.0, self.cfg.delay_max_ms / 1000.0)
 
     def get_params(self):
         return {
             "theta": float(self.x[0]),
             "omega": float(self.x[1]),
-            "J": float(self.x[2]),
+            "l_com": float(self.x[2]),
+            "b_eq": float(self.x[3]),
+            "tau_eq": float(self.x[4]),
+            # compatibility aliases
             "b": float(self.x[3]),
             "tau_c": float(self.x[4]),
-            "mgl": float(self.x[5]),
             "k_t": float(self.cfg.k_t_init),
             "i0": float(self.cfg.i0_init),
-            "delay_sec": float(self.x[6]),
+            "delay_sec": float(self.x[5]),
             "R": float(self.cfg.R_init),
             "k_e": float(self.cfg.k_e_init),
+            "mgl": float("nan"),
         }
 
 

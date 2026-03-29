@@ -21,9 +21,11 @@ def apply_calibration_json(cfg: BridgeConfig, json_path: str | None):
     delay = calib.get("delay", {})
     summary = calib.get("summary", {}) if isinstance(calib.get("summary", {}), dict) else {}
 
-    cfg.J_init = float(model_init.get("J", cfg.J_init))
-    cfg.b_init = float(model_init.get("b", cfg.b_init))
-    cfg.tau_c_init = float(model_init.get("tau_c", cfg.tau_c_init))
+    cfg.J_cm_base = float(model_init.get("J_cm_base", model_init.get("J", cfg.J_cm_base)))
+    cfg.l_com_init = float(model_init.get("l_com", cfg.l_com_init))
+    cfg.b_eq_init = float(model_init.get("b_eq", model_init.get("b", cfg.b_eq_init)))
+    cfg.tau_eq_init = float(model_init.get("tau_eq", model_init.get("tau_c", cfg.tau_eq_init)))
+    # Deprecated field retained only for loading backward-compatible json.
     cfg.mgl_init = float(model_init.get("mgl", cfg.mgl_init))
     cfg.k_t_init = float(model_init.get("k_t", cfg.k_t_init))
     cfg.i0_init = float(model_init.get("i0", cfg.i0_init))
