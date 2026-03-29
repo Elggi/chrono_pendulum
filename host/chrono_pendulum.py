@@ -29,9 +29,10 @@ from std_msgs.msg import Float32, String
 from sensor_msgs.msg import Imu
 from chrono_core.config import BridgeConfig
 from chrono_core.utils import clamp, now_wall, terminal_status_line, sanitize_float, make_numbered_path
-from chrono_core.estimation import DelayCompensator, OnlineParameterEKF, ObservationLPF, FitConvergenceMonitor, RobustSignalFilter
+from chrono_core.estimation import OnlineParameterEKF, ObservationLPF, FitConvergenceMonitor, RobustSignalFilter
 from chrono_core.dynamics import PendulumModel, compute_model_torque_and_electrics, blend_parameters_for_sim, enc_to_theta
 from chrono_core.calibration_io import apply_calibration_json, extract_radius_from_json
+from chrono_core.pendulum_rl_env import build_init_params
 from chrono_core.log_schema import PENDULUM_LOG_COLUMNS
 
 
@@ -223,6 +224,33 @@ class HostCommandController:
     def poll(self):
         key = self.kb.read_key_nonblocking(0.0)
         self.apply_key(key)
+
+
+class FixedDelayBuffer:
+    def __init__(self, delay_sec: float, buffer_sec: float = 4.0):
+        self.delay_sec = max(0.0, float(delay_sec))
+        self.buffer_sec = max(float(buffer_sec), self.delay_sec + 1.0)
+        self.buf = deque()
+
+    def get(self, wall_now: float, cmd_now: float):
+        self.buf.append((float(wall_now), float(cmd_now)))
+        tmin = wall_now - self.buffer_sec
+        while self.buf and self.buf[0][0] < tmin:
+            self.buf.popleft()
+        if len(self.buf) < 2 or self.delay_sec <= 1e-9:
+            return float(cmd_now)
+        target = wall_now - self.delay_sec
+        if target <= self.buf[0][0]:
+            return float(self.buf[0][1])
+        if target >= self.buf[-1][0]:
+            return float(self.buf[-1][1])
+        for i in range(len(self.buf) - 1):
+            t0, u0 = self.buf[i]
+            t1, u1 = self.buf[i + 1]
+            if t0 <= target <= t1:
+                a = (target - t0) / max(t1 - t0, 1e-9)
+                return (1.0 - a) * u0 + a * u1
+        return float(cmd_now)
 
 
 # ============================================================
@@ -469,25 +497,24 @@ def build_imu_msg(sim_t, q_wxyz, omega_xyz, acc_xyz):
 
 def make_status_line(host_mode: bool, cmd_u_raw: float, cmd_u_used: float, hw_pwm: float, mode_name: str,
                      cfg: BridgeConfig, delay_ms: float, fit_params: dict,
-                     ls_cost: float, fit_state_label: str, rms_vec, delay_locked: bool):
+                     ls_cost: float, fit_state_label: str, rms_vec):
     ls_label = "n/a" if not math.isfinite(ls_cost) else f"{ls_cost:.3e}"
     if rms_vec is None:
         rms_label = "rms[n/a,n/a,n/a]"
     else:
         rms_label = f"rms[{rms_vec[0]:.3f},{rms_vec[1]:.3f},{rms_vec[2]:.3f}]"
-    delay_lock_label = "LOCK" if delay_locked else "RUN"
     if host_mode:
         return (
             f"cmd_u: {cmd_u_raw:6.1f} | used: {cmd_u_used:6.1f} | mode: {mode_name:<6} | "
             f"step: {cfg.pwm_step:4.1f} | max: {cfg.pwm_limit:5.1f} | "
-            f"delay:{delay_ms:5.1f}ms({delay_lock_label}) | fit:{fit_state_label:<4} | "
+            f"delay:{delay_ms:5.1f}ms | fit:{fit_state_label:<4} | "
             f"LS:{ls_label} {rms_label} | "
             f"l:{fit_params['l_com']:.4f} b:{fit_params['b_eq']:.4f} tc:{fit_params['tau_eq']:.4f} "
             f"kt:{fit_params['k_t']:.3f} i0:{fit_params['i0']:.3f} R:{fit_params['R']:.3f} ke:{fit_params['k_e']:.3f}"
         )
     return (
         f"cmd_u: {cmd_u_used:6.1f} | hw_pwm: {hw_pwm:6.1f} | mode: external | "
-        f"delay:{delay_ms:5.1f}ms({delay_lock_label}) | fit:{fit_state_label:<4} | "
+        f"delay:{delay_ms:5.1f}ms | fit:{fit_state_label:<4} | "
         f"LS:{ls_label} {rms_label} | "
         f"l:{fit_params['l_com']:.4f} b:{fit_params['b_eq']:.4f} tc:{fit_params['tau_eq']:.4f} "
         f"kt:{fit_params['k_t']:.3f} i0:{fit_params['i0']:.3f} R:{fit_params['R']:.3f} ke:{fit_params['k_e']:.3f}"
@@ -536,11 +563,11 @@ def main():
     ap.add_argument("--mode", choices=["host", "jetson"], default=None,
                     help="Compatibility option: host enables host-control, jetson uses external ROS input.")
     ap.add_argument("--delay-ms", type=float, default=0.0)
-    ap.add_argument("--disable-auto-delay", action="store_true")
     ap.add_argument("--enable-online-fit", action="store_true")
     ap.add_argument("--self-fit", choices=["on", "off"], default=None,
                     help="on: EKF self-fitting enabled, off: pure simulation (no parameter updates).")
     ap.add_argument("--calibration-json", default="./run_logs/calibration_latest.json")
+    ap.add_argument("--parameter-json", default="", help="RL/exported parameter JSON containing model_init and optional delay_sec")
     ap.add_argument("--radius-json", default="./run_logs/calibration_latest.json",
                     help="JSON file containing measured radius (e.g., calibration_latest.json).")
     ap.add_argument("--J-cm-base", type=float, default=0.0020)
@@ -580,7 +607,6 @@ def main():
     cfg.R_init = args.R
     cfg.k_e_init = args.k_e
     cfg.delay_init_ms = args.delay_ms
-    cfg.auto_delay_comp = not args.disable_auto_delay
     cfg.online_fit_enable = args.enable_online_fit
     if args.self_fit is not None:
         cfg.self_fit_mode = args.self_fit
@@ -589,6 +615,13 @@ def main():
         cfg.self_fit_mode = "on" if cfg.online_fit_enable else "off"
 
     calib = apply_calibration_json(cfg, args.calibration_json)
+    param_data = None
+    if args.parameter_json:
+        with open(args.parameter_json, "r", encoding="utf-8") as pf:
+            param_data = json.load(pf)
+        init_params = build_init_params(cfg, calibration=calib, parameter_json=param_data)
+        if "delay_sec" in init_params:
+            cfg.delay_init_ms = 1000.0 * float(init_params["delay_sec"])
     radius_measured = extract_radius_from_json(args.radius_json)
     if radius_measured is not None:
         cfg.radius_m = float(radius_measured)
@@ -605,7 +638,6 @@ def main():
     ros_thr.start()
 
     model = PendulumModel(cfg)
-    delay_comp = DelayCompensator(cfg)
     ekf = OnlineParameterEKF(cfg)
     obs_lpf = ObservationLPF(cfg.obs_lpf_tau_sec)
     conv_mon = FitConvergenceMonitor(cfg)
@@ -614,6 +646,8 @@ def main():
     best_eval = {"cost": float("inf"), "time": None, "params": ekf.get_params().copy()}
     prev_u_eff = 0.0
     prev_du = 0.0
+    delay_sec_used = max(0.0, cfg.delay_init_ms / 1000.0)
+    cmd_delay = FixedDelayBuffer(delay_sec_used)
 
     viewer_proc = None
     if cfg.enable_imu_viewer:
@@ -677,8 +711,9 @@ def main():
                         break
 
                 if vis is not None:
-                    if not vis.Run():
-                        break
+                    # Keep rendering loop alive regardless of vis.Run() return.
+                    # User requested no auto-stop/auto-fallback on render-window state.
+                    vis.Run()
                     vis.BeginScene(); vis.Render(); vis.EndScene()
 
                 if host_controller is not None:
@@ -696,9 +731,7 @@ def main():
 
                 snap = shared.snapshot()
                 wall_now = now_wall()
-                delay_comp.push(wall_now, cmd_u_raw, snap["hw_pwm"])
-                delay_comp.estimate_delay(wall_now)
-                cmd_u_used = delay_comp.get_delayed_cmd(wall_now, cmd_u_raw)
+                cmd_u_used = cmd_delay.get(wall_now, cmd_u_raw)
 
                 fit_params = ekf.get_params()
                 sim_params = blend_parameters_for_sim(fit_params, cfg)
@@ -721,8 +754,7 @@ def main():
                 model.apply_torque(model_out["tau_net"])
                 model.step(cfg.step)
 
-                # Use wall-clock elapsed time as the canonical simulation timeline
-                # so logged sim_time matches real control duration.
+                # wall_elapsed is the canonical timeline for runtime + replay CSVs.
                 sim_t = wall_now - wall_t0
                 theta = model.get_theta()
                 omega = model.get_omega()
@@ -810,23 +842,22 @@ def main():
                     hw_pwm=snap["hw_pwm"],
                     mode_name=mode_name,
                     cfg=cfg,
-                    delay_ms=1000.0 * delay_comp.delay_sec,
+                    delay_ms=1000.0 * delay_sec_used,
                     fit_params=fit_params,
                     ls_cost=ls_cost,
                     fit_state_label=fit_state_label,
                     rms_vec=rms_vec,
-                    delay_locked=delay_comp.delay_locked,
                 )
                 terminal_status_line(status, width=cfg.terminal_status_width)
-                ros_node.publish_sim(theta, omega, alpha, model_out["tau_net"], cmd_u_used, 1000.0 * delay_comp.delay_sec, imu_msg, status)
+                ros_node.publish_sim(theta, omega, alpha, model_out["tau_net"], cmd_u_used, 1000.0 * delay_sec_used, imu_msg, status)
 
                 wr.writerow([
-                    wall_now, wall_now - wall_t0, sim_t, mode_name,
-                    cmd_u_raw, cmd_u_used, snap["hw_pwm"], delay_comp.delay_sec, model_out["tau_net"],
+                    wall_now, wall_now - wall_t0, mode_name,
+                    cmd_u_raw, cmd_u_used, snap["hw_pwm"], delay_sec_used, model_out["tau_net"],
                     theta, omega, alpha,
                     snap["hw_enc"], snap["hw_arduino_ms"],
                     theta_real, omega_real, alpha_real,
-                    1000.0 * delay_comp.delay_sec,
+                    1000.0 * delay_sec_used,
                     fit_params["l_com"], fit_params["b_eq"], fit_params["tau_eq"], fit_params["k_t"], fit_params["i0"], fit_params["R"], fit_params["k_e"],
                     bus_v_raw, bus_v, current_A_raw, current_A, power_W,
                     model_out["tau_motor"], model_out["tau_res"], model_out["tau_visc"], model_out["tau_coul"], model_out["i_pred"], model_out["v_applied"],
@@ -851,22 +882,23 @@ def main():
             elif quit_watcher is not None:
                 quit_watcher.__exit__(None, None, None)
 
-    print()
-    print("=== best online calibration point ===")
-    print(f"time      : {best_eval['time']}")
-    print(f"best cost : {best_eval['cost']:.6e}")
     best_params_print = dict(best_eval["params"]) if isinstance(best_eval["params"], dict) else {}
     best_params_print.pop("mgl", None)
-    print(json.dumps(best_params_print, indent=2))
+    if cfg.self_fit_mode == "on":
+        print()
+        print("=== best online calibration point ===")
+        print(f"time      : {best_eval['time']}")
+        print(f"best cost : {best_eval['cost']:.6e}")
+        print(json.dumps(best_params_print, indent=2))
 
     meta = {
         "log_csv": log_csv,
         "config": asdict(cfg),
         "calibration_json": cfg.calibration_json if calib is not None else None,
         "radius_json": args.radius_json,
-        "estimated_delay_ms_final": 1000.0 * delay_comp.delay_sec,
+        "estimated_delay_ms_final": 1000.0 * delay_sec_used,
         "cpr_fixed": None if not np.isfinite(cfg.cpr) else float(cfg.cpr),
-        "delay_locked": bool(delay_comp.delay_locked),
+        "delay_locked": False,
         "best_eval": {
             "cost": best_eval["cost"],
             "time": best_eval["time"],
@@ -882,27 +914,29 @@ def main():
     }
     with open(log_meta, "w", encoding="utf-8") as mf:
         json.dump(meta, mf, indent=2, ensure_ascii=False)
-    best_param_json = {
-        "log_csv": log_csv,
-        "model_init": best_params_print,
-        "delay": {
-            "effective_control_delay_ms": 1000.0 * delay_comp.delay_sec,
-            "locked": bool(delay_comp.delay_locked),
-        },
-        "fit": {
-            "self_fit_mode": cfg.self_fit_mode,
-            "fit_done": bool(conv_mon.fit_done),
-            "fit_complete": bool(conv_mon.fit_complete),
-            "best_cost": best_eval["cost"],
-            "best_time": best_eval["time"],
-        },
-    }
-    with open(log_best_param, "w", encoding="utf-8") as bf:
-        json.dump(best_param_json, bf, indent=2, ensure_ascii=False)
+    if cfg.self_fit_mode == "on":
+        best_param_json = {
+            "log_csv": log_csv,
+            "model_init": best_params_print,
+            "delay": {
+                "effective_control_delay_ms": 1000.0 * delay_sec_used,
+                "locked": False,
+            },
+            "fit": {
+                "self_fit_mode": cfg.self_fit_mode,
+                "fit_done": bool(conv_mon.fit_done),
+                "fit_complete": bool(conv_mon.fit_complete),
+                "best_cost": best_eval["cost"],
+                "best_time": best_eval["time"],
+            },
+        }
+        with open(log_best_param, "w", encoding="utf-8") as bf:
+            json.dump(best_param_json, bf, indent=2, ensure_ascii=False)
     print(f"saved csv  : {log_csv}")
     print(f"saved meta : {log_meta}")
-    print(f"saved best : {log_best_param}")
-    print(f"compensated delay: {1000.0 * delay_comp.delay_sec:.1f} ms (locked={delay_comp.delay_locked})")
+    if cfg.self_fit_mode == "on":
+        print(f"saved best : {log_best_param}")
+    print(f"applied fixed delay: {1000.0 * delay_sec_used:.1f} ms (from parameter/calibration)")
 
     if viewer_proc is not None:
         try:

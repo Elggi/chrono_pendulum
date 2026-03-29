@@ -5,7 +5,7 @@ outputs can be consumed directly by ``plot_pendulum.py``.
 """
 
 PENDULUM_LOG_COLUMNS = [
-    "wall_time", "wall_elapsed", "sim_time", "mode",
+    "wall_time", "wall_elapsed", "mode",
     "cmd_u_raw", "cmd_u_delayed", "hw_pwm", "delay_sec_est", "tau_cmd",
     "theta", "omega", "alpha",
     "hw_enc", "hw_arduino_ms",
