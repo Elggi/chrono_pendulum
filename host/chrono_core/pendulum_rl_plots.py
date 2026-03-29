@@ -95,3 +95,51 @@ def plot_overlay(t, real, sim, ylabel: str, outpath: Path):
     ax.grid(True, alpha=0.3)
     ax.legend(loc="best")
     _save(fig, outpath)
+
+
+def plot_rl_dashboard(history: dict, param_history: dict[str, list[float]], outdir: Path):
+    ep = np.arange(1, len(history.get("reward", [])) + 1)
+    if len(ep) == 0:
+        return
+    fig, axs = plt.subplots(2, 2, figsize=(13, 8))
+
+    ax = axs[0, 0]
+    ax.plot(ep, history.get("reward", []), color="tab:blue")
+    ax.set_title("Episode Reward")
+    ax.set_xlabel("episode")
+    ax.set_ylabel("reward")
+    ax.grid(True, alpha=0.3)
+
+    ax = axs[0, 1]
+    ax.plot(ep, history.get("train_loss", []), label="train")
+    if history.get("val_loss"):
+        ax.plot(ep, history.get("val_loss"), label="val")
+    ax.set_title("Weighted Loss")
+    ax.set_xlabel("episode")
+    ax.set_ylabel("loss")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+
+    ax = axs[1, 0]
+    for key in ("rmse_theta", "rmse_omega", "rmse_alpha"):
+        vals = history.get(key, [])
+        if vals:
+            ax.plot(ep, vals, label=key.replace("rmse_", ""))
+    ax.set_title("Train RMSE")
+    ax.set_xlabel("episode")
+    ax.set_ylabel("rmse")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+
+    ax = axs[1, 1]
+    keys = list(param_history.keys())[:4]
+    for key in keys:
+        vals = param_history.get(key, [])
+        if vals:
+            ax.plot(ep, vals, label=key)
+    ax.set_title("Parameter Trends (Top 4)")
+    ax.set_xlabel("episode")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+
+    _save(fig, outdir / "rl_dashboard.png")

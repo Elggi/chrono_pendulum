@@ -284,6 +284,49 @@ def plot_simulation(df, csv_path: str, args):
     plt.show()
 
 
+def plot_rl_summary(history_csv: str, replay_csv: str):
+    if pd is None:
+        raise RuntimeError("pandas is required for --history-csv/--rl-dir plotting.")
+    h = pd.read_csv(history_csv)
+    r = pd.read_csv(replay_csv)
+
+    fig, axs = plt.subplots(2, 2, figsize=(14, 9), num="RL + Replay Summary")
+
+    ep = h["episode"].to_numpy(dtype=float) if "episode" in h.columns else np.arange(len(h), dtype=float)
+    if "reward" in h.columns:
+        axs[0, 0].plot(ep, h["reward"].to_numpy(dtype=float), label="reward")
+    axs[0, 0].set_title("Episode Reward")
+    axs[0, 0].set_xlabel("episode")
+    axs[0, 0].grid(True, alpha=0.3)
+
+    if "train_loss" in h.columns:
+        axs[0, 1].plot(ep, h["train_loss"].to_numpy(dtype=float), label="train_loss")
+    if "val_loss" in h.columns:
+        axs[0, 1].plot(ep, h["val_loss"].to_numpy(dtype=float), label="val_loss")
+    axs[0, 1].set_title("Loss")
+    axs[0, 1].set_xlabel("episode")
+    axs[0, 1].legend(loc="best")
+    axs[0, 1].grid(True, alpha=0.3)
+
+    t = r["sim_time"].to_numpy(dtype=float) if "sim_time" in r.columns else r["wall_elapsed"].to_numpy(dtype=float)
+    axs[1, 0].plot(t, r["theta_real"].to_numpy(dtype=float), label="theta_real")
+    axs[1, 0].plot(t, r["theta"].to_numpy(dtype=float), label="theta_sim")
+    axs[1, 0].set_title("Replay Theta Overlay")
+    axs[1, 0].set_xlabel("time [s]")
+    axs[1, 0].legend(loc="best")
+    axs[1, 0].grid(True, alpha=0.3)
+
+    axs[1, 1].plot(t, r["omega_real"].to_numpy(dtype=float), label="omega_real")
+    axs[1, 1].plot(t, r["omega"].to_numpy(dtype=float), label="omega_sim")
+    axs[1, 1].set_title("Replay Omega Overlay")
+    axs[1, 1].set_xlabel("time [s]")
+    axs[1, 1].legend(loc="best")
+    axs[1, 1].grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    plt.show()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", default=None)
@@ -293,7 +336,20 @@ def main():
     ap.add_argument("--theta-offset", type=float, default=0.0)
     ap.add_argument("--alpha-smooth", type=int, default=5)
     ap.add_argument("--apply-cmd-delay-from-meta", action="store_true")
+    ap.add_argument("--history-csv", default=None, help="RL history.csv path (for RL summary plot)")
+    ap.add_argument("--rl-dir", default=None, help="directory containing history.csv and replay_best.csv")
     args = ap.parse_args()
+
+    if args.rl_dir is not None:
+        history_csv = os.path.join(args.rl_dir, "history.csv")
+        replay_csv = os.path.join(args.rl_dir, "replay_best.csv")
+        plot_rl_summary(history_csv, replay_csv)
+        return
+    if args.history_csv is not None:
+        if args.csv is None:
+            raise SystemExit("--history-csv requires --csv replay file.")
+        plot_rl_summary(args.history_csv, args.csv)
+        return
 
     csv_path = args.csv if args.csv is not None else find_latest_csv(args.dir)
     df = load_csv_frame(csv_path)

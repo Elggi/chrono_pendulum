@@ -41,8 +41,27 @@ def _safe_col(df: pd.DataFrame, col: str, fallback: float = 0.0):
 def _gradient(x: np.ndarray, dt: np.ndarray):
     if len(x) < 2:
         return np.zeros_like(x)
-    h = np.maximum(dt, 1e-6)
-    return np.gradient(x, h)
+    h = np.maximum(np.asarray(dt, dtype=float), 1e-6)
+    t = np.cumsum(h)
+    t -= t[0]
+    # np.gradient with time-axis coordinates is numerically safer than passing raw dt.
+    return np.gradient(x, t, edge_order=1)
+
+
+def _sanitize_timeseries(arr: np.ndarray):
+    out = np.asarray(arr, dtype=float).copy()
+    n = len(out)
+    if n == 0:
+        return out
+    good = np.isfinite(out)
+    if np.all(good):
+        return out
+    if not np.any(good):
+        out[:] = 0.0
+        return out
+    idx = np.arange(n, dtype=float)
+    out[~good] = np.interp(idx[~good], idx[good], out[good])
+    return out
 
 
 def estimate_delay_from_signals(t: np.ndarray, cmd_u: np.ndarray, hw_pwm: np.ndarray, max_delay_sec: float = 0.25):
@@ -204,6 +223,9 @@ def load_replay_csv(path: str | Path, cfg: BridgeConfig, delay_override: float |
         omega_real = _safe_col(df, "omega")
     if not np.isfinite(alpha_real).any():
         alpha_real = _safe_col(df, "alpha")
+    theta_real = _sanitize_timeseries(theta_real)
+    omega_real = _sanitize_timeseries(omega_real)
+    alpha_real = _sanitize_timeseries(alpha_real)
 
     bus_v = _safe_col(df, "bus_v_filtered", cfg.nominal_bus_voltage)
     current_a = _safe_col(df, "current_filtered_A", 0.0)
