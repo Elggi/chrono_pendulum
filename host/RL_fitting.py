@@ -246,20 +246,37 @@ def main():
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     df_raw = pd.read_csv(args.csv)
-    dt = compute_dt(df_raw, args.time_col, args.dt_col)
-    theta = safe_savgol(df_raw[args.theta_col].to_numpy(dtype=float))
-    omega = safe_savgol(df_raw[args.omega-col].to_numpy(dtype=float)) if args.omega_col in df_raw.columns else safe_savgol(np.gradient(theta, dt))
-    alpha = safe_savgol(df_raw[args.alpha_col].to_numpy(dtype=float)) if args.alpha_col in df_raw.columns else safe_savgol(np.gradient(omega, dt))
+
+    def pick_col(preferred, fallbacks=()):
+        if preferred in df_raw.columns:
+            return preferred
+        for c in fallbacks:
+            if c in df_raw.columns:
+                return c
+        raise KeyError(f"Missing required column. Tried: {[preferred, *fallbacks]}")
+
+    time_col = pick_col(args.time_col, ("time",))
+    theta_col = pick_col(args.theta_col, ("theta_real",))
+    omega_col = args.omega_col if args.omega_col in df_raw.columns else None
+    alpha_col = args.alpha_col if args.alpha_col in df_raw.columns else None
+    pwm_col = pick_col(args.pwm_col, ("cmd_u_raw", "cmd_u_delayed", "pwm"))
+    voltage_col = pick_col(args.voltage_col, ("bus_v_filtered", "bus_v_raw", "voltage"))
+    current_col = pick_col(args.current_col, ("current_filtered_A", "current_raw_A", "current"))
+    power_col = pick_col(args.power_col, ("power_raw_W", "power"))
+    dt = compute_dt(df_raw, time_col, args.dt_col)
+    theta = safe_savgol(df_raw[theta_col].to_numpy(dtype=float))
+    omega = safe_savgol(df_raw[omega_col].to_numpy(dtype=float)) if omega_col is not None else safe_savgol(np.gradient(theta, dt))
+    alpha = safe_savgol(df_raw[alpha_col].to_numpy(dtype=float)) if alpha_col is not None else safe_savgol(np.gradient(omega, dt))
     df = pd.DataFrame({
-        "time": df_raw[args.time_col].to_numpy(dtype=float),
+        "time": df_raw[time_col].to_numpy(dtype=float),
         "dt": dt,
         "theta": theta,
         "omega": omega,
         "alpha": alpha,
-        "pwm": df_raw[args.pwm_col].to_numpy(dtype=float),
-        "voltage": df_raw[args.voltage_col].to_numpy(dtype=float),
-        "current": df_raw[args.current_col].to_numpy(dtype=float),
-        "power": df_raw[args.power_col].to_numpy(dtype=float),
+        "pwm": df_raw[pwm_col].to_numpy(dtype=float),
+        "voltage": df_raw[voltage_col].to_numpy(dtype=float),
+        "current": df_raw[current_col].to_numpy(dtype=float),
+        "power": df_raw[power_col].to_numpy(dtype=float),
     })
 
     env = PendulumFitEnv(df=df, horizon=args.horizon, max_steps=args.episode_steps, pwm_limit=args.pwm_limit)
