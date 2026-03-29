@@ -30,7 +30,7 @@ from sensor_msgs.msg import Imu
 from chrono_core.config import BridgeConfig
 from chrono_core.utils import clamp, now_wall, terminal_status_line, sanitize_float, make_numbered_path
 from chrono_core.estimation import OnlineParameterEKF, ObservationLPF, FitConvergenceMonitor, RobustSignalFilter
-from chrono_core.dynamics import PendulumModel, compute_model_torque_and_electrics, blend_parameters_for_sim, enc_to_theta
+from chrono_core.dynamics import PendulumModel, compute_model_torque_and_electrics, blend_parameters_for_sim
 from chrono_core.calibration_io import apply_calibration_json, extract_radius_from_json
 from chrono_core.pendulum_rl_env import build_init_params
 from chrono_core.log_schema import PENDULUM_LOG_COLUMNS
@@ -679,6 +679,7 @@ def main():
         t_prev = 0.0
         enc_ref = None
         theta_ref = None
+        last_hw_enc = None
         theta_real_prev = None
         omega_real_prev = 0.0
         t_real_prev = None
@@ -778,7 +779,21 @@ def main():
                     enc_ref = float(snap["hw_enc"])
                     # Real angle must be tracked as encoder delta from startup baseline.
                     theta_ref = 0.0
-                theta_from_enc = enc_to_theta(snap["hw_enc"], enc_ref, theta_ref, cfg.cpr) if enc_ref is not None else None
+                    last_hw_enc = float(snap["hw_enc"])
+                theta_from_enc = None
+                if enc_ref is not None and np.isfinite(snap["hw_enc"]) and np.isfinite(cfg.cpr) and cfg.cpr > 1.0:
+                    cur_enc = float(snap["hw_enc"])
+                    if theta_ref is None:
+                        theta_ref = 0.0
+                    if last_hw_enc is None:
+                        last_hw_enc = cur_enc
+                    delta_count = cur_enc - last_hw_enc
+                    # Reject abrupt encoder jumps (reset/glitch) that create hundreds-rad spikes.
+                    jump_thresh = 0.25 * float(cfg.cpr)
+                    if abs(delta_count) <= jump_thresh:
+                        theta_ref += (2.0 * math.pi / float(cfg.cpr)) * delta_count
+                        last_hw_enc = cur_enc
+                    theta_from_enc = float(theta_ref)
                 # Prefer encoder-based real angle so startup offset is always zeroed from
                 # the current encoder baseline; this avoids absolute-angle jumps.
                 theta_real = theta_from_enc if theta_from_enc is not None else theta

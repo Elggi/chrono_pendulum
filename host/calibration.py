@@ -90,13 +90,16 @@ class ControllerConfig:
 class DelayConfig:
     topic_cmd_u: str = "/cmd/u"
     topic_hw_pwm: str = "/hw/pwm_applied"
-    enable_estimation: bool = False
+    enable_estimation: bool = True
     max_delay_ms: float = 150.0
     update_hz: float = 4.0
     buffer_sec: float = 4.0
     smooth_alpha: float = 0.2
     lock_std_ms: float = 2.0
     lock_hold_updates: int = 12
+    min_corr: float = 0.30
+    min_activity_std: float = 5.0
+    lock_near_max_ratio: float = 0.90
 
 
 class CalibrationKeyboardControllerNode(Node):
@@ -260,6 +263,7 @@ class DelayLockEstimator:
         self.delay_sec = 0.0
         self.delay_locked = False
         self.measured_hist = deque(maxlen=max(int(cfg.lock_hold_updates), 1))
+        self.last_corr = 0.0
 
     def _trim(self, now_wall: float):
         tmin = now_wall - self.cfg.buffer_sec
@@ -280,6 +284,7 @@ class DelayLockEstimator:
         if not self.cfg.enable_estimation:
             self.delay_sec = 0.0
             self.delay_locked = False
+            self.last_corr = 0.0
             return 0.0
         if self.delay_locked:
             return self.delay_sec
@@ -315,25 +320,43 @@ class DelayLockEstimator:
 
         cmd = np.array([interp(self.cmd_hist, t) for t in ts], dtype=float)
         pwm = np.array([interp(self.pwm_hist, t) for t in ts], dtype=float)
-        cmd -= np.mean(cmd)
-        pwm -= np.mean(pwm)
-        if np.std(cmd) < 1e-6 or np.std(pwm) < 1e-6:
+        if np.std(cmd) < self.cfg.min_activity_std or np.std(pwm) < self.cfg.min_activity_std:
             return self.delay_sec
+        # Use first-difference signal to track response timing robustly.
+        cmd_d = np.diff(cmd)
+        pwm_d = np.diff(pwm)
+        if len(cmd_d) < 20 or len(pwm_d) < 20:
+            return self.delay_sec
+        cmd_d -= np.mean(cmd_d)
+        pwm_d -= np.mean(pwm_d)
+        cmd_std = float(np.std(cmd_d))
+        pwm_std = float(np.std(pwm_d))
+        if cmd_std < 1e-6 or pwm_std < 1e-6:
+            return self.delay_sec
+        cmd_d /= cmd_std
+        pwm_d /= pwm_std
 
         max_lag = int((self.cfg.max_delay_ms / 1000.0) / dt)
         best_lag = 0
         best_score = -1e18
         for lag in range(max_lag + 1):
-            if lag >= len(cmd) - 2:
+            if lag >= len(cmd_d) - 2:
                 break
-            a = cmd[:-lag] if lag > 0 else cmd
-            b = pwm[lag:] if lag > 0 else pwm
+            a = cmd_d[:-lag] if lag > 0 else cmd_d
+            b = pwm_d[lag:] if lag > 0 else pwm_d
             score = float(np.dot(a, b)) / max(len(a), 1)
             if score > best_score:
                 best_score = score
                 best_lag = lag
 
+        self.last_corr = float(best_score)
+        if self.last_corr < self.cfg.min_corr:
+            return self.delay_sec
+
         measured = best_lag * dt
+        if best_lag >= int(max_lag * self.cfg.lock_near_max_ratio):
+            # Boundary-hit estimates are frequently artifacts; avoid locking there.
+            return self.delay_sec
         self.measured_hist.append(measured)
         self.delay_sec = (1.0 - self.cfg.smooth_alpha) * self.delay_sec + self.cfg.smooth_alpha * measured
         if len(self.measured_hist) >= max(int(self.cfg.lock_hold_updates), 1):
@@ -349,14 +372,27 @@ class DelayMonitorNode(Node):
         super().__init__("calibration_delay_monitor")
         self.cfg = cfg
         self.est = DelayLockEstimator(cfg)
+        self.t0 = time.time()
+        self.cmd_trace = deque(maxlen=4000)
+        self.pwm_trace = deque(maxlen=4000)
+        self.delay_trace = deque(maxlen=4000)
         self.create_subscription(Float32, cfg.topic_cmd_u, self.cb_cmd, 20)
         self.create_subscription(Float32, cfg.topic_hw_pwm, self.cb_pwm, 20)
 
     def cb_cmd(self, msg: Float32):
-        self.est.push_cmd(time.time(), float(msg.data))
+        t = time.time()
+        v = float(msg.data)
+        self.est.push_cmd(t, v)
+        self.cmd_trace.append((t - self.t0, v))
 
     def cb_pwm(self, msg: Float32):
-        self.est.push_pwm(time.time(), float(msg.data))
+        t = time.time()
+        v = float(msg.data)
+        self.est.push_pwm(t, v)
+        self.pwm_trace.append((t - self.t0, v))
+
+    def update_delay_trace(self, wall_t: float, delay_sec: float):
+        self.delay_trace.append((wall_t - self.t0, 1000.0 * float(delay_sec)))
 
 
 class CprCollector:
@@ -423,6 +459,10 @@ class CprCollector:
         return False
 
     def snapshot(self) -> dict:
+        wall_t = time.time()
+        delay_sec = float(self._delay_node.est.estimate(wall_t)) if self._delay_node is not None else 0.0
+        if self._delay_node is not None:
+            self._delay_node.update_delay_trace(wall_t, delay_sec)
         with self.state.lock:
             samples = list(self.state.cpr_samples)
             tip_hist = [tip.tolist() for tip in self.state.tip_hist]
@@ -435,7 +475,7 @@ class CprCollector:
                 "angle_travel_rad": float(self.state.angle_travel),
                 "tip_hist": tip_hist,
                 "tip0": tip0,
-                "delay_sec": float(self._delay_node.est.estimate(time.time())) if self._delay_node is not None else 0.0,
+                "delay_sec": delay_sec,
                 "delay_locked": bool(self._delay_node.est.delay_locked) if self._delay_node is not None else False,
             }
 
@@ -456,6 +496,48 @@ class CprCollector:
             tip_now = self.state.last_tip.copy() if hasattr(self.state, "last_tip") else self.state.tip0.copy()
             self.state.tip0 = tip_now.copy()
             self.state.tip_hist.append(tip_now.copy())
+
+    def get_delay_traces(self) -> dict:
+        if self._delay_node is None:
+            return {"cmd": [], "pwm": [], "delay_ms": []}
+        return {
+            "cmd": list(self._delay_node.cmd_trace),
+            "pwm": list(self._delay_node.pwm_trace),
+            "delay_ms": list(self._delay_node.delay_trace),
+        }
+
+
+def show_delay_debug_plot(delay_traces: dict):
+    try:
+        import matplotlib.pyplot as plt
+    except Exception as exc:
+        print(f"[WARN] matplotlib import failed, skip delay plot: {exc}")
+        return
+    cmd = delay_traces.get("cmd", [])
+    pwm = delay_traces.get("pwm", [])
+    dly = delay_traces.get("delay_ms", [])
+    if not cmd and not pwm and not dly:
+        print("[WARN] delay plot skipped (no trace data).")
+        return
+    fig, ax = plt.subplots(1, 1, figsize=(10, 4))
+    if cmd:
+        t_cmd = [x[0] for x in cmd]
+        y_cmd = [x[1] for x in cmd]
+        ax.plot(t_cmd, y_cmd, label="cmd_u", color="tab:blue")
+    if pwm:
+        t_pwm = [x[0] for x in pwm]
+        y_pwm = [x[1] for x in pwm]
+        ax.plot(t_pwm, y_pwm, label="hw_pwm", color="tab:green")
+    if dly:
+        t_d = [x[0] for x in dly]
+        y_d = [x[1] for x in dly]
+        ax.plot(t_d, y_d, label="delay_ms", color="tab:red")
+    ax.set_title("Calibration delay monitor (cmd/pwm/delay)")
+    ax.set_xlabel("time [s]")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+    plt.tight_layout()
+    plt.show()
 
 
 def _collect_cpr_and_r_from_imu(args) -> tuple[list[dict], float, list[dict], float, float, bool]:
@@ -516,6 +598,7 @@ def _collect_cpr_and_r_from_imu(args) -> tuple[list[dict], float, list[dict], fl
         print()
 
         snap = collector.snapshot()
+        show_delay_debug_plot(collector.get_delay_traces())
         snap["cpr_samples"] = snap["cpr_samples"][baseline_cpr_idx:]
         snap["tip_hist"] = snap["tip_hist"][baseline_tip_idx:]
         cpr_samples = snap["cpr_samples"]
