@@ -1,0 +1,28 @@
+{
+  "log_csv": "./run_logs/chrono_run_2.csv",
+  "model_init": {
+    "theta": 0.0,
+    "omega": 0.0,
+    "l_com": 0.1425,
+    "b_eq": 0.03,
+    "tau_eq": 0.08,
+    "b": 0.03,
+    "tau_c": 0.08,
+    "k_t": 0.25,
+    "i0": 0.05,
+    "delay_sec": 0.0,
+    "R": 2.0,
+    "k_e": 0.02
+  },
+  "delay": {
+    "effective_control_delay_ms": 120.00000000000003,
+    "locked": true
+  },
+  "fit": {
+    "self_fit_mode": "off",
+    "fit_done": true,
+    "fit_complete": true,
+    "best_cost": 0.0,
+    "best_time": 0.001
+  }
+}
