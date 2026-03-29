@@ -133,14 +133,14 @@ run_chrono_pendulum() {
     if [ "$mode" == "1" ]; then
         echo "[INFO] chrono_pendulum (HOST mode)"
         cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode host --self-fit "$self_fit_mode")
-        [ -n "$param_json" ] && cmd+=(--calibration-json "$param_json")
-        [ -n "$calib_json" ] && cmd+=(--radius-json "$calib_json")
+        [ -n "$param_json" ] && cmd+=(--parameter-json "$param_json")
+        [ -n "$calib_json" ] && cmd+=(--calibration-json "$calib_json" --radius-json "$calib_json")
         "${cmd[@]}"
     elif [ "$mode" == "2" ]; then
         echo "[INFO] chrono_pendulum (JETSON mode)"
         cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode jetson --self-fit "$self_fit_mode")
-        [ -n "$param_json" ] && cmd+=(--calibration-json "$param_json")
-        [ -n "$calib_json" ] && cmd+=(--radius-json "$calib_json")
+        [ -n "$param_json" ] && cmd+=(--parameter-json "$param_json")
+        [ -n "$calib_json" ] && cmd+=(--calibration-json "$calib_json" --radius-json "$calib_json")
         "${cmd[@]}"
     else
         echo "[ERROR] Invalid selection"
@@ -256,7 +256,7 @@ run_rl_fitting() {
 
 run_replay_validation() {
     echo "--------------------------------"
-    echo "[INFO] Replay Validation (export + plot)"
+    echo "[INFO] Replay Validation (export + 3D viewer)"
     file=$(select_csv_file)
     if [ -z "$file" ]; then return; fi
 
@@ -275,7 +275,7 @@ run_replay_validation() {
     replay_id=$(date -u +"replay_%Y%m%d_%H%M%S")
     out_csv="$BASE_DIR/rl_results/replays/${replay_id}.csv"
     mkdir -p "$BASE_DIR/rl_results/replays"
-    cmd=(python3 "$BASE_DIR/replay_pendulum_cli.py" --csv "$file" --calibration_json "$calib_json" --out_csv "$out_csv" --plot)
+    cmd=(python3 "$BASE_DIR/replay_pendulum_cli.py" --csv "$file" --calibration_json "$calib_json" --out_csv "$out_csv" --viewer)
     [ -n "$param_json" ] && cmd+=(--parameter_json "$param_json")
 
     echo "[INFO] command: ${cmd[*]}"
@@ -300,7 +300,7 @@ while true; do
     echo "3) Parameter Optimization (Reinforcement Learning)"
     echo "4) Chrono Pendulum (Select Host/Jetson mode)"
     echo "5) Plot Data"
-    echo "6) Replay Validation (Export + Plot)"
+    echo "6) Replay Validation (Export + 3D Viewer)"
     echo "7) Exit"
     echo "=========================================="
 

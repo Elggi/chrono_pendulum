@@ -79,15 +79,9 @@ class BridgeConfig:
     ina_current_hampel_sigma: float = 3.5
     ina_current_lpf_tau_sec: float = 0.15
 
-    # automatic delay compensation
-    auto_delay_comp: bool = True
+    # fixed control delay (set from CLI/calibration/parameter JSON)
     delay_init_ms: float = 0.0
     delay_max_ms: float = 120.0
-    delay_update_hz: float = 5.0
-    delay_buffer_sec: float = 4.0
-    delay_smooth_alpha: float = 0.15
-    delay_lock_std_ms: float = 3.0
-    delay_lock_hold_updates: int = 20
 
     # online EKF-like fitting
     online_fit_enable: bool = True

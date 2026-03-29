@@ -198,7 +198,7 @@ def save_best_replay_csv(outpath: Path, traj, sim: dict[str, np.ndarray], params
         best_cost = float(loss)
         for i in range(len(traj.t)):
             wr.writerow([
-                0.0, traj.t[i], traj.t[i], "replay",
+                0.0, traj.t[i], "replay",
                 traj.cmd_u[i], sim["cmd_delayed"][i], traj.hw_pwm[i], traj.delay_sec_est, sim["tau_motor"][i] - sim["tau_res"][i],
                 sim["theta"][i], sim["omega"][i], sim["alpha"][i],
                 "", "",
