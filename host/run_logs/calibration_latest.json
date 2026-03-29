@@ -1,94 +1,80 @@
 {
-  "created_at_utc": "2026-03-28T14:35:51Z",
+  "created_at_utc": "2026-03-29T12:35:44Z",
   "method": "manual_rotation_with_orientation",
   "summary": {
-    "mean_cpr": 195.0,
-    "mean_radius_m": 0.24978699168077997,
-    "trial_count_cpr": 5,
-    "trial_count_r": 12
+    "mean_cpr": 198.0,
+    "mean_radius_m": 0.24982750069237356,
+    "trial_count_cpr": 4,
+    "trial_count_r": 10
   },
   "cpr_trials": [
     {
       "trial": 1,
-      "cpr": 181.0
+      "cpr": 197.0
     },
     {
       "trial": 2,
-      "cpr": 207.0
+      "cpr": 200.0
     },
     {
       "trial": 3,
-      "cpr": 149.0
+      "cpr": 175.0
     },
     {
       "trial": 4,
-      "cpr": 240.0
-    },
-    {
-      "trial": 5,
-      "cpr": 198.0
+      "cpr": 220.0
     }
   ],
   "radius_trials": [
     {
-      "trial": 496,
+      "trial": 354,
       "method": "anti_parallel_chord",
-      "radius_m": 0.24961871293047624
+      "radius_m": 0.2496927176255957
     },
     {
-      "trial": 497,
+      "trial": 355,
       "method": "anti_parallel_chord",
-      "radius_m": 0.2499531148703978
+      "radius_m": 0.2499800729117751
     },
     {
-      "trial": 498,
+      "trial": 356,
       "method": "anti_parallel_chord",
-      "radius_m": 0.24993321237497157
+      "radius_m": 0.24988163825336293
     },
     {
-      "trial": 499,
+      "trial": 394,
       "method": "anti_parallel_chord",
-      "radius_m": 0.24949591283087946
+      "radius_m": 0.24990349524066108
     },
     {
-      "trial": 536,
+      "trial": 395,
       "method": "anti_parallel_chord",
-      "radius_m": 0.24969750062232768
+      "radius_m": 0.24968506569581625
     },
     {
-      "trial": 537,
+      "trial": 633,
       "method": "anti_parallel_chord",
-      "radius_m": 0.24995682711267583
+      "radius_m": 0.24959003996420503
     },
     {
-      "trial": 896,
+      "trial": 634,
       "method": "anti_parallel_chord",
-      "radius_m": 0.24965344089543814
+      "radius_m": 0.2499307120835814
     },
     {
-      "trial": 897,
+      "trial": 635,
       "method": "anti_parallel_chord",
-      "radius_m": 0.24998930906345954
+      "radius_m": 0.24997367055244052
     },
     {
-      "trial": 898,
+      "trial": 636,
       "method": "anti_parallel_chord",
-      "radius_m": 0.24968991921287262
+      "radius_m": 0.24967636328976428
     },
     {
-      "trial": 931,
+      "trial": 672,
       "method": "anti_parallel_chord",
-      "radius_m": 0.2499243065301464
-    },
-    {
-      "trial": 958,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24954772321202526
-    },
-    {
-      "trial": 959,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24998392051368923
+      "radius_m": 0.2499612313065334
     }
   ]
 }
