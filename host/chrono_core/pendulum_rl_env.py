@@ -202,7 +202,18 @@ def weighted_loss(feat: dict[str, float], weights: dict[str, float]):
 def load_replay_csv(path: str | Path, cfg: BridgeConfig, delay_override: float | None = None):
     p = Path(path)
     df = pd.read_csv(p)
-    t = _safe_col(df, "sim_time")
+    # sim_time is the canonical timeline in current logs and is synchronized
+    # to wall-clock elapsed time at runtime. Keep wall_elapsed as fallback for
+    # backward compatibility with older files/tools.
+    if "sim_time" in df.columns:
+        t = _safe_col(df, "sim_time")
+    elif "wall_elapsed" in df.columns:
+        t = _safe_col(df, "wall_elapsed")
+    elif "wall_time" in df.columns:
+        wt = _safe_col(df, "wall_time")
+        t = wt - wt[0] if len(wt) > 0 else wt
+    else:
+        t = _safe_col(df, "sim_time")
     if len(t) < 2:
         t = np.arange(len(df), dtype=float) * cfg.step
     dt = np.diff(t, prepend=t[0])
