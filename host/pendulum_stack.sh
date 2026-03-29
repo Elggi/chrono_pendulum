@@ -147,26 +147,79 @@ run_plot() {
 }
 
 run_rl_fitting() {
-    file=$(select_csv_file)
-    if [ -z "$file" ]; then return; fi
-
     echo "--------------------------------"
-    echo "Select RL Algorithm:"
-    echo "1) PPO (stable)"
-    echo "2) SAC (more exploration)"
-    read -p "Enter number: " algo_choice
+    echo "Replay dataset:"
+    echo "1) Single CSV"
+    echo "2) All CSVs in run_logs (csv_dir)"
+    read -p "Enter number [1]: " data_mode
+    data_mode=${data_mode:-1}
 
-    if [ "$algo_choice" == "1" ]; then
-        algo="ppo"
-    elif [ "$algo_choice" == "2" ]; then
-        algo="sac"
+    file=""
+    use_csv_dir=0
+    if [ "$data_mode" == "2" ]; then
+        use_csv_dir=1
+        echo "[INFO] using --csv_dir $CSV_DIR"
     else
-        echo "[ERROR] Invalid selection"
-        return
+        file=$(select_csv_file)
+        if [ -z "$file" ]; then return; fi
     fi
 
-    echo "[INFO] RL fitting 실행 ($algo)"
-    python3 "$BASE_DIR/RL_fitting.py" --csv "$file" --algo "$algo"
+    calib_json=$(select_json_file "Calibration JSON (required)")
+    if [ -z "$calib_json" ]; then
+        if [ -f "$BASE_DIR/run_logs/calibration_latest.json" ]; then
+            calib_json="$BASE_DIR/run_logs/calibration_latest.json"
+            echo "[INFO] calibration json fallback: $calib_json"
+        else
+            echo "[ERROR] calibration json이 필요합니다."
+            return
+        fi
+    fi
+    param_json=$(select_json_file "Parameter JSON (optional)")
+
+    echo "--------------------------------"
+    echo "[INFO] Offline RL replay calibration 실행 (train_pendulum_rl.py)"
+    read -p "num_episodes [1000]: " num_episodes
+    num_episodes=${num_episodes:-1000}
+    read -p "batch_size [20]: " batch_size
+    batch_size=${batch_size:-20}
+    read -p "seed [7]: " seed
+    seed=${seed:-7}
+
+    read -p "prefit ON? (y/n) [y]: " prefit_yn
+    prefit_yn=${prefit_yn:-y}
+    read -p "learn_delay ON? (y/n) [n]: " learn_delay_yn
+    learn_delay_yn=${learn_delay_yn:-n}
+    read -p "delay_override sec (blank=auto): " delay_override
+    read -p "delay_jitter_ms [3.0]: " delay_jitter_ms
+    delay_jitter_ms=${delay_jitter_ms:-3.0}
+    read -p "domain_randomization ON? (y/n) [y]: " dr_yn
+    dr_yn=${dr_yn:-y}
+
+    cmd=(python3 "$BASE_DIR/train_pendulum_rl.py" --calibration_json "$calib_json" --outdir "$BASE_DIR/rl_results" --renderOFF --num_episodes "$num_episodes" --batch_size "$batch_size" --seed "$seed" --delay_jitter_ms "$delay_jitter_ms")
+    if [ "$use_csv_dir" == "1" ]; then
+        cmd+=(--csv_dir "$CSV_DIR")
+    else
+        cmd+=(--csv "$file")
+    fi
+    [ -n "$param_json" ] && cmd+=(--parameter_json "$param_json")
+    [ -n "$delay_override" ] && cmd+=(--delay_override "$delay_override")
+
+    if [[ "$prefit_yn" =~ ^[Yy]$ ]]; then
+        cmd+=(--prefitON)
+    else
+        cmd+=(--prefitOFF)
+    fi
+    if [[ "$learn_delay_yn" =~ ^[Yy]$ ]]; then
+        cmd+=(--learn_delay)
+    fi
+    if [[ "$dr_yn" =~ ^[Yy]$ ]]; then
+        cmd+=(--domain_randomizationON)
+    else
+        cmd+=(--domain_randomizationOFF)
+    fi
+
+    echo "[INFO] command: ${cmd[*]}"
+    "${cmd[@]}"
 }
 
 run_full_pipeline() {

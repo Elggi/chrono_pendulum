@@ -24,8 +24,8 @@
               ├─ host/plot_pendulum.py
               │    (diagnostic visualization)
               │
-              └─ host/RL_fitting.py
-                   (offline PPO/SAC parameter refinement)
+              └─ host/train_pendulum_rl.py
+                   (offline replay RL parameter calibration)
 ```
 
 ---
