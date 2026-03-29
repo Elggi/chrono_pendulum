@@ -244,7 +244,6 @@ class OnlineParameterEKF:
             "delay_sec": float(self.x[5]),
             "R": float(self.cfg.R_init),
             "k_e": float(self.cfg.k_e_init),
-            "mgl": float("nan"),
         }
 
 

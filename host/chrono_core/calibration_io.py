@@ -18,6 +18,13 @@ def apply_calibration_json(cfg: BridgeConfig, json_path: str | None):
         model_init = calib.get("best_params", {})
         if "Rm" in model_init and "R" not in model_init:
             model_init["R"] = model_init["Rm"]
+    if not model_init and isinstance(calib.get("best_eval"), dict):
+        # chrono_run_*.meta.json compatibility
+        best_eval = calib.get("best_eval", {})
+        if isinstance(best_eval.get("params"), dict):
+            model_init = dict(best_eval["params"])
+    if not model_init and isinstance(calib.get("fit_final_params"), dict):
+        model_init = dict(calib["fit_final_params"])
     delay = calib.get("delay", {})
     summary = calib.get("summary", {}) if isinstance(calib.get("summary", {}), dict) else {}
 
@@ -25,8 +32,6 @@ def apply_calibration_json(cfg: BridgeConfig, json_path: str | None):
     cfg.l_com_init = float(model_init.get("l_com", cfg.l_com_init))
     cfg.b_eq_init = float(model_init.get("b_eq", model_init.get("b", cfg.b_eq_init)))
     cfg.tau_eq_init = float(model_init.get("tau_eq", model_init.get("tau_c", cfg.tau_eq_init)))
-    # Deprecated field retained only for loading backward-compatible json.
-    cfg.mgl_init = float(model_init.get("mgl", cfg.mgl_init))
     cfg.k_t_init = float(model_init.get("k_t", cfg.k_t_init))
     cfg.i0_init = float(model_init.get("i0", cfg.i0_init))
     cfg.R_init = float(model_init.get("R", cfg.R_init))

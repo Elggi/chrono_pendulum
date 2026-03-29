@@ -48,7 +48,13 @@ select_json_file() {
     local files=("$BASE_DIR"/run_logs/*.json "$BASE_DIR"/rl_results/*.json)
     local valid=()
     for f in "${files[@]}"; do
-        if [ -f "$f" ] && [[ "$f" != *.meta.json ]]; then
+        if [ ! -f "$f" ]; then
+            continue
+        fi
+        if [[ "$f" == *.meta.json ]]; then
+            continue
+        fi
+        if [ -f "$f" ]; then
             valid+=("$f")
         fi
     done

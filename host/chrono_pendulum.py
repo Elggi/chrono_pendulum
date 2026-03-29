@@ -468,22 +468,28 @@ def build_imu_msg(sim_t, q_wxyz, omega_xyz, acc_xyz):
 
 def make_status_line(host_mode: bool, cmd_u_raw: float, cmd_u_used: float, hw_pwm: float, mode_name: str,
                      cfg: BridgeConfig, delay_ms: float, fit_params: dict,
-                     ls_cost: float, fit_state_label: str, rms_vec):
+                     ls_cost: float, fit_state_label: str, rms_vec, delay_locked: bool):
     ls_label = "n/a" if not math.isfinite(ls_cost) else f"{ls_cost:.3e}"
     if rms_vec is None:
         rms_label = "rms[n/a,n/a,n/a]"
     else:
         rms_label = f"rms[{rms_vec[0]:.3f},{rms_vec[1]:.3f},{rms_vec[2]:.3f}]"
+    delay_lock_label = "LOCK" if delay_locked else "RUN"
     if host_mode:
         return (
             f"cmd_u: {cmd_u_raw:6.1f} | used: {cmd_u_used:6.1f} | mode: {mode_name:<6} | "
-            f"step: {cfg.pwm_step:4.1f} | max: {cfg.pwm_limit:5.1f} | delay: {delay_ms:5.1f} ms | "
-            f"LS: {ls_label} {rms_label} | fit:{fit_state_label:<4} | "
-            f"l_com:{fit_params['l_com']:.4f} | b_eq:{fit_params['b_eq']:.4f} | tau_eq:{fit_params['tau_eq']:.4f}"
+            f"step: {cfg.pwm_step:4.1f} | max: {cfg.pwm_limit:5.1f} | "
+            f"delay:{delay_ms:5.1f}ms({delay_lock_label}) | fit:{fit_state_label:<4} | "
+            f"LS:{ls_label} {rms_label} | "
+            f"l:{fit_params['l_com']:.4f} b:{fit_params['b_eq']:.4f} tc:{fit_params['tau_eq']:.4f} "
+            f"kt:{fit_params['k_t']:.3f} i0:{fit_params['i0']:.3f} R:{fit_params['R']:.3f} ke:{fit_params['k_e']:.3f}"
         )
     return (
         f"cmd_u: {cmd_u_used:6.1f} | hw_pwm: {hw_pwm:6.1f} | mode: external | "
-        f"delay: {delay_ms:5.1f} ms | LS: {ls_label} {rms_label} | fit:{fit_state_label:<4}"
+        f"delay:{delay_ms:5.1f}ms({delay_lock_label}) | fit:{fit_state_label:<4} | "
+        f"LS:{ls_label} {rms_label} | "
+        f"l:{fit_params['l_com']:.4f} b:{fit_params['b_eq']:.4f} tc:{fit_params['tau_eq']:.4f} "
+        f"kt:{fit_params['k_t']:.3f} i0:{fit_params['i0']:.3f} R:{fit_params['R']:.3f} ke:{fit_params['k_e']:.3f}"
     )
 
 
@@ -568,7 +574,6 @@ def main():
     cfg.l_com_init = args.l_com
     cfg.b_eq_init = args.b
     cfg.tau_eq_init = args.tau_c
-    cfg.mgl_init = args.mgl
     cfg.k_t_init = args.k_t
     cfg.i0_init = args.i0
     cfg.R_init = args.R
@@ -589,6 +594,7 @@ def main():
 
     log_csv = make_numbered_path(cfg.log_dir, cfg.log_prefix, ".csv")
     log_meta = log_csv[:-4] + ".meta.json"
+    log_best_param = log_csv[:-4] + "_best_param.json"
 
     rclpy.init()
     shared = SharedROSState()
@@ -604,7 +610,7 @@ def main():
     conv_mon = FitConvergenceMonitor(cfg)
     bus_filter = RobustSignalFilter(cfg.ina_bus_median_window, cfg.ina_bus_hampel_k, cfg.ina_bus_hampel_sigma, cfg.ina_bus_lpf_tau_sec)
     current_filter = RobustSignalFilter(cfg.ina_current_median_window, cfg.ina_current_hampel_k, cfg.ina_current_hampel_sigma, cfg.ina_current_lpf_tau_sec)
-    best_eval = {"cost": float("inf"), "time": None, "params": None}
+    best_eval = {"cost": float("inf"), "time": None, "params": ekf.get_params().copy()}
     prev_u_eff = 0.0
     prev_du = 0.0
 
@@ -821,6 +827,7 @@ def main():
                     ls_cost=ls_cost,
                     fit_state_label=fit_state_label,
                     rms_vec=rms_vec,
+                    delay_locked=delay_comp.delay_locked,
                 )
                 terminal_status_line(status, width=cfg.terminal_status_width)
                 ros_node.publish_sim(theta, omega, alpha, model_out["tau_net"], cmd_u_used, 1000.0 * delay_comp.delay_sec, imu_msg, status)
@@ -860,7 +867,9 @@ def main():
     print("=== best online calibration point ===")
     print(f"time      : {best_eval['time']}")
     print(f"best cost : {best_eval['cost']:.6e}")
-    print(json.dumps(best_eval["params"], indent=2))
+    best_params_print = dict(best_eval["params"]) if isinstance(best_eval["params"], dict) else {}
+    best_params_print.pop("mgl", None)
+    print(json.dumps(best_params_print, indent=2))
 
     meta = {
         "log_csv": log_csv,
@@ -870,7 +879,11 @@ def main():
         "estimated_delay_ms_final": 1000.0 * delay_comp.delay_sec,
         "cpr_fixed": None if not np.isfinite(cfg.cpr) else float(cfg.cpr),
         "delay_locked": bool(delay_comp.delay_locked),
-        "best_eval": best_eval,
+        "best_eval": {
+            "cost": best_eval["cost"],
+            "time": best_eval["time"],
+            "params": best_params_print,
+        },
         "ls_cost": None if not conv_mon.samples else float(cfg.w_theta * np.mean(np.square([s[1] for s in conv_mon.samples])) +
                                                           cfg.w_omega * np.mean(np.square([s[2] for s in conv_mon.samples])) +
                                                           cfg.w_alpha * np.mean(np.square([s[3] for s in conv_mon.samples]))),
@@ -881,8 +894,26 @@ def main():
     }
     with open(log_meta, "w", encoding="utf-8") as mf:
         json.dump(meta, mf, indent=2, ensure_ascii=False)
+    best_param_json = {
+        "log_csv": log_csv,
+        "model_init": best_params_print,
+        "delay": {
+            "effective_control_delay_ms": 1000.0 * delay_comp.delay_sec,
+            "locked": bool(delay_comp.delay_locked),
+        },
+        "fit": {
+            "self_fit_mode": cfg.self_fit_mode,
+            "fit_done": bool(conv_mon.fit_done),
+            "fit_complete": bool(conv_mon.fit_complete),
+            "best_cost": best_eval["cost"],
+            "best_time": best_eval["time"],
+        },
+    }
+    with open(log_best_param, "w", encoding="utf-8") as bf:
+        json.dump(best_param_json, bf, indent=2, ensure_ascii=False)
     print(f"saved csv  : {log_csv}")
     print(f"saved meta : {log_meta}")
+    print(f"saved best : {log_best_param}")
     print(f"compensated delay: {1000.0 * delay_comp.delay_sec:.1f} ms (locked={delay_comp.delay_locked})")
 
     if viewer_proc is not None:
@@ -897,6 +928,10 @@ def main():
             except ProcessLookupError:
                 pass
     ros_stop.set()
+    try:
+        ros_thr.join(timeout=1.0)
+    except Exception:
+        pass
     try:
         ros_node.destroy_node()
     except Exception:
