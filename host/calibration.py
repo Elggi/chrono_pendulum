@@ -9,6 +9,7 @@
 
 import argparse
 import json
+import math
 import os
 import select
 import shutil
@@ -20,6 +21,9 @@ import time
 import tty
 from dataclasses import dataclass
 from statistics import mean
+from collections import deque
+
+import numpy as np
 
 import rclpy
 from rclpy.executors import SingleThreadedExecutor
@@ -80,6 +84,18 @@ class ControllerConfig:
     loop_hz: float = 20.0
     pwm_step: float = 10.0
     pwm_max: float = 255.0
+
+
+@dataclass
+class DelayConfig:
+    topic_cmd_u: str = "/cmd/u"
+    topic_hw_pwm: str = "/hw/pwm_applied"
+    max_delay_ms: float = 150.0
+    update_hz: float = 4.0
+    buffer_sec: float = 4.0
+    smooth_alpha: float = 0.2
+    lock_std_ms: float = 2.0
+    lock_hold_updates: int = 12
 
 
 class CalibrationKeyboardControllerNode(Node):
@@ -206,7 +222,7 @@ def print_help():
     print("  [ / ]             : decrease/increase pwm_step")
     print("  - / =             : decrease/increase pwm_max")
     print("  c                 : reset calibration sampling window")
-    print("  q                 : finish calibration and compute")
+    print("  q                 : finish calibration and compute (after delay lock 확인 권장)")
     print("=" * 70)
     print("Output topic:")
     print("  /cmd/u  (std_msgs/Float32, signed PWM)")
@@ -222,6 +238,122 @@ def print_status_line(node: CalibrationKeyboardControllerNode, full_rot: int, cp
     terminal_status_line(msg)
 
 
+def print_status_line_with_delay(node: CalibrationKeyboardControllerNode, full_rot: int, cpr_samples_count: int,
+                                 delay_ms: float, delay_locked: bool):
+    lock_label = "LOCK" if delay_locked else "RUN"
+    msg = (
+        f"cmd_u: {node.current_u:6.1f} | step: {node.cfg.pwm_step:4.1f} | "
+        f"max: {node.cfg.pwm_max:5.1f} | mode: {node.preset_mode:<6} | "
+        f"rot: {full_rot:4d} | cpr_samples: {cpr_samples_count:4d} | "
+        f"delay:{delay_ms:5.1f}ms({lock_label})"
+    )
+    terminal_status_line(msg)
+
+
+class DelayLockEstimator:
+    def __init__(self, cfg: DelayConfig):
+        self.cfg = cfg
+        self.cmd_hist = deque()
+        self.pwm_hist = deque()
+        self.last_update_wall = 0.0
+        self.delay_sec = 0.0
+        self.delay_locked = False
+        self.measured_hist = deque(maxlen=max(int(cfg.lock_hold_updates), 1))
+
+    def _trim(self, now_wall: float):
+        tmin = now_wall - self.cfg.buffer_sec
+        while self.cmd_hist and self.cmd_hist[0][0] < tmin:
+            self.cmd_hist.popleft()
+        while self.pwm_hist and self.pwm_hist[0][0] < tmin:
+            self.pwm_hist.popleft()
+
+    def push_cmd(self, wall_t: float, cmd_u: float):
+        self.cmd_hist.append((wall_t, float(cmd_u)))
+        self._trim(wall_t)
+
+    def push_pwm(self, wall_t: float, hw_pwm: float):
+        self.pwm_hist.append((wall_t, float(hw_pwm)))
+        self._trim(wall_t)
+
+    def estimate(self, wall_now: float):
+        if self.delay_locked:
+            return self.delay_sec
+        if wall_now - self.last_update_wall < 1.0 / max(self.cfg.update_hz, 1e-9):
+            return self.delay_sec
+        self.last_update_wall = wall_now
+        if len(self.cmd_hist) < 25 or len(self.pwm_hist) < 25:
+            return self.delay_sec
+
+        t0 = max(self.cmd_hist[0][0], self.pwm_hist[0][0])
+        t1 = min(self.cmd_hist[-1][0], self.pwm_hist[-1][0])
+        if (t1 - t0) < 0.8:
+            return self.delay_sec
+
+        dt = 0.01
+        ts = np.arange(t0, t1, dt)
+        if len(ts) < 30:
+            return self.delay_sec
+
+        def interp(hist, t):
+            xs = list(hist)
+            if t <= xs[0][0]:
+                return xs[0][1]
+            if t >= xs[-1][0]:
+                return xs[-1][1]
+            for i in range(len(xs) - 1):
+                t0i, y0 = xs[i]
+                t1i, y1 = xs[i + 1]
+                if t0i <= t <= t1i:
+                    a = (t - t0i) / max(t1i - t0i, 1e-9)
+                    return (1.0 - a) * y0 + a * y1
+            return xs[-1][1]
+
+        cmd = np.array([interp(self.cmd_hist, t) for t in ts], dtype=float)
+        pwm = np.array([interp(self.pwm_hist, t) for t in ts], dtype=float)
+        cmd -= np.mean(cmd)
+        pwm -= np.mean(pwm)
+        if np.std(cmd) < 1e-6 or np.std(pwm) < 1e-6:
+            return self.delay_sec
+
+        max_lag = int((self.cfg.max_delay_ms / 1000.0) / dt)
+        best_lag = 0
+        best_score = -1e18
+        for lag in range(max_lag + 1):
+            if lag >= len(cmd) - 2:
+                break
+            a = cmd[:-lag] if lag > 0 else cmd
+            b = pwm[lag:] if lag > 0 else pwm
+            score = float(np.dot(a, b)) / max(len(a), 1)
+            if score > best_score:
+                best_score = score
+                best_lag = lag
+
+        measured = best_lag * dt
+        self.measured_hist.append(measured)
+        self.delay_sec = (1.0 - self.cfg.smooth_alpha) * self.delay_sec + self.cfg.smooth_alpha * measured
+        if len(self.measured_hist) >= max(int(self.cfg.lock_hold_updates), 1):
+            hist = np.array(self.measured_hist, dtype=float)
+            if float(np.std(hist)) <= (self.cfg.lock_std_ms / 1000.0):
+                self.delay_sec = float(np.mean(hist))
+                self.delay_locked = True
+        return self.delay_sec
+
+
+class DelayMonitorNode(Node):
+    def __init__(self, cfg: DelayConfig):
+        super().__init__("calibration_delay_monitor")
+        self.cfg = cfg
+        self.est = DelayLockEstimator(cfg)
+        self.create_subscription(Float32, cfg.topic_cmd_u, self.cb_cmd, 20)
+        self.create_subscription(Float32, cfg.topic_hw_pwm, self.cb_pwm, 20)
+
+    def cb_cmd(self, msg: Float32):
+        self.est.push_cmd(time.time(), float(msg.data))
+
+    def cb_pwm(self, msg: Float32):
+        self.est.push_pwm(time.time(), float(msg.data))
+
+
 class CprCollector:
     """imu_viewer.py 내부 상태 추적 로직(SharedState)을 그대로 활용한 CPR 수집기."""
 
@@ -235,6 +367,8 @@ class CprCollector:
         self.imu_topic = imu_topic
         self.enc_topic = enc_topic
         self.ctrl_cfg = ControllerConfig()
+        self.delay_cfg = DelayConfig()
+        self._delay_node = None
 
     def start(self):
         if not rclpy.ok():
@@ -245,6 +379,8 @@ class CprCollector:
         self._executor = SingleThreadedExecutor()
         self._executor.add_node(self._node)
         self._executor.add_node(self._controller_node)
+        self._delay_node = DelayMonitorNode(self.delay_cfg)
+        self._executor.add_node(self._delay_node)
         self._running = True
 
         def _spin_loop():
@@ -267,6 +403,8 @@ class CprCollector:
             self._node.destroy_node()
         if self._controller_node is not None:
             self._controller_node.destroy_node()
+        if self._delay_node is not None:
+            self._delay_node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
 
@@ -292,6 +430,8 @@ class CprCollector:
                 "angle_travel_rad": float(self.state.angle_travel),
                 "tip_hist": tip_hist,
                 "tip0": tip0,
+                "delay_sec": float(self._delay_node.est.estimate(time.time())) if self._delay_node is not None else 0.0,
+                "delay_locked": bool(self._delay_node.est.delay_locked) if self._delay_node is not None else False,
             }
 
     def reset_revolution_window(self) -> None:
@@ -313,7 +453,7 @@ class CprCollector:
             self.state.tip_hist.append(tip_now.copy())
 
 
-def _collect_cpr_and_r_from_imu(args) -> tuple[list[dict], float, list[dict], float]:
+def _collect_cpr_and_r_from_imu(args) -> tuple[list[dict], float, list[dict], float, float, bool]:
     collector = CprCollector(imu_topic=args.imu_topic, enc_topic=args.hw_enc_topic)
     viewer_proc = maybe_launch_imu_viewer(args)
 
@@ -353,9 +493,21 @@ def _collect_cpr_and_r_from_imu(args) -> tuple[list[dict], float, list[dict], fl
                 if (now - ctrl.last_pub_time) >= period:
                     ctrl.publish_state(key_name=key or "")
                     ctrl.last_pub_time = now
-                    print_status_line(ctrl, snap["full_rotations"], local_cpr_count)
+                    print_status_line_with_delay(
+                        ctrl,
+                        snap["full_rotations"],
+                        local_cpr_count,
+                        delay_ms=1000.0 * float(snap.get("delay_sec", 0.0)),
+                        delay_locked=bool(snap.get("delay_locked", False)),
+                    )
                 elif changed:
-                    print_status_line(ctrl, snap["full_rotations"], local_cpr_count)
+                    print_status_line_with_delay(
+                        ctrl,
+                        snap["full_rotations"],
+                        local_cpr_count,
+                        delay_ms=1000.0 * float(snap.get("delay_sec", 0.0)),
+                        delay_locked=bool(snap.get("delay_locked", False)),
+                    )
         print()
 
         snap = collector.snapshot()
@@ -383,7 +535,8 @@ def _collect_cpr_and_r_from_imu(args) -> tuple[list[dict], float, list[dict], fl
         print(f"[INFO] 감지된 full rotation 수: {snap['full_rotations']}")
         print(f"[INFO] CPR 샘플 수: {len(cpr_samples)}")
         print(f"[INFO] r 샘플 수: {len(r_trials)}")
-        return cpr_trials, mean_cpr, r_trials, mean_r
+        print(f"[INFO] estimated delay: {1000.0 * float(snap.get('delay_sec', 0.0)):.1f} ms (locked={bool(snap.get('delay_locked', False))})")
+        return cpr_trials, mean_cpr, r_trials, mean_r, float(snap.get("delay_sec", 0.0)), bool(snap.get("delay_locked", False))
     finally:
         collector.stop()
         if viewer_proc is not None and viewer_proc.poll() is None:
@@ -449,7 +602,7 @@ def _estimate_r_trials_from_snapshot(snapshot: dict) -> tuple[list[dict], float 
 def run_calibration(args) -> None:
     print("=== Manual Rotation Calibration (CPR/r from IMU+orientation) ===")
 
-    cpr_trials, mean_cpr, r_trials, mean_r = _collect_cpr_and_r_from_imu(args)
+    cpr_trials, mean_cpr, r_trials, mean_r, delay_sec, delay_locked = _collect_cpr_and_r_from_imu(args)
 
     result = {
         "created_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -459,6 +612,10 @@ def run_calibration(args) -> None:
             "mean_radius_m": mean_r,
             "trial_count_cpr": len(cpr_trials),
             "trial_count_r": len(r_trials),
+        },
+        "delay": {
+            "effective_control_delay_ms": 1000.0 * float(delay_sec),
+            "locked": bool(delay_locked),
         },
         "cpr_trials": cpr_trials,
         "radius_trials": r_trials,
@@ -474,6 +631,7 @@ def run_calibration(args) -> None:
     print("\n=== Calibration Result ===")
     print(f"mean CPR      : {mean_cpr:.6f}")
     print(f"mean radius r : {mean_r:.6f} m")
+    print(f"delay         : {1000.0 * float(delay_sec):.3f} ms (locked={delay_locked})")
     print(f"JSON saved    : {args.output_json}")
 
 

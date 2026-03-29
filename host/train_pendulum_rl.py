@@ -93,23 +93,6 @@ class GaussianPolicy:
         return float(np.mean(kl_terms)) if kl_terms else 0.0
 
 
-def deterministic_prefit(env: PendulumRLEnv, iters: int = 80, seed: int = 0):
-    rng = np.random.default_rng(seed)
-    best = env.best_params.copy()
-    best_loss = env.best_loss
-    keys = list(env.param_keys)
-
-    for _ in range(iters):
-        cand = best.copy()
-        k = keys[int(rng.integers(0, len(keys)))]
-        lo, hi = env.bounds[k]
-        cand[k] = float(np.clip(cand[k] + rng.normal(0.0, 0.08 * (hi - lo)), lo, hi))
-        loss, _ = env._rollout_loss(cand)
-        if loss < best_loss:
-            best, best_loss = cand, loss
-    return best, best_loss
-
-
 def gather_csv_paths(csv: str | None, csv_dir: str | None):
     out = []
     if csv:
@@ -151,7 +134,6 @@ def maybe_prompt(args, parser):
     args.lam = ask_float("lam", args.lam)
     args.kl_targ = ask_float("kl_targ", args.kl_targ)
     args.batch_size = ask_int("batch_size", args.batch_size)
-    args.prefit = ask_bool("prefit", args.prefit)
     args.learn_delay = ask_bool("learn_delay", args.learn_delay)
     args.domain_randomization = ask_bool("domain_randomization", args.domain_randomization)
     return args
@@ -198,7 +180,7 @@ def save_best_replay_csv(outpath: Path, traj, sim: dict[str, np.ndarray], params
         best_cost = float(loss)
         for i in range(len(traj.t)):
             wr.writerow([
-                0.0, traj.t[i], traj.t[i], "replay",
+                0.0, traj.t[i], "replay",
                 traj.cmd_u[i], sim["cmd_delayed"][i], traj.hw_pwm[i], traj.delay_sec_est, sim["tau_motor"][i] - sim["tau_res"][i],
                 sim["theta"][i], sim["omega"][i], sim["alpha"][i],
                 "", "",
@@ -229,9 +211,6 @@ def main():
     ap.add_argument("-k", "--kl_targ", type=float, default=0.003)
     ap.add_argument("-b", "--batch_size", type=int, default=20)
 
-    ap.add_argument("--prefitON", dest="prefit", action="store_true")
-    ap.add_argument("--prefitOFF", dest="prefit", action="store_false")
-    ap.set_defaults(prefit=True)
     ap.add_argument("--learn_delay", action="store_true", default=False)
     ap.add_argument("--delay_override", type=float, default=None)
     ap.add_argument("--delay_jitter_ms", type=float, default=3.0)
@@ -286,15 +265,6 @@ def main():
     outdir.mkdir(parents=True, exist_ok=True)
     with open(outdir / "initial_params.json", "w", encoding="utf-8") as f:
         json.dump(init_params, f, indent=2)
-
-    if args.prefit:
-        env.reset()
-        pref_params, pref_loss = deterministic_prefit(env, iters=120, seed=args.seed)
-        with open(outdir / "prefit_params.json", "w", encoding="utf-8") as f:
-            json.dump({"loss": pref_loss, "model_init": pref_params}, f, indent=2)
-        init_params.update(pref_params)
-        env.center.update(pref_params)
-        val_env.center.update(pref_params)
 
     policy = GaussianPolicy(obs_dim=env.state_dim, act_dim=env.action_dim, seed=args.seed)
 
