@@ -53,12 +53,13 @@ class PendulumModel:
         )
 
         self.link = ch.ChBody()
+        self.com_frame_supported = hasattr(self.link, "SetFrameCOMToRef")
         composite = self._compute_composite_link_properties(cfg)
         self.link.SetMass(composite["mass"])
         self.link.SetInertiaXX(ch.ChVector3d(1e-5, 1e-5, composite["izz_com"]))
         # Body reference frame is motor pivot; COM is from rod+IMU composite model.
         com_frame = ch.ChFramed(ch.ChVector3d(composite["com_x"], composite["com_y"], composite["com_z"]), ch.QUNIT)
-        if hasattr(self.link, "SetFrameCOMToRef"):
+        if self.com_frame_supported:
             self.link.SetFrameCOMToRef(com_frame)
         else:
             print("[WARN] ChBody.SetFrameCOMToRef is unavailable in this Chrono build; using default COM frame.")

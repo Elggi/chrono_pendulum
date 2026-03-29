@@ -14,6 +14,8 @@ class DelayCompensator:
         self.cmd_hist = deque()
         self.pwm_hist = deque()
         self.last_update_wall = 0.0
+        self.delay_locked = False
+        self._measured_hist = deque(maxlen=max(int(cfg.delay_lock_hold_updates), 1))
 
     def push(self, wall_t: float, cmd_u: float, hw_pwm: float):
         self.cmd_hist.append((wall_t, float(cmd_u)))
@@ -43,6 +45,8 @@ class DelayCompensator:
         return xs[-1][1]
 
     def estimate_delay(self, wall_now: float):
+        if self.delay_locked:
+            return self.delay_sec
         if not self.cfg.auto_delay_comp:
             return self.delay_sec
         if wall_now - self.last_update_wall < 1.0 / max(self.cfg.delay_update_hz, 1e-9):
@@ -77,7 +81,14 @@ class DelayCompensator:
                 best_score = score
                 best_lag = lag
         measured = best_lag * dt
+        self._measured_hist.append(measured)
         self.delay_sec = (1.0 - self.cfg.delay_smooth_alpha) * self.delay_sec + self.cfg.delay_smooth_alpha * measured
+        need_n = max(int(self.cfg.delay_lock_hold_updates), 1)
+        if len(self._measured_hist) >= need_n:
+            std_thr = max(float(self.cfg.delay_lock_std_ms), 0.0) / 1000.0
+            if float(np.std(np.array(self._measured_hist, dtype=float))) <= std_thr:
+                self.delay_sec = float(np.mean(np.array(self._measured_hist, dtype=float)))
+                self.delay_locked = True
         return self.delay_sec
 
     def get_delayed_cmd(self, wall_now: float, fallback: float):
@@ -145,7 +156,7 @@ class CPREstimator:
 class OnlineParameterEKF:
     """
     augmented state:
-    x = [theta, omega, J, b, tau_c, mgl, k_t, i0, delay_sec]
+    x = [theta, omega, J, b, tau_c, mgl, delay_sec]
     """
     def __init__(self, cfg: BridgeConfig):
         self.cfg = cfg
@@ -155,22 +166,22 @@ class OnlineParameterEKF:
             cfg.b_init,
             cfg.tau_c_init,
             cfg.mgl_init,
-            cfg.k_t_init,
-            cfg.i0_init,
             cfg.delay_init_ms / 1000.0,
         ], dtype=float)
-        self.P = np.diag([1e-3, 1e-2, 1e-3, 1e-3, 1e-3, 1e-3, 1e-3, 1e-3, 1e-4])
+        self.P = np.diag([1e-3, 1e-2, 1e-3, 1e-3, 1e-3, 1e-3, 1e-4])
         self.Q = np.diag([
             cfg.q_theta, cfg.q_omega, cfg.q_J, cfg.q_b, cfg.q_tauc,
-            cfg.q_mgl, cfg.q_kt, cfg.q_i0, cfg.q_delay
+            cfg.q_mgl, cfg.q_delay
         ])
         self.R = np.diag([cfg.r_theta, cfg.r_omega])
         self.best_cost = np.inf
         self.best_params = None
 
     def f_disc(self, x, u, dt):
-        th, om, J, b, tau_c, mgl, kt, i0, dly = x
+        th, om, J, b, tau_c, mgl, dly = x
         J = max(J, self.cfg.j_min)
+        kt = max(float(self.cfg.k_t_init), 0.0)
+        i0 = max(float(self.cfg.i0_init), 0.0)
         i_eff = math.copysign(max(abs(u) - i0, 0.0), u)
         alpha = (kt * i_eff - b * om - tau_c * math.tanh(om / max(self.cfg.tanh_eps, 1e-9)) - mgl * math.sin(th)) / J
         xn = np.array([
@@ -180,8 +191,6 @@ class OnlineParameterEKF:
             max(b, 0.0),
             max(tau_c, 0.0),
             max(mgl, 0.0),
-            max(kt, 0.0),
-            max(i0, 0.0),
             max(dly, 0.0),
         ], dtype=float)
         xn[2] = max(xn[2], self.cfg.j_min)
@@ -227,9 +236,7 @@ class OnlineParameterEKF:
         self.x[3] = clamp(self.x[3], 0.0, self.cfg.b_max)
         self.x[4] = clamp(self.x[4], 0.0, self.cfg.tau_c_max)
         self.x[5] = clamp(self.x[5], 0.0, self.cfg.mgl_max)
-        self.x[6] = clamp(self.x[6], 0.0, self.cfg.k_t_max)
-        self.x[7] = clamp(self.x[7], 0.0, self.cfg.i0_max)
-        self.x[8] = clamp(self.x[8], 0.0, self.cfg.delay_max_ms / 1000.0)
+        self.x[6] = clamp(self.x[6], 0.0, self.cfg.delay_max_ms / 1000.0)
 
     def get_params(self):
         return {
@@ -239,9 +246,9 @@ class OnlineParameterEKF:
             "b": float(self.x[3]),
             "tau_c": float(self.x[4]),
             "mgl": float(self.x[5]),
-            "k_t": float(self.x[6]),
-            "i0": float(self.x[7]),
-            "delay_sec": float(self.x[8]),
+            "k_t": float(self.cfg.k_t_init),
+            "i0": float(self.cfg.i0_init),
+            "delay_sec": float(self.x[6]),
             "R": float(self.cfg.R_init),
             "k_e": float(self.cfg.k_e_init),
         }

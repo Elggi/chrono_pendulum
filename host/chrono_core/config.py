@@ -59,6 +59,8 @@ class BridgeConfig:
     delay_update_hz: float = 5.0
     delay_buffer_sec: float = 4.0
     delay_smooth_alpha: float = 0.15
+    delay_lock_std_ms: float = 3.0
+    delay_lock_hold_updates: int = 20
 
     # online EKF-like fitting
     online_fit_enable: bool = True
@@ -97,6 +99,7 @@ class BridgeConfig:
     w_p: float = 0.2
     w_du: float = 0.01
     w_d2u: float = 0.005
+    fit_use_electrical_cost: bool = False
 
     # control presets
     wave_freq: float = 0.5

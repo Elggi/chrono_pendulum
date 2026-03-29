@@ -29,7 +29,7 @@ from std_msgs.msg import Float32, String
 from sensor_msgs.msg import Imu
 from chrono_core.config import BridgeConfig
 from chrono_core.utils import clamp, now_wall, terminal_status_line, sanitize_float, make_numbered_path
-from chrono_core.estimation import DelayCompensator, CPREstimator, OnlineParameterEKF, ObservationLPF, FitConvergenceMonitor
+from chrono_core.estimation import DelayCompensator, OnlineParameterEKF, ObservationLPF, FitConvergenceMonitor
 from chrono_core.dynamics import PendulumModel, compute_model_torque_and_electrics, blend_parameters_for_sim, enc_to_theta
 from chrono_core.calibration_io import apply_calibration_json, extract_radius_from_json
 
@@ -468,18 +468,22 @@ def build_imu_msg(sim_t, q_wxyz, omega_xyz, acc_xyz):
 
 def make_status_line(host_mode: bool, cmd_u_raw: float, cmd_u_used: float, hw_pwm: float, mode_name: str,
                      cfg: BridgeConfig, delay_ms: float, fit_params: dict,
-                     ls_cost: float, fit_state_label: str):
+                     ls_cost: float, fit_state_label: str, rms_vec):
     ls_label = "n/a" if not math.isfinite(ls_cost) else f"{ls_cost:.3e}"
+    if rms_vec is None:
+        rms_label = "rms[n/a,n/a,n/a]"
+    else:
+        rms_label = f"rms[{rms_vec[0]:.3f},{rms_vec[1]:.3f},{rms_vec[2]:.3f}]"
     if host_mode:
         return (
             f"cmd_u: {cmd_u_raw:6.1f} | used: {cmd_u_used:6.1f} | mode: {mode_name:<6} | "
             f"step: {cfg.pwm_step:4.1f} | max: {cfg.pwm_limit:5.1f} | delay: {delay_ms:5.1f} ms | "
-            f"LS: {ls_label} | fit:{fit_state_label:<4} | "
-            f"J: {fit_params['J']:.5f} | b: {fit_params['b']:.4f} | tc: {fit_params['tau_c']:.4f}"
+            f"LS: {ls_label} {rms_label} | fit:{fit_state_label:<4} | "
+            f"J: {fit_params['J']:.5f} | b: {fit_params['b']:.4f} | tc: {fit_params['tau_c']:.4f} | mgl:{fit_params['mgl']:.4f}"
         )
     return (
         f"cmd_u: {cmd_u_used:6.1f} | hw_pwm: {hw_pwm:6.1f} | mode: external | "
-        f"delay: {delay_ms:5.1f} ms | LS: {ls_label} | fit:{fit_state_label:<4}"
+        f"delay: {delay_ms:5.1f} ms | LS: {ls_label} {rms_label} | fit:{fit_state_label:<4}"
     )
 
 
@@ -590,7 +594,6 @@ def main():
 
     model = PendulumModel(cfg)
     delay_comp = DelayCompensator(cfg)
-    cpr_est = CPREstimator()
     ekf = OnlineParameterEKF(cfg)
     obs_lpf = ObservationLPF(cfg.obs_lpf_tau_sec)
     conv_mon = FitConvergenceMonitor(cfg)
@@ -620,19 +623,17 @@ def main():
     with open(log_csv, "w", newline="", encoding="utf-8") as f:
         wr = csv.writer(f)
         wr.writerow([
-            "wall_time", "sim_time", "mode",
+            "wall_time", "wall_elapsed", "sim_time", "mode",
             "cmd_u_raw", "cmd_u_used", "tau_cmd",
             "theta", "omega", "alpha",
             "hw_pwm", "hw_enc", "hw_arduino_ms",
-            "bus_v", "current_A", "power_W",
-            "v_pred", "i_pred", "p_pred",
+            "theta_real", "omega_real", "alpha_real",
             "delay_ms",
             "J_est", "b_est", "tau_c_est", "mgl_est", "k_t_est", "i0_est",
             "inst_cost", "best_cost_so_far",
             "imu_qw", "imu_qx", "imu_qy", "imu_qz",
             "imu_wx", "imu_wy", "imu_wz",
             "imu_ax", "imu_ay", "imu_az",
-            "cpr_last", "cpr_mean",
             "ls_cost", "fit_done", "fit_complete", "fit_final_params"
         ])
 
@@ -704,7 +705,11 @@ def main():
                 current_A = snap["current_ma"] / 1000.0 if np.isfinite(snap["current_ma"]) else 0.0
                 power_W = snap["power_mw"] / 1000.0 if np.isfinite(snap["power_mw"]) else 0.0
 
+                theta_before = model.get_theta()
                 model_out = compute_model_torque_and_electrics(cmd_u_used, model.get_omega(), bus_v, sim_params, cfg)
+                if not model.com_frame_supported:
+                    # If COM frame API is unavailable, inject gravity surrogate torque.
+                    model_out["tau_net"] -= sim_params["mgl"] * math.sin(theta_before)
                 model.apply_torque(model_out["tau_net"])
                 model.step(cfg.step)
 
@@ -720,8 +725,6 @@ def main():
 
                 _, _, a_imu, q_imu, w_imu = model.get_sensor_kinematics(sim_t, cfg.step)
                 imu_msg = build_imu_msg(sim_t, q_imu, w_imu, a_imu)
-
-                cpr_est.update(theta, snap["hw_enc"])
 
                 if enc_ref is None and np.isfinite(snap["hw_enc"]):
                     enc_ref = float(snap["hw_enc"])
@@ -760,12 +763,15 @@ def main():
                     cfg.w_theta * (e_theta ** 2) +
                     cfg.w_omega * (e_omega ** 2) +
                     cfg.w_alpha * (e_alpha ** 2) +
-                    cfg.w_v * (e_v ** 2) +
-                    cfg.w_i * (e_i ** 2) +
-                    cfg.w_p * (e_p ** 2) +
                     cfg.w_du * (du ** 2) +
                     cfg.w_d2u * (d2u ** 2)
                 )
+                if cfg.fit_use_electrical_cost:
+                    inst_cost += (
+                        cfg.w_v * (e_v ** 2) +
+                        cfg.w_i * (e_i ** 2) +
+                        cfg.w_p * (e_p ** 2)
+                    )
                 rms_vec = conv_mon.update(wall_now, e_theta, e_omega, e_alpha)
                 ls_cost = float("nan")
                 if rms_vec is not None:
@@ -797,25 +803,23 @@ def main():
                     fit_params=fit_params,
                     ls_cost=ls_cost,
                     fit_state_label=fit_state_label,
+                    rms_vec=rms_vec,
                 )
                 terminal_status_line(status, width=cfg.terminal_status_width)
                 ros_node.publish_sim(theta, omega, alpha, model_out["tau_net"], cmd_u_used, 1000.0 * delay_comp.delay_sec, imu_msg, status)
 
                 wr.writerow([
-                    wall_now, sim_t, mode_name,
+                    wall_now, wall_now - wall_t0, sim_t, mode_name,
                     cmd_u_raw, cmd_u_used, model_out["tau_net"],
                     theta, omega, alpha,
                     snap["hw_pwm"], snap["hw_enc"], snap["hw_arduino_ms"],
-                    bus_v, current_A, power_W,
-                    model_out["v_pred"], model_out["i_pred"], model_out["p_pred"],
+                    theta_real, omega_real, alpha_real,
                     1000.0 * delay_comp.delay_sec,
                     fit_params["J"], fit_params["b"], fit_params["tau_c"], fit_params["mgl"], fit_params["k_t"], fit_params["i0"],
                     inst_cost, best_eval["cost"],
                     q_imu[0], q_imu[1], q_imu[2], q_imu[3],
                     w_imu[0], w_imu[1], w_imu[2],
                     a_imu[0], a_imu[1], a_imu[2],
-                    cpr_est.last_cpr if np.isfinite(cpr_est.last_cpr) else "",
-                    cpr_est.mean if np.isfinite(cpr_est.mean) else "",
                     ls_cost if math.isfinite(ls_cost) else "",
                     int(conv_mon.fit_done),
                     int(conv_mon.fit_complete),
@@ -845,8 +849,8 @@ def main():
         "calibration_json": cfg.calibration_json if calib is not None else None,
         "radius_json": args.radius_json,
         "estimated_delay_ms_final": 1000.0 * delay_comp.delay_sec,
-        "cpr_last": None if not np.isfinite(cpr_est.last_cpr) else float(cpr_est.last_cpr),
-        "cpr_mean": None if not np.isfinite(cpr_est.mean) else float(cpr_est.mean),
+        "cpr_fixed": None if not np.isfinite(cfg.cpr) else float(cfg.cpr),
+        "delay_locked": bool(delay_comp.delay_locked),
         "best_eval": best_eval,
         "ls_cost": None if not conv_mon.samples else float(cfg.w_theta * np.mean(np.square([s[1] for s in conv_mon.samples])) +
                                                           cfg.w_omega * np.mean(np.square([s[2] for s in conv_mon.samples])) +
@@ -860,6 +864,7 @@ def main():
         json.dump(meta, mf, indent=2, ensure_ascii=False)
     print(f"saved csv  : {log_csv}")
     print(f"saved meta : {log_meta}")
+    print(f"compensated delay: {1000.0 * delay_comp.delay_sec:.1f} ms (locked={delay_comp.delay_locked})")
 
     if viewer_proc is not None:
         try:

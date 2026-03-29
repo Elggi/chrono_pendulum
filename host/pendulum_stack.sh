@@ -48,18 +48,25 @@ select_json_file() {
     local files=("$BASE_DIR"/run_logs/*.json "$BASE_DIR"/rl_results/*.json)
     local valid=()
     for f in "${files[@]}"; do
-        [ -f "$f" ] && valid+=("$f")
+        if [ -f "$f" ] && [[ "$f" != *.meta.json ]]; then
+            valid+=("$f")
+        fi
     done
 
     if [ "${#valid[@]}" -eq 0 ]; then
-        local default_json="$BASE_DIR/run_logs/calibration_latest.json"
-        echo "[WARN] 선택 가능한 json 파일이 없습니다. 기본값 사용: $default_json" >&2
-        echo "$default_json"
+        echo "[WARN] 선택 가능한 json 파일이 없습니다. 없음으로 진행합니다." >&2
+        echo ""
         return 0
     fi
 
-    select file in "${valid[@]}"; do
-        if [ -n "$file" ]; then
+    local options=("없음 (JSON 미적용)")
+    options+=("${valid[@]}")
+    select file in "${options[@]}"; do
+        if [ "$REPLY" == "1" ]; then
+            echo "[INFO] Selected JSON: 없음" >&2
+            echo ""
+            return 0
+        elif [ -n "$file" ]; then
             echo "[INFO] Selected JSON: $file" >&2
             echo "$file"
             return 0
@@ -86,17 +93,35 @@ run_chrono_pendulum() {
     read -p "Enter number: " mode
 
     param_json=$(select_json_file "Model Parameter JSON")
-    if [ -z "$param_json" ]; then return; fi
 
-    radius_json=$(select_json_file "Calibration Radius JSON")
-    if [ -z "$radius_json" ]; then return; fi
+    calib_json=$(select_json_file "Calibration JSON")
+
+    echo "--------------------------------"
+    echo "Self-fitting mode:"
+    echo "1) ON  (online parameter fitting)"
+    echo "2) OFF (pure simulation)"
+    read -p "Enter number: " fit_mode_choice
+    if [ "$fit_mode_choice" == "1" ]; then
+        self_fit_mode="on"
+    elif [ "$fit_mode_choice" == "2" ]; then
+        self_fit_mode="off"
+    else
+        echo "[ERROR] Invalid self-fitting selection"
+        return
+    fi
 
     if [ "$mode" == "1" ]; then
         echo "[INFO] chrono_pendulum (HOST mode)"
-        python3 $BASE_DIR/chrono_pendulum.py --mode host --calibration-json "$param_json" --radius-json "$radius_json"
+        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode host --self-fit "$self_fit_mode")
+        [ -n "$param_json" ] && cmd+=(--calibration-json "$param_json")
+        [ -n "$calib_json" ] && cmd+=(--radius-json "$calib_json")
+        "${cmd[@]}"
     elif [ "$mode" == "2" ]; then
         echo "[INFO] chrono_pendulum (JETSON mode)"
-        python3 $BASE_DIR/chrono_pendulum.py --mode jetson --calibration-json "$param_json" --radius-json "$radius_json"
+        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode jetson --self-fit "$self_fit_mode")
+        [ -n "$param_json" ] && cmd+=(--calibration-json "$param_json")
+        [ -n "$calib_json" ] && cmd+=(--radius-json "$calib_json")
+        "${cmd[@]}"
     else
         echo "[ERROR] Invalid selection"
     fi

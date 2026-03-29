@@ -47,10 +47,19 @@
 \]
 - 급격한 제어 변화가 만든 과도응답에 과적합되는 현상을 억제.
 
+#### B-1) 최소 파라미터 self-fitting (최신 기본)
+- EKF self-fitting 상태는 \((\theta,\omega,J,b,\tau_c,mgl,delay)\)만 포함.
+- `k_t`, `i0`, `R`, `k_e`는 기본적으로 고정값(`*_init`)으로 사용해, 센서/전기 outlier에 대한 과민 반응을 줄임.
+- 전기 오차 항(`w_v,w_i,w_p`)은 `fit_use_electrical_cost=False` 기본값으로 비활성화되며 필요 시에만 활성화.
+
 #### C) Least-squares 수렴 판정 + self-fitting lock
 - \((\theta,\omega,\alpha)\) sim-real 오차 RMS를 sliding window로 추적.
 - RMS가 임계치 이하 상태를 hold 시간 이상 유지하면 `fit_done=True`.
 - 이후 EKF update를 중단해 최종 파라미터를 고정(`fit:LOCK`).
+
+#### C-1) Delay compensation lock
+- delay 추정치의 분산이 충분히 작아져(기본 표준편차 임계치 3ms, 윈도우 20회) 안정화되면 현재 delay 값으로 lock.
+- lock 이후에는 delay 업데이트를 중단해 그래프의 튐 현상을 완화.
 
 #### D) 터미널/로그 상태 확장
 - one-line 갱신(`\r + line clear`)은 유지.
