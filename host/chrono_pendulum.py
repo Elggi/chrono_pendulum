@@ -666,7 +666,7 @@ def main():
         print(f"[INFO] online_fit_enable={cfg.online_fit_enable} (self_fit_mode={cfg.self_fit_mode})")
 
         try:
-            while model.sys.GetChTime() < args.duration:
+            while (now_wall() - wall_t0) < args.duration:
                 if host_controller is not None:
                     host_controller.poll()
                     if host_controller.quit_requested:
@@ -721,7 +721,9 @@ def main():
                 model.apply_torque(model_out["tau_net"])
                 model.step(cfg.step)
 
-                sim_t = model.sys.GetChTime()
+                # Use wall-clock elapsed time as the canonical simulation timeline
+                # so logged sim_time matches real control duration.
+                sim_t = wall_now - wall_t0
                 theta = model.get_theta()
                 omega = model.get_omega()
                 alpha = (omega - omega_prev) / max(sim_t - t_prev, cfg.step) if sim_t > 0 else 0.0

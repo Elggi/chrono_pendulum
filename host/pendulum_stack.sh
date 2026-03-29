@@ -24,12 +24,26 @@ select_csv_file() {
     echo "--------------------------------" >&2
     echo "[INFO] CSV 파일 선택" >&2
 
-    if [ ! -d "$CSV_DIR" ]; then
-        echo "[ERROR] run_logs 폴더 없음" >&2
+    local search_dirs=("$BASE_DIR/run_logs" "$BASE_DIR/rl_results")
+    local files=()
+    local d
+    for d in "${search_dirs[@]}"; do
+        if [ -d "$d" ]; then
+            while IFS= read -r -d '' f; do
+                files+=("$f")
+            done < <(find "$d" -type f -name "*.csv" -print0 2>/dev/null)
+        fi
+    done
+
+    if [ "${#files[@]}" -eq 0 ]; then
+        echo "[ERROR] 선택 가능한 CSV가 없습니다 (run_logs, rl_results 확인)." >&2
         return 1
     fi
 
-    select file in "$CSV_DIR"/*.csv; do
+    IFS=$'\n' files=($(printf "%s\n" "${files[@]}" | sort))
+    unset IFS
+
+    select file in "${files[@]}"; do
         if [ -n "$file" ]; then
             echo "[INFO] Selected: $file" >&2
             echo "$file"
@@ -195,7 +209,11 @@ run_rl_fitting() {
     read -p "domain_randomization ON? (y/n) [y]: " dr_yn
     dr_yn=${dr_yn:-y}
 
-    cmd=(python3 "$BASE_DIR/train_pendulum_rl.py" --calibration_json "$calib_json" --outdir "$BASE_DIR/rl_results" --num_episodes "$num_episodes" --batch_size "$batch_size" --seed "$seed" --delay_jitter_ms "$delay_jitter_ms")
+    run_id=$(date -u +"run_%Y%m%d_%H%M%S")
+    run_outdir="$BASE_DIR/rl_results/runs/$run_id"
+    latest_link="$BASE_DIR/rl_results/latest"
+
+    cmd=(python3 "$BASE_DIR/train_pendulum_rl.py" --calibration_json "$calib_json" --outdir "$run_outdir" --num_episodes "$num_episodes" --batch_size "$batch_size" --seed "$seed" --delay_jitter_ms "$delay_jitter_ms")
     if [ "$use_csv_dir" == "1" ]; then
         cmd+=(--csv_dir "$CSV_DIR")
     else
@@ -220,15 +238,19 @@ run_rl_fitting() {
     echo "[INFO] command: ${cmd[*]}"
     "${cmd[@]}"
 
-    if [ -f "$BASE_DIR/rl_results/rl_dashboard.png" ]; then
-        echo "[INFO] RL dashboard: $BASE_DIR/rl_results/rl_dashboard.png"
+    mkdir -p "$BASE_DIR/rl_results"
+    ln -sfn "$run_outdir" "$latest_link"
+    echo "[INFO] latest -> $run_outdir"
+
+    if [ -f "$run_outdir/rl_dashboard.png" ]; then
+        echo "[INFO] RL dashboard: $run_outdir/rl_dashboard.png"
     fi
-    if [ -f "$BASE_DIR/rl_results/replay_best.csv" ]; then
-        echo "[INFO] replay export CSV: $BASE_DIR/rl_results/replay_best.csv"
-        echo "[INFO] replay plot: python3 $BASE_DIR/plot_pendulum.py --csv $BASE_DIR/rl_results/replay_best.csv"
+    if [ -f "$run_outdir/replay_best.csv" ]; then
+        echo "[INFO] replay export CSV: $run_outdir/replay_best.csv"
+        echo "[INFO] replay plot: python3 $BASE_DIR/plot_pendulum.py --csv $run_outdir/replay_best.csv"
     fi
-    if [ -f "$BASE_DIR/rl_results/history.csv" ]; then
-        echo "[INFO] RL+replay one-window plot: python3 $BASE_DIR/plot_pendulum.py --rl-dir $BASE_DIR/rl_results"
+    if [ -f "$run_outdir/history.csv" ]; then
+        echo "[INFO] RL+replay one-window plot: python3 $BASE_DIR/plot_pendulum.py --rl-dir $run_outdir"
     fi
 }
 
@@ -250,7 +272,9 @@ run_replay_validation() {
     fi
     param_json=$(select_json_file "Parameter JSON (optional)")
 
-    out_csv="$BASE_DIR/rl_results/replay_best.csv"
+    replay_id=$(date -u +"replay_%Y%m%d_%H%M%S")
+    out_csv="$BASE_DIR/rl_results/replays/${replay_id}.csv"
+    mkdir -p "$BASE_DIR/rl_results/replays"
     cmd=(python3 "$BASE_DIR/replay_pendulum_cli.py" --csv "$file" --calibration_json "$calib_json" --out_csv "$out_csv" --plot)
     [ -n "$param_json" ] && cmd+=(--parameter_json "$param_json")
 
