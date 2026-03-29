@@ -118,3 +118,96 @@ CSV/meta logs now include (when available):
 - `plot_pendulum.py`: log plotting
 - `RL_fitting.py`: offline parameter optimization
 - `imu_viewer.py`: IMU visualization
+
+## Offline RL replay calibration pipeline (new)
+
+This repository now supports a separate **offline/episodic replay-based calibration** workflow for model parameters.
+
+### Runtime vs offline roles
+- `chrono_pendulum.py`: online simulation + online self-fitting during live operation.
+- `train_pendulum_rl.py`: offline replay calibration over logged CSV trajectories.
+- `replay_pendulum_export.py`: offline replay/export using calibrated parameters with **runtime-compatible CSV schema**.
+
+### Inputs
+`train_pendulum_rl.py` supports:
+- required: `--calibration_json <path>`
+- optional: `--parameter_json <path>`
+- training data: `--csv <path>` and/or `--csv_dir <dir>`
+
+If `parameter.json` is absent, initial parameters are built from calibration JSON + config defaults.
+
+### Calibrated parameter vector
+Default calibrated vector:
+- `[l_com, J_cm_base, b_eq, tau_eq, k_t, i0, R, k_e]`
+
+By default, **delay is not in RL action space**.
+
+Advanced mode:
+- `--learn_delay` enables joint learning of `delay_sec`.
+
+### Delay handling policy (default)
+For each trajectory:
+1. estimate delay from `/cmd/u` and `/hw/pwm_applied`
+2. fix that delay during replay/alignment for training and evaluation
+3. replay with aligned input: `u_sim(t) = u_cmd(t - delay_sec_est)`
+
+Additional options:
+- `--delay_override <sec>`
+- `--delay_jitter_ms <float>` for small robustness randomization around pre-estimated delay
+
+### RL environment design
+- action: parameter delta (not motor command)
+- state: normalized parameter vector + compact replay-error features
+- reward: improvement minus weighted loss minus action penalty
+
+Tracked mismatch terms include:
+- RMSE theta / omega / alpha
+- mean bias theta / omega
+- aligned PWM mismatch
+- optional soft current/power mismatches (robust to INA noise or missing data)
+
+### Deterministic pre-fit
+Optional `--prefitON` stage performs coordinate/local search before RL updates.
+
+Outputs:
+- `initial_params.json`
+- `prefit_params.json` (if enabled)
+- `final_params.json`
+- `metadata.json` (settings, dataset split, reward weights, randomization, best validation score, delay estimates)
+
+### PPO-style CLI and interactive prompts
+The trainer supports PPO-style options:
+- `-n/--num_episodes` (default 1000)
+- `-g/--gamma` (default 0.995)
+- `-l/--lam` (default 0.98)
+- `-k/--kl_targ` (default 0.003)
+- `-b/--batch_size` (default 20)
+- `--renderON/--renderOFF`
+
+If these are not supplied (and `--non_interactive` is not set), the script prompts in terminal and uses defaults on empty Enter.
+
+### Domain randomization
+Configurable randomization around calibration-centered values is supported (not arbitrary global ranges), including:
+- initial state perturbations
+- small delay jitter
+- friction/parameter perturbation scale
+
+Toggle using:
+- `--domain_randomizationON`
+- `--domain_randomizationOFF`
+
+### Train/validation/test split
+- Multiple CSV files: split by file.
+- Single CSV file: split by reproducible time chunks/windows.
+
+### Plot outputs
+Training utilities generate:
+- weighted total loss vs episode (train/validation)
+- RMSE theta/omega/alpha vs episode (train/validation)
+- parameter convergence
+- delay diagnostics (per-trajectory and histogram)
+- command alignment diagnostic plot
+- sim-vs-real overlay
+
+### Export CSV compatibility
+`replay_pendulum_export.py` writes replay/evaluation CSVs in the **same column order/schema** as runtime logs from `chrono_pendulum.py`, so files can be loaded directly by `plot_pendulum.py`.
