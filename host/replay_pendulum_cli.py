@@ -25,8 +25,10 @@ from chrono_core.pendulum_rl_env import build_init_params, load_replay_csv, simu
 
 
 def quat_from_theta(theta: float):
-    q = ch.QuatFromAngleZ(float(theta))
-    return float(q.e0), float(q.e1), float(q.e2), float(q.e3)
+    th = float(theta)
+    h = 0.5 * th
+    # Explicit Z-axis quaternion avoids backend convention ambiguity.
+    return float(math.cos(h)), 0.0, 0.0, float(math.sin(h))
 
 
 class ReplayPublisher(Node):

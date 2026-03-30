@@ -593,10 +593,9 @@ def main():
     model.update_identified_structure(sim_params)
     bus_filter = RobustSignalFilter(cfg.ina_bus_median_window, cfg.ina_bus_hampel_k, cfg.ina_bus_hampel_sigma, cfg.ina_bus_lpf_tau_sec)
     current_filter = RobustSignalFilter(cfg.ina_current_median_window, cfg.ina_current_hampel_k, cfg.ina_current_hampel_sigma, cfg.ina_current_lpf_tau_sec)
-    # Real observations are noisier than simulation -> use stronger filtering.
-    real_theta_filter = RobustSignalFilter(21, 21, 2.5, 0.18)
-    real_omega_filter = RobustSignalFilter(21, 21, 2.5, 0.14)
-    real_alpha_filter = RobustSignalFilter(25, 25, 2.2, 0.20)
+    # Real observations are noisier than simulation -> use moderate filtering.
+    real_omega_filter = RobustSignalFilter(7, 7, 3.0, 0.03)
+    real_alpha_filter = RobustSignalFilter(9, 9, 3.0, 0.05)
     prev_u_eff = 0.0
     prev_du = 0.0
 
@@ -633,6 +632,7 @@ def main():
         omega_real_prev = 0.0
         t_real_prev = None
         stable_real_start = False
+        warmup_sec = 1.0
         run_limit_sec = float("inf") if args.duration <= 0.0 else float(args.duration)
 
         if host_controller is not None:
@@ -687,6 +687,22 @@ def main():
 
                 snap = shared.snapshot()
                 wall_now = now_wall()
+                sim_t = wall_now - wall_t0
+
+                if sim_t < warmup_sec:
+                    if host_controller is not None:
+                        ros_node.publish_host_cmd(0.0, "warmup")
+                    terminal_status_line(
+                        f"warmup... {sim_t:4.2f}/{warmup_sec:.2f}s | waiting for stable sensor baseline",
+                        width=cfg.terminal_status_width,
+                    )
+                    if np.isfinite(snap["hw_enc"]):
+                        enc_ref = float(snap["hw_enc"])
+                        enc_prev = enc_ref
+                    if cfg.realtime:
+                        time.sleep(min(cfg.step, 0.01))
+                    continue
+
                 cmd_u_used = cmd_u_raw
 
                 bus_v_raw = snap["bus_v"] if np.isfinite(snap["bus_v"]) else float("nan")
@@ -707,7 +723,6 @@ def main():
                 model.step(cfg.step)
 
                 # wall_elapsed is the canonical timeline for runtime + replay CSVs.
-                sim_t = wall_now - wall_t0
                 theta = model.get_theta()
                 omega = model.get_omega()
                 alpha = (omega - omega_prev) / max(sim_t - t_prev, cfg.step) if sim_t > 0 else 0.0
@@ -733,10 +748,7 @@ def main():
                     and cfg.cpr > 1.0
                 ):
                     cur_enc = float(snap["hw_enc"])
-                    denc = cur_enc - enc_prev
-                    # Startup/transport glitches can create unrealistic jumps. Ignore them.
-                    if abs(denc) <= max(0.15 * float(cfg.cpr), 1.0):
-                        theta_from_enc = float((2.0 * math.pi / float(cfg.cpr)) * (cur_enc - enc_ref))
+                    theta_from_enc = float((2.0 * math.pi / float(cfg.cpr)) * (cur_enc - enc_ref))
                     enc_prev = cur_enc
                 # Prefer encoder-based real angle so startup offset is always zeroed from
                 # the current encoder baseline; this avoids absolute-angle jumps.
@@ -745,10 +757,6 @@ def main():
                     theta_real = theta
                 elif not stable_real_start and theta_from_enc is not None:
                     stable_real_start = True
-                if theta_real_prev is not None and abs(theta_real - theta_real_prev) > math.radians(45.0):
-                    theta_real = theta_real_prev
-                dt_theta = max(sim_t - t_real_prev, cfg.step) if t_real_prev is not None else cfg.step
-                theta_real = real_theta_filter.update(theta_real, dt_theta)
 
                 if theta_real_prev is not None and t_real_prev is not None:
                     dt_real = max(sim_t - t_real_prev, cfg.step)
@@ -756,13 +764,13 @@ def main():
                 else:
                     dt_real = cfg.step
                     omega_real_raw = omega
-                omega_real_raw = clamp(omega_real_raw, -80.0, 80.0)
+                omega_real_raw = clamp(omega_real_raw, -400.0, 400.0)
                 omega_real = real_omega_filter.update(omega_real_raw, dt_real)
                 if t_real_prev is not None:
                     alpha_real_raw = (omega_real - omega_real_prev) / dt_real
                 else:
                     alpha_real_raw = alpha
-                alpha_real_raw = clamp(alpha_real_raw, -6000.0, 6000.0)
+                alpha_real_raw = clamp(alpha_real_raw, -20000.0, 20000.0)
                 alpha_real = real_alpha_filter.update(alpha_real_raw, dt_real)
                 theta_real_prev = theta_real
                 omega_real_prev = omega_real
