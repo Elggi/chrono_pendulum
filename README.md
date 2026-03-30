@@ -40,9 +40,8 @@ Practically, this supports a repeatable workflow from data collection → calibr
 
 We use a geometry-fixed inertia surrogate:
 
-\[
-J\,\ddot{\theta} = K_u u - b\,\omega - \tau_{eq}\tanh\left(\frac{\omega}{\epsilon}\right) - m_{total} g l_{cg} \sin\theta
-\]
+<img width="463" height="48" alt="Screenshot from 2026-03-31 04-09-14" src="https://github.com/user-attachments/assets/63f41e68-6bc8-45f5-af6a-cda97c200834" />
+
 
 - Control input: `u` (same command channel used in runtime)
 - States: `theta`, `omega`, `alpha=theta_ddot`
@@ -57,12 +56,10 @@ J\,\ddot{\theta} = K_u u - b\,\omega - \tau_{eq}\tanh\left(\frac{\omega}{\epsilo
 
 Inertia is computed once from geometry/calibration and kept fixed during identification:
 
-\[
-J = J_{rod} + J_{imu}
-\]
-\[
-J_{rod} = \frac{1}{3} m_{rod}L^2, \quad J_{imu}=m_{imu}r_{imu}^2
-\]
+<img width="149" height="33" alt="Screenshot from 2026-03-31 01-59-01" src="https://github.com/user-attachments/assets/65024e42-f0b8-40aa-8571-85f378dc06f5" />
+
+
+<img width="159" height="62" alt="Screenshot from 2026-03-31 01-58-21" src="https://github.com/user-attachments/assets/27d31549-71d4-4d32-8eb8-2568cbca4f1d" />  <img width="156" height="34" alt="Screenshot from 2026-03-31 01-59-45" src="https://github.com/user-attachments/assets/a29fafeb-65f2-4da1-8081-e59978389ae3" />
 
 Constants/config:
 - `rod_mass = 0.2 kg`
