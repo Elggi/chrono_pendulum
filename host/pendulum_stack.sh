@@ -116,6 +116,19 @@ run_chrono_pendulum() {
     echo "1) Host mode (keyboard control)"
     echo "2) Jetson mode (ROS input)"
     read -p "Enter number: " mode
+    echo "--------------------------------"
+    echo "Select real alpha source:"
+    echo "1) derivative (omega_diff)"
+    echo "2) from linear acceleration (tangential_accel)"
+    echo "3) mixed (blend)"
+    read -p "Enter number [1]: " alpha_mode
+    alpha_mode=${alpha_mode:-1}
+    alpha_arg="omega_diff"
+    if [ "$alpha_mode" == "2" ]; then
+        alpha_arg="tangential_accel"
+    elif [ "$alpha_mode" == "3" ]; then
+        alpha_arg="blend"
+    fi
 
     param_json=$(select_json_file "Model Parameter JSON")
 
@@ -123,13 +136,13 @@ run_chrono_pendulum() {
 
     if [ "$mode" == "1" ]; then
         echo "[INFO] chrono_pendulum (HOST mode)"
-        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode host)
+        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode host --real-alpha-source "$alpha_arg")
         [ -n "$param_json" ] && cmd+=(--parameter-json "$param_json")
         [ -n "$calib_json" ] && cmd+=(--calibration-json "$calib_json" --radius-json "$calib_json")
         "${cmd[@]}"
     elif [ "$mode" == "2" ]; then
         echo "[INFO] chrono_pendulum (JETSON mode)"
-        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode jetson)
+        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode jetson --real-alpha-source "$alpha_arg")
         [ -n "$param_json" ] && cmd+=(--parameter-json "$param_json")
         [ -n "$calib_json" ] && cmd+=(--calibration-json "$calib_json" --radius-json "$calib_json")
         "${cmd[@]}"
