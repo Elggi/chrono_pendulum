@@ -593,9 +593,10 @@ def main():
     model.update_identified_structure(sim_params)
     bus_filter = RobustSignalFilter(cfg.ina_bus_median_window, cfg.ina_bus_hampel_k, cfg.ina_bus_hampel_sigma, cfg.ina_bus_lpf_tau_sec)
     current_filter = RobustSignalFilter(cfg.ina_current_median_window, cfg.ina_current_hampel_k, cfg.ina_current_hampel_sigma, cfg.ina_current_lpf_tau_sec)
-    # Real observations are noisier than simulation -> use moderate filtering.
-    real_omega_filter = RobustSignalFilter(7, 7, 3.0, 0.03)
-    real_alpha_filter = RobustSignalFilter(9, 9, 3.0, 0.05)
+    # Real observations are noisier than simulation -> smooth theta first, then derivatives.
+    real_theta_filter = RobustSignalFilter(9, 9, 3.0, 0.05)
+    real_omega_filter = RobustSignalFilter(11, 11, 3.0, 0.08)
+    real_alpha_filter = RobustSignalFilter(15, 15, 3.0, 0.12)
     prev_u_eff = 0.0
     prev_du = 0.0
 
@@ -757,6 +758,8 @@ def main():
                     theta_real = theta
                 elif not stable_real_start and theta_from_enc is not None:
                     stable_real_start = True
+                dt_theta = max(sim_t - t_real_prev, cfg.step) if t_real_prev is not None else cfg.step
+                theta_real = real_theta_filter.update(theta_real, dt_theta)
 
                 if theta_real_prev is not None and t_real_prev is not None:
                     dt_real = max(sim_t - t_real_prev, cfg.step)
@@ -764,13 +767,13 @@ def main():
                 else:
                     dt_real = cfg.step
                     omega_real_raw = omega
-                omega_real_raw = clamp(omega_real_raw, -400.0, 400.0)
+                omega_real_raw = clamp(omega_real_raw, -120.0, 120.0)
                 omega_real = real_omega_filter.update(omega_real_raw, dt_real)
                 if t_real_prev is not None:
                     alpha_real_raw = (omega_real - omega_real_prev) / dt_real
                 else:
                     alpha_real_raw = alpha
-                alpha_real_raw = clamp(alpha_real_raw, -20000.0, 20000.0)
+                alpha_real_raw = clamp(alpha_real_raw, -5000.0, 5000.0)
                 alpha_real = real_alpha_filter.update(alpha_real_raw, dt_real)
                 theta_real_prev = theta_real
                 omega_real_prev = omega_real

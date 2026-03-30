@@ -226,6 +226,10 @@ run_rl_fitting() {
     if [ -f "$run_outdir/history.csv" ]; then
         echo "[INFO] RL+replay one-window plot: python3 $BASE_DIR/plot_pendulum.py --rl-dir $run_outdir"
     fi
+    if [ -f "$run_outdir/sb3_monitor.csv" ]; then
+        echo "[INFO] SB3 monitor plot (rl_zoo3): python -m rl_zoo3.plots.plot_train --algo ppo --env PendulumReplayEnv-v0 -f $run_outdir"
+    fi
+    echo "[INFO] TensorBoard: tensorboard --logdir $run_outdir/tensorboard"
 }
 
 run_replay_validation() {
