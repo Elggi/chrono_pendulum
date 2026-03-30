@@ -163,6 +163,10 @@ def main():
 
             model.link.SetRot(ch.QuatFromAngleZ(ths))
             model.link.SetAngVelLocal(ch.ChVector3d(0.0, 0.0, 0.0))
+            imu_local = ch.ChVector3d(0.0, -cfg.link_L + cfg.imu_size_y / 2.0, 0.0)
+            imu_abs = model.link.TransformPointLocalToParent(imu_local)
+            model.imu.SetPos(imu_abs)
+            model.imu.SetRot(model.link.GetRot())
             node.publish_real(float(t[i] - t_base), thr, omr, enc)
             rclpy.spin_once(node, timeout_sec=0.0)
 

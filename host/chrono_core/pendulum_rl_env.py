@@ -120,14 +120,19 @@ def simulate_trajectory(traj: ReplayTrajectory, params: dict[str, float], cfg: B
     tau_res = np.zeros(n, dtype=float)
     cmd_delayed = shifted_signal(t, traj.cmd_u, delay_sec)
 
-    theta[0] = float(traj.theta_real[0])
-    omega[0] = float(traj.omega_real[0])
+    theta[0] = float(traj.theta_real[0]) if np.isfinite(traj.theta_real[0]) else 0.0
+    omega[0] = float(traj.omega_real[0]) if np.isfinite(traj.omega_real[0]) else 0.0
 
     m_total = cfg.link_mass + cfg.imu_mass
     J_pivot = max(float(params["J_cm_base"] + m_total * (params["l_com"] ** 2)), 1e-6)
+    max_theta = 6.0 * math.pi
+    max_omega = 2.0e3
 
     for k in range(n - 1):
         h = max(float(dt[k]), 1e-6)
+        if not np.isfinite(theta[k]) or not np.isfinite(omega[k]):
+            theta[k] = 0.0
+            omega[k] = 0.0
         u = cmd_delayed[k]
         duty = np.clip(u / max(cfg.pwm_limit, 1e-9), -1.0, 1.0)
         vb = traj.bus_v[k] if np.isfinite(traj.bus_v[k]) and traj.bus_v[k] > 0.0 else cfg.nominal_bus_voltage
@@ -137,11 +142,13 @@ def simulate_trajectory(traj: ReplayTrajectory, params: dict[str, float], cfg: B
         tm = params["k_t"] * i_eff
         tv = params["b_eq"] * omega[k]
         tc = params["tau_eq"] * math.tanh(omega[k] / max(cfg.tanh_eps, 1e-6))
-        tg = m_total * cfg.gravity * params["l_com"] * math.sin(theta[k])
+        th_k = float(np.clip(theta[k], -max_theta, max_theta))
+        tg = m_total * cfg.gravity * params["l_com"] * math.sin(th_k)
         domega = (tm - tv - tc - tg) / J_pivot
+        domega = float(np.clip(domega, -1.0e6, 1.0e6))
 
-        theta[k + 1] = theta[k] + h * omega[k]
-        omega[k + 1] = omega[k] + h * domega
+        theta[k + 1] = float(np.clip(theta[k] + h * omega[k], -max_theta, max_theta))
+        omega[k + 1] = float(np.clip(omega[k] + h * domega, -max_omega, max_omega))
 
         i_pred[k] = i_eff
         v_applied[k] = v
