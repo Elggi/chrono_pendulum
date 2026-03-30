@@ -11,7 +11,7 @@ import pandas as pd
 
 from .config import BridgeConfig
 
-PARAM_KEYS = ["l_com", "J_cm_base", "b_eq", "tau_eq", "k_t", "i0", "R", "k_e"]
+PARAM_KEYS = ["K_u", "b_eq", "tau_eq", "l_com"]
 
 
 @dataclass
@@ -24,9 +24,6 @@ class ReplayTrajectory:
     theta_real: np.ndarray
     omega_real: np.ndarray
     alpha_real: np.ndarray
-    bus_v: np.ndarray
-    current_a: np.ndarray
-    power_w: np.ndarray
     delay_sec_est: float
 
 
@@ -112,39 +109,39 @@ def simulate_trajectory(traj: ReplayTrajectory, params: dict[str, float], cfg: B
     theta = np.zeros(n, dtype=float)
     omega = np.zeros(n, dtype=float)
     alpha = np.zeros(n, dtype=float)
-    i_pred = np.zeros(n, dtype=float)
-    v_applied = np.zeros(n, dtype=float)
     tau_motor = np.zeros(n, dtype=float)
     tau_visc = np.zeros(n, dtype=float)
     tau_coul = np.zeros(n, dtype=float)
     tau_res = np.zeros(n, dtype=float)
     cmd_delayed = shifted_signal(t, traj.cmd_u, delay_sec)
 
-    theta[0] = float(traj.theta_real[0])
-    omega[0] = float(traj.omega_real[0])
+    theta[0] = float(traj.theta_real[0]) if np.isfinite(traj.theta_real[0]) else 0.0
+    omega[0] = float(traj.omega_real[0]) if np.isfinite(traj.omega_real[0]) else 0.0
 
-    m_total = cfg.link_mass + cfg.imu_mass
-    J_pivot = max(float(params["J_cm_base"] + m_total * (params["l_com"] ** 2)), 1e-6)
+    m_total = cfg.rod_mass + cfg.imu_mass
+    J_rod = (1.0 / 3.0) * cfg.rod_mass * (cfg.rod_length ** 2)
+    J_imu = cfg.imu_mass * (cfg.r_imu ** 2)
+    J_pivot = max(float(J_rod + J_imu), 1e-6)
+    max_theta = 6.0 * math.pi
+    max_omega = 2.0e3
 
     for k in range(n - 1):
         h = max(float(dt[k]), 1e-6)
+        if not np.isfinite(theta[k]) or not np.isfinite(omega[k]):
+            theta[k] = 0.0
+            omega[k] = 0.0
         u = cmd_delayed[k]
-        duty = np.clip(u / max(cfg.pwm_limit, 1e-9), -1.0, 1.0)
-        vb = traj.bus_v[k] if np.isfinite(traj.bus_v[k]) and traj.bus_v[k] > 0.0 else cfg.nominal_bus_voltage
-        v = duty * vb
-        i_raw = (v - params["k_e"] * omega[k]) / max(params["R"], 1e-6)
-        i_eff = math.copysign(max(abs(i_raw) - max(params["i0"], 0.0), 0.0), i_raw)
-        tm = params["k_t"] * i_eff
+        tm = params["K_u"] * u
         tv = params["b_eq"] * omega[k]
         tc = params["tau_eq"] * math.tanh(omega[k] / max(cfg.tanh_eps, 1e-6))
-        tg = m_total * cfg.gravity * params["l_com"] * math.sin(theta[k])
+        th_k = float(np.clip(theta[k], -max_theta, max_theta))
+        tg = m_total * cfg.gravity * params["l_com"] * math.sin(th_k)
         domega = (tm - tv - tc - tg) / J_pivot
+        domega = float(np.clip(domega, -1.0e6, 1.0e6))
 
-        theta[k + 1] = theta[k] + h * omega[k]
-        omega[k + 1] = omega[k] + h * domega
+        theta[k + 1] = float(np.clip(theta[k] + h * omega[k], -max_theta, max_theta))
+        omega[k + 1] = float(np.clip(omega[k] + h * domega, -max_omega, max_omega))
 
-        i_pred[k] = i_eff
-        v_applied[k] = v
         tau_motor[k] = tm
         tau_visc[k] = tv
         tau_coul[k] = tc
@@ -152,8 +149,6 @@ def simulate_trajectory(traj: ReplayTrajectory, params: dict[str, float], cfg: B
 
     if n > 1:
         alpha[:] = _gradient(omega, dt)
-        i_pred[-1] = i_pred[-2]
-        v_applied[-1] = v_applied[-2]
         tau_motor[-1] = tau_motor[-2]
         tau_visc[-1] = tau_visc[-2]
         tau_coul[-1] = tau_coul[-2]
@@ -164,8 +159,6 @@ def simulate_trajectory(traj: ReplayTrajectory, params: dict[str, float], cfg: B
         "omega": omega,
         "alpha": alpha,
         "cmd_delayed": cmd_delayed,
-        "i_pred": i_pred,
-        "v_applied": v_applied,
         "tau_motor": tau_motor,
         "tau_visc": tau_visc,
         "tau_coul": tau_coul,
@@ -268,10 +261,6 @@ def load_replay_csv(path: str | Path, cfg: BridgeConfig, delay_override: float |
     omega_real = _winsorize_abs(omega_real, q=99.5)
     alpha_real = _winsorize_abs(alpha_real, q=99.5)
 
-    bus_v = _safe_col(df, "bus_v_filtered", cfg.nominal_bus_voltage)
-    current_a = _safe_col(df, "current_filtered_A", 0.0)
-    power_w = _safe_col(df, "power_raw_W", 0.0)
-
     if delay_override is not None:
         delay_sec = float(delay_override)
     elif "delay_sec_est" in df.columns:
@@ -292,23 +281,16 @@ def load_replay_csv(path: str | Path, cfg: BridgeConfig, delay_override: float |
         theta_real=theta_real,
         omega_real=omega_real,
         alpha_real=alpha_real,
-        bus_v=bus_v,
-        current_a=current_a,
-        power_w=power_w,
         delay_sec_est=delay_sec,
     )
 
 
 def default_param_bounds(center: dict[str, float], learn_delay: bool = False):
     bounds = {
+        "K_u": (1e-5, 0.1),
         "l_com": (0.03, 0.45),
-        "J_cm_base": (1e-4, 0.05),
         "b_eq": (0.0, 2.0),
         "tau_eq": (0.0, 1.5),
-        "k_t": (0.01, 1.0),
-        "i0": (0.0, 1.0),
-        "R": (0.1, 30.0),
-        "k_e": (0.001, 1.0),
     }
     if learn_delay:
         bounds["delay_sec"] = (0.0, 0.25)
@@ -470,14 +452,10 @@ def split_trajectories(paths: list[Path], seed: int = 0):
 
 def build_init_params(cfg: BridgeConfig, calibration: dict[str, Any] | None = None, parameter_json: dict[str, Any] | None = None):
     out = {
+        "K_u": float(cfg.K_u_init),
         "l_com": float(cfg.l_com_init),
-        "J_cm_base": float(cfg.J_cm_base),
         "b_eq": float(cfg.b_eq_init),
         "tau_eq": float(cfg.tau_eq_init),
-        "k_t": float(cfg.k_t_init),
-        "i0": float(cfg.i0_init),
-        "R": float(cfg.R_init),
-        "k_e": float(cfg.k_e_init),
         "delay_sec": float(cfg.delay_init_ms) / 1000.0,
     }
 

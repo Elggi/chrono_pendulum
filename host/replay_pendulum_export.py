@@ -44,6 +44,9 @@ def main():
         wr = csv.writer(f)
         wr.writerow(PENDULUM_LOG_COLUMNS)
         best_cost = loss
+        j_rod = (1.0 / 3.0) * cfg.rod_mass * (cfg.rod_length ** 2)
+        j_imu = cfg.imu_mass * (cfg.r_imu ** 2)
+        j_total = j_rod + j_imu
         for i in range(len(traj.t)):
             wr.writerow([
                 0.0, traj.t[i], "replay",
@@ -52,9 +55,9 @@ def main():
                 "", "",
                 traj.theta_real[i], traj.omega_real[i], traj.alpha_real[i],
                 delay * 1000.0,
-                params["l_com"], params["b_eq"], params["tau_eq"], params["k_t"], params["i0"], params["R"], params["k_e"],
-                traj.bus_v[i], traj.bus_v[i], traj.current_a[i], traj.current_a[i], traj.power_w[i],
-                sim["tau_motor"][i], sim["tau_res"][i], sim["tau_visc"][i], sim["tau_coul"][i], sim["i_pred"][i], sim["v_applied"][i],
+                params["l_com"], params["b_eq"], params["tau_eq"], params["K_u"],
+                j_rod, j_imu, j_total,
+                sim["tau_motor"][i], sim["tau_res"][i], sim["tau_visc"][i], sim["tau_coul"][i],
                 loss, best_cost,
                 1.0, 0.0, 0.0, 0.0,
                 0.0, 0.0, sim["omega"][i],

@@ -344,7 +344,8 @@ def main():
         ax2d.scatter([tip0[0]], [tip0[1]], marker="*", s=180, label="Initial tip")
 
         if len(tip_hist) > 1:
-            ax2d.plot(tip_hist[:, 0], tip_hist[:, 1], linewidth=2, label="Tip trajectory")
+            tail = tip_hist[-min(len(tip_hist), 100):]
+            ax2d.plot(tail[:, 0], tail[:, 1], linewidth=2, alpha=0.55, label="Tip trajectory (recent)")
             ax2d.plot([0, tip_hist[-1, 0]], [0, tip_hist[-1, 1]], linewidth=3, label="Current link")
             ax2d.scatter([tip_hist[-1, 0]], [tip_hist[-1, 1]], s=60, label="Current tip")
 

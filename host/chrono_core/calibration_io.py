@@ -28,14 +28,16 @@ def apply_calibration_json(cfg: BridgeConfig, json_path: str | None):
     delay = calib.get("delay", {})
     summary = calib.get("summary", {}) if isinstance(calib.get("summary", {}), dict) else {}
 
-    cfg.J_cm_base = float(model_init.get("J_cm_base", model_init.get("J", cfg.J_cm_base)))
     cfg.l_com_init = float(model_init.get("l_com", cfg.l_com_init))
     cfg.b_eq_init = float(model_init.get("b_eq", model_init.get("b", cfg.b_eq_init)))
     cfg.tau_eq_init = float(model_init.get("tau_eq", model_init.get("tau_c", cfg.tau_eq_init)))
-    cfg.k_t_init = float(model_init.get("k_t", cfg.k_t_init))
-    cfg.i0_init = float(model_init.get("i0", cfg.i0_init))
-    cfg.R_init = float(model_init.get("R", cfg.R_init))
-    cfg.k_e_init = float(model_init.get("k_e", cfg.k_e_init))
+    cfg.K_u_init = float(model_init.get("K_u", model_init.get("k_u", cfg.K_u_init)))
+    cfg.r_imu = float(
+        model_init.get(
+            "r_imu",
+            summary.get("mean_radius_m", calib.get("mean_radius_m", cfg.r_imu)),
+        )
+    )
     cfg.delay_init_ms = float(delay.get("effective_control_delay_ms", cfg.delay_init_ms))
     cpr_candidates = [
         summary.get("mean_cpr"),
