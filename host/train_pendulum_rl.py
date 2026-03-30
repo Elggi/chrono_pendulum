@@ -20,6 +20,7 @@ from chrono_core.pendulum_rl_env import (
     build_init_params,
     load_replay_csv,
     simulate_trajectory,
+    shifted_signal,
     split_trajectories,
     weighted_loss,
     compute_error_features,
@@ -151,7 +152,7 @@ def evaluate_dataset(env: PendulumRLEnv, params: dict[str, float]):
     for traj in env.trajectories:
         d = params.get("delay_sec", traj.delay_sec_est)
         sim = simulate_trajectory(traj, params, env.cfg, delay_sec=d)
-        feat = compute_error_features(traj, sim)
+        feat = compute_error_features(traj, sim, align_shift_sec=traj.delay_sec_est)
         losses.append(weighted_loss(feat, env.reward_weights))
         rmses["theta"].append(feat["rmse_theta"])
         rmses["omega"].append(feat["rmse_omega"])
@@ -313,12 +314,16 @@ def main():
     rep = test_traj[0]
     rep_delay = best_params.get("delay_sec", rep.delay_sec_est)
     sim = simulate_trajectory(rep, best_params, cfg, delay_sec=rep_delay)
-    rep_feat = compute_error_features(rep, sim)
+    rep_feat = compute_error_features(rep, sim, align_shift_sec=rep.delay_sec_est)
     rep_loss = weighted_loss(rep_feat, env.reward_weights)
-    save_best_replay_csv(outdir / "replay_best.csv", rep, sim, best_params, rep_loss, rep_delay)
-    plot_overlay(rep.t, rep.theta_real, sim["theta"], "theta [rad]", outdir / "overlay_theta.png")
-    plot_overlay(rep.t, rep.omega_real, sim["omega"], "omega [rad/s]", outdir / "overlay_omega.png")
-    plot_overlay(rep.t, rep.alpha_real, sim["alpha"], "alpha [rad/s^2]", outdir / "overlay_alpha.png")
+    sim_aligned = dict(sim)
+    sim_aligned["theta"] = shifted_signal(rep.t, sim["theta"], rep.delay_sec_est)
+    sim_aligned["omega"] = shifted_signal(rep.t, sim["omega"], rep.delay_sec_est)
+    sim_aligned["alpha"] = shifted_signal(rep.t, sim["alpha"], rep.delay_sec_est)
+    save_best_replay_csv(outdir / "replay_best.csv", rep, sim_aligned, best_params, rep_loss, rep_delay)
+    plot_overlay(rep.t, rep.theta_real, sim_aligned["theta"], "theta [rad]", outdir / "overlay_theta.png")
+    plot_overlay(rep.t, rep.omega_real, sim_aligned["omega"], "omega [rad/s]", outdir / "overlay_omega.png")
+    plot_overlay(rep.t, rep.alpha_real, sim_aligned["alpha"], "alpha [rad/s^2]", outdir / "overlay_alpha.png")
     plot_overlay(rep.t, rep.hw_pwm, sim["cmd_delayed"], "PWM", outdir / "overlay_pwm_aligned.png")
 
     print("Saved outputs in", outdir)

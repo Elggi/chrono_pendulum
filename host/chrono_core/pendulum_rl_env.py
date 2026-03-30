@@ -173,10 +173,24 @@ def simulate_trajectory(traj: ReplayTrajectory, params: dict[str, float], cfg: B
     }
 
 
-def compute_error_features(traj: ReplayTrajectory, sim: dict[str, np.ndarray], delay_quality: float = 1.0):
-    e_th = _winsorize_abs(sim["theta"] - traj.theta_real, q=99.5)
-    e_om = _winsorize_abs(sim["omega"] - traj.omega_real, q=99.5)
-    e_al = _winsorize_abs(sim["alpha"] - traj.alpha_real, q=99.5)
+def compute_error_features(
+    traj: ReplayTrajectory,
+    sim: dict[str, np.ndarray],
+    delay_quality: float = 1.0,
+    align_shift_sec: float = 0.0,
+):
+    if abs(float(align_shift_sec)) > 1e-9:
+        th_sim = shifted_signal(traj.t, sim["theta"], float(align_shift_sec))
+        om_sim = shifted_signal(traj.t, sim["omega"], float(align_shift_sec))
+        al_sim = shifted_signal(traj.t, sim["alpha"], float(align_shift_sec))
+    else:
+        th_sim = sim["theta"]
+        om_sim = sim["omega"]
+        al_sim = sim["alpha"]
+
+    e_th = _winsorize_abs(th_sim - traj.theta_real, q=99.5)
+    e_om = _winsorize_abs(om_sim - traj.omega_real, q=99.5)
+    e_al = _winsorize_abs(al_sim - traj.alpha_real, q=99.5)
 
     rmse_theta = float(np.sqrt(np.mean(e_th ** 2)))
     rmse_omega = float(np.sqrt(np.mean(e_om ** 2)))
@@ -184,7 +198,7 @@ def compute_error_features(traj: ReplayTrajectory, sim: dict[str, np.ndarray], d
 
     bias_theta = float(np.mean(e_th))
     bias_omega = float(np.mean(e_om))
-    peak_amp_mismatch = float(np.max(np.abs(sim["theta"])) - np.max(np.abs(traj.theta_real)))
+    peak_amp_mismatch = float(np.max(np.abs(th_sim)) - np.max(np.abs(traj.theta_real)))
 
     return {
         "rmse_theta": rmse_theta,
@@ -373,7 +387,7 @@ class PendulumRLEnv:
         for traj in self.trajectories:
             d = float(params.get("delay_sec", traj.delay_sec_est + jitter))
             sim = simulate_trajectory(traj, params, self.cfg, delay_sec=max(0.0, d))
-            f = compute_error_features(traj, sim, delay_quality=1.0)
+            f = compute_error_features(traj, sim, delay_quality=1.0, align_shift_sec=traj.delay_sec_est)
             feats.append(f)
             losses.append(weighted_loss(f, self.reward_weights))
         loss = float(np.mean(losses)) if losses else 0.0
