@@ -75,6 +75,7 @@ def train_with_sb3(env, val_env, args, history, param_hist):
     model = PPO(
         "MlpPolicy",
         sb3_env,
+        device=args.device,
         seed=args.seed,
         n_steps=max(env.max_refine_steps * 4, 32),
         batch_size=min(64, max(16, env.max_refine_steps * 2)),
@@ -141,6 +142,7 @@ def maybe_prompt(args, parser):
     args.lam = ask_float("lam", args.lam)
     args.kl_targ = ask_float("kl_targ", args.kl_targ)
     args.batch_size = ask_int("batch_size", args.batch_size)
+    args.device = input(f"device [cpu/cuda] [{args.device}]: ").strip() or args.device
     args.learn_delay = ask_bool("learn_delay", args.learn_delay)
     args.domain_randomization = ask_bool("domain_randomization", args.domain_randomization)
     return args
@@ -217,6 +219,7 @@ def main():
     ap.add_argument("-l", "--lam", type=float, default=0.98)
     ap.add_argument("-k", "--kl_targ", type=float, default=0.003)
     ap.add_argument("-b", "--batch_size", type=int, default=20)
+    ap.add_argument("--device", type=str, default="cpu")
 
     ap.add_argument("--learn_delay", action="store_true", default=False)
     ap.add_argument("--delay_override", type=float, default=None)

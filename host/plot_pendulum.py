@@ -164,14 +164,13 @@ def plot_simulation(df, csv_path: str, args):
     omega_sim = col_any(df, ["omega", "sim_omega"], n)
     alpha_sim = col_any(df, ["alpha", "sim_alpha"], n)
     cmd_u = col_any(df, ["cmd_u_raw", "cmd_u"], n)
-    cmd_used = col_any(df, ["cmd_u_used", "cmd_u", "hw_pwm"], n)
     hw_pwm = col_any(df, ["hw_pwm"], n)
     enc = col_any(df, ["hw_enc"], n)
-    delay_ms = col_any(df, ["delay_ms"], n)
-    J_est = col_any(df, ["J_est"], n)
-    b_est = col_any(df, ["b_est"], n)
-    tau_c_est = col_any(df, ["tau_c_est"], n)
-    mgl_est = col_any(df, ["mgl_est"], n)
+    tau_cmd = col_any(df, ["tau_cmd"], n)
+    tau_motor = col_any(df, ["tau_motor"], n)
+    tau_res = col_any(df, ["tau_res"], n)
+    tau_visc = col_any(df, ["tau_visc"], n)
+    tau_coul = col_any(df, ["tau_coul"], n)
 
     if not np.isfinite(theta_sim).any() and all(k in df.columns for k in ["imu_qx", "imu_qy", "imu_qz", "imu_qw"]):
         qx = col_to_numpy(df, "imu_qx")
@@ -219,13 +218,11 @@ def plot_simulation(df, csv_path: str, args):
     ax = axes.ravel()
 
     ax[0].plot(t_cmd, cmd_u, label="cmd_u")
-    ax[0].plot(t, cmd_used, label="cmd_used")
     ax[0].plot(t, hw_pwm, label="hw_pwm")
-    ax[0].plot(t, delay_ms, label="delay_ms")
     ax[0].grid(True)
     ax[0].legend()
     ax[0].set_xlabel("time [s]")
-    ax[0].set_title("Command / PWM / delay")
+    ax[0].set_title("Command / PWM")
 
     ax[1].plot(t, theta_sim, label="theta sim")
     if np.isfinite(theta_real).any():
@@ -268,18 +265,21 @@ def plot_simulation(df, csv_path: str, args):
     ax[4].set_xlabel("time [s]")
     ax[4].set_title("Absolute tracking error")
 
-    if np.isfinite(J_est).any():
-        ax[5].plot(t, J_est, label="J_est")
-    if np.isfinite(b_est).any():
-        ax[5].plot(t, b_est, label="b_est")
-    if np.isfinite(tau_c_est).any():
-        ax[5].plot(t, tau_c_est, label="tau_c_est")
-    if np.isfinite(mgl_est).any():
-        ax[5].plot(t, mgl_est, label="mgl_est")
+    if np.isfinite(tau_cmd).any():
+        ax[5].plot(t, tau_cmd, label="tau_cmd(net)")
+    if np.isfinite(tau_motor).any():
+        ax[5].plot(t, tau_motor, label="tau_motor")
+    if np.isfinite(tau_res).any():
+        ax[5].plot(t, tau_res, label="tau_res(total)")
+    if np.isfinite(tau_visc).any():
+        ax[5].plot(t, tau_visc, label="tau_visc")
+    if np.isfinite(tau_coul).any():
+        ax[5].plot(t, tau_coul, label="tau_coul")
     ax[5].grid(True)
     ax[5].legend()
     ax[5].set_xlabel("time [s]")
-    ax[5].set_title("Estimated parameter trajectories")
+    ax[5].set_ylabel("N·m")
+    ax[5].set_title("Torque analysis")
 
     fig.tight_layout()
     plt.show()

@@ -29,7 +29,7 @@ from std_msgs.msg import Float32, String
 from sensor_msgs.msg import Imu
 from chrono_core.config import BridgeConfig
 from chrono_core.utils import clamp, now_wall, terminal_status_line, sanitize_float, make_numbered_path
-from chrono_core.estimation import RobustSignalFilter
+from chrono_core.signal_filter import RobustSignalFilter
 from chrono_core.dynamics import PendulumModel, compute_model_torque_and_electrics
 from chrono_core.calibration_io import apply_calibration_json, extract_radius_from_json
 from chrono_core.pendulum_rl_env import build_init_params
@@ -226,77 +226,6 @@ class HostCommandController:
         self.apply_key(key)
 
 
-class DelayObserver:
-    """Estimate cmd->hw pwm delay for logging/plotting only (no compensation)."""
-
-    def __init__(self, max_delay_ms: float = 250.0, buffer_sec: float = 4.0):
-        self.max_delay_ms = float(max_delay_ms)
-        self.buffer_sec = float(buffer_sec)
-        self.cmd_hist = deque()
-        self.pwm_hist = deque()
-        self.delay_sec = 0.0
-        self.last_update = 0.0
-
-    def push(self, wall_now: float, cmd_u: float, hw_pwm: float):
-        self.cmd_hist.append((float(wall_now), float(cmd_u)))
-        self.pwm_hist.append((float(wall_now), float(hw_pwm)))
-        tmin = wall_now - self.buffer_sec
-        while self.cmd_hist and self.cmd_hist[0][0] < tmin:
-            self.cmd_hist.popleft()
-        while self.pwm_hist and self.pwm_hist[0][0] < tmin:
-            self.pwm_hist.popleft()
-
-    def estimate(self, wall_now: float):
-        if wall_now - self.last_update < 0.25:
-            return self.delay_sec
-        self.last_update = wall_now
-        if len(self.cmd_hist) < 20 or len(self.pwm_hist) < 20:
-            return self.delay_sec
-        t0 = max(self.cmd_hist[0][0], self.pwm_hist[0][0])
-        t1 = min(self.cmd_hist[-1][0], self.pwm_hist[-1][0])
-        if (t1 - t0) < 0.8:
-            return self.delay_sec
-        dt = 0.01
-        ts = np.arange(t0, t1, dt)
-        if len(ts) < 30:
-            return self.delay_sec
-
-        def interp(hist, t):
-            xs = list(hist)
-            if t <= xs[0][0]:
-                return xs[0][1]
-            if t >= xs[-1][0]:
-                return xs[-1][1]
-            for i in range(len(xs) - 1):
-                t0i, y0 = xs[i]
-                t1i, y1 = xs[i + 1]
-                if t0i <= t <= t1i:
-                    a = (t - t0i) / max(t1i - t0i, 1e-9)
-                    return (1.0 - a) * y0 + a * y1
-            return xs[-1][1]
-
-        cmd = np.array([interp(self.cmd_hist, t) for t in ts], dtype=float)
-        pwm = np.array([interp(self.pwm_hist, t) for t in ts], dtype=float)
-        cmd = cmd - np.mean(cmd)
-        pwm = pwm - np.mean(pwm)
-        if np.std(cmd) < 1e-6 or np.std(pwm) < 1e-6:
-            return self.delay_sec
-        max_lag = int((self.max_delay_ms / 1000.0) / dt)
-        best_lag = 0
-        best_score = -1e18
-        for lag in range(max_lag + 1):
-            if lag >= len(cmd) - 2:
-                break
-            a = cmd[:-lag] if lag > 0 else cmd
-            b = pwm[lag:] if lag > 0 else pwm
-            score = float(np.dot(a, b)) / max(len(a), 1)
-            if score > best_score:
-                best_score = score
-                best_lag = lag
-        self.delay_sec = float(best_lag * dt)
-        return self.delay_sec
-
-
 # ============================================================
 # ROS shared state
 # ============================================================
@@ -361,7 +290,6 @@ class PendulumROSNode(Node):
         self.pub_alpha = self.create_publisher(Float32, cfg.topic_sim_alpha, 10)
         self.pub_tau = self.create_publisher(Float32, cfg.topic_sim_tau, 10)
         self.pub_cmd_used = self.create_publisher(Float32, cfg.topic_sim_cmd_used, 10)
-        self.pub_delay_ms = self.create_publisher(Float32, cfg.topic_sim_delay_ms, 10)
         self.pub_status = self.create_publisher(String, cfg.topic_sim_status, 10)
         self.pub_imu = self.create_publisher(Imu, cfg.topic_imu, 10)
         self.pub_cmd = self.create_publisher(Float32, cfg.topic_cmd_u, 10) if host_mode else None
@@ -428,23 +356,16 @@ class PendulumROSNode(Node):
             s.data = mode_name
             self.pub_debug.publish(s)
 
-    def publish_sim(self, theta, omega, alpha, tau, cmd_used, delay_ms, imu_msg, status_text):
+    def publish_sim(self, theta, omega, alpha, tau, cmd_used, imu_msg, status_text):
         self._pub_float(self.pub_theta, theta)
         self._pub_float(self.pub_omega, omega)
         self._pub_float(self.pub_alpha, alpha)
         self._pub_float(self.pub_tau, tau)
         self._pub_float(self.pub_cmd_used, cmd_used)
-        self._pub_float(self.pub_delay_ms, delay_ms)
         self.pub_imu.publish(imu_msg)
         s = String()
         s.data = status_text
         self.pub_status.publish(s)
-
-
-# ============================================================
-# delay compensator and CPR estimator
-# ============================================================
-
 
 
 class ViewerState:
@@ -540,16 +461,14 @@ def build_imu_msg(sim_t, q_wxyz, omega_xyz, acc_xyz):
 
 
 def make_status_line(host_mode: bool, cmd_u_raw: float, cmd_u_used: float, hw_pwm: float, mode_name: str,
-                     cfg: BridgeConfig, delay_ms: float):
+                     cfg: BridgeConfig):
     if host_mode:
         return (
             f"cmd_u: {cmd_u_raw:6.1f} | used: {cmd_u_used:6.1f} | mode: {mode_name:<6} | "
-            f"step: {cfg.pwm_step:4.1f} | max: {cfg.pwm_limit:5.1f} | "
-            f"delay:{delay_ms:5.1f}ms"
+            f"step: {cfg.pwm_step:4.1f} | max: {cfg.pwm_limit:5.1f}"
         )
     return (
-        f"cmd_u: {cmd_u_used:6.1f} | hw_pwm: {hw_pwm:6.1f} | mode: external | "
-        f"delay:{delay_ms:5.1f}ms"
+        f"cmd_u: {cmd_u_used:6.1f} | hw_pwm: {hw_pwm:6.1f} | mode: external"
     )
 
 
@@ -652,7 +571,6 @@ def main():
 
     log_csv = make_numbered_path(cfg.log_dir, cfg.log_prefix, ".csv")
     log_meta = log_csv[:-4] + ".meta.json"
-    log_best_param = log_csv[:-4] + "_best_param.json"
 
     rclpy.init()
     shared = SharedROSState()
@@ -677,8 +595,6 @@ def main():
     current_filter = RobustSignalFilter(cfg.ina_current_median_window, cfg.ina_current_hampel_k, cfg.ina_current_hampel_sigma, cfg.ina_current_lpf_tau_sec)
     prev_u_eff = 0.0
     prev_du = 0.0
-    delay_sec_used = 0.0
-    delay_obs = DelayObserver(max_delay_ms=250.0, buffer_sec=4.0)
 
     viewer_proc = None
     if cfg.enable_imu_viewer:
@@ -708,6 +624,7 @@ def main():
         omega_prev = model.get_omega()
         t_prev = 0.0
         enc_ref = None
+        enc_prev = None
         theta_real_prev = None
         omega_real_prev = 0.0
         t_real_prev = None
@@ -766,8 +683,6 @@ def main():
                 snap = shared.snapshot()
                 wall_now = now_wall()
                 cmd_u_used = cmd_u_raw
-                delay_obs.push(wall_now, cmd_u_raw, snap["hw_pwm"])
-                delay_sec_used = delay_obs.estimate(wall_now)
 
                 bus_v_raw = snap["bus_v"] if np.isfinite(snap["bus_v"]) else float("nan")
                 current_A_raw = snap["current_ma"] / 1000.0 if np.isfinite(snap["current_ma"]) else float("nan")
@@ -802,12 +717,22 @@ def main():
 
                 if enc_ref is None and np.isfinite(snap["hw_enc"]):
                     enc_ref = float(snap["hw_enc"])
+                    enc_prev = enc_ref
 
                 theta_from_enc = None
-                if enc_ref is not None and np.isfinite(snap["hw_enc"]) and np.isfinite(cfg.cpr) and cfg.cpr > 1.0:
+                if (
+                    enc_ref is not None
+                    and enc_prev is not None
+                    and np.isfinite(snap["hw_enc"])
+                    and np.isfinite(cfg.cpr)
+                    and cfg.cpr > 1.0
+                ):
                     cur_enc = float(snap["hw_enc"])
-                    # Always treat startup encoder value as offset only.
-                    theta_from_enc = float((2.0 * math.pi / float(cfg.cpr)) * (cur_enc - enc_ref))
+                    denc = cur_enc - enc_prev
+                    # Startup/transport glitches can create unrealistic jumps. Ignore them.
+                    if abs(denc) <= max(0.35 * float(cfg.cpr), 2.0):
+                        theta_from_enc = float((2.0 * math.pi / float(cfg.cpr)) * (cur_enc - enc_ref))
+                    enc_prev = cur_enc
                 # Prefer encoder-based real angle so startup offset is always zeroed from
                 # the current encoder baseline; this avoids absolute-angle jumps.
                 theta_real = theta_from_enc if theta_from_enc is not None else theta
@@ -853,18 +778,17 @@ def main():
                     hw_pwm=snap["hw_pwm"],
                     mode_name=mode_name,
                     cfg=cfg,
-                    delay_ms=1000.0 * delay_sec_used,
                 )
                 terminal_status_line(status, width=cfg.terminal_status_width)
-                ros_node.publish_sim(theta, omega, alpha, model_out["tau_net"], cmd_u_used, 1000.0 * delay_sec_used, imu_msg, status)
+                ros_node.publish_sim(theta, omega, alpha, model_out["tau_net"], cmd_u_used, imu_msg, status)
 
                 wr.writerow([
                     wall_now, wall_now - wall_t0, mode_name,
-                    cmd_u_raw, cmd_u_used, snap["hw_pwm"], delay_sec_used, model_out["tau_net"],
+                    cmd_u_raw, cmd_u_used, snap["hw_pwm"], 0.0, model_out["tau_net"],
                     theta, omega, alpha,
                     snap["hw_enc"], snap["hw_arduino_ms"],
                     theta_real, omega_real, alpha_real,
-                    1000.0 * delay_sec_used,
+                    0.0,
                     sim_params["l_com"], sim_params["b_eq"], sim_params["tau_eq"], sim_params["k_t"], sim_params["i0"], sim_params["R"], sim_params["k_e"],
                     bus_v_raw, bus_v, current_A_raw, current_A, power_W,
                     model_out["tau_motor"], model_out["tau_res"], model_out["tau_visc"], model_out["tau_coul"], model_out["i_pred"], model_out["v_applied"],
@@ -894,7 +818,7 @@ def main():
         "config": asdict(cfg),
         "calibration_json": cfg.calibration_json if calib is not None else None,
         "radius_json": args.radius_json,
-        "estimated_delay_ms_final": 1000.0 * delay_sec_used,
+        "estimated_delay_ms_final": 0.0,
         "cpr_fixed": None if not np.isfinite(cfg.cpr) else float(cfg.cpr),
         "delay_locked": False,
         "best_eval": None,
@@ -906,21 +830,8 @@ def main():
     }
     with open(log_meta, "w", encoding="utf-8") as mf:
         json.dump(meta, mf, indent=2, ensure_ascii=False)
-    best_param_json = {
-        "log_csv": log_csv,
-        "model_init": sim_params,
-        "delay": {
-            "effective_control_delay_ms": 1000.0 * delay_sec_used,
-            "locked": False,
-        },
-    }
-    with open(log_best_param, "w", encoding="utf-8") as bf:
-        json.dump(best_param_json, bf, indent=2, ensure_ascii=False)
     print(f"saved csv  : {log_csv}")
     print(f"saved meta : {log_meta}")
-    print(f"saved best : {log_best_param}")
-    print(f"model params: {json.dumps(sim_params, ensure_ascii=False)}")
-    print(f"observed cmd->hw delay (final): {1000.0 * delay_sec_used:.1f} ms (logging-only, no compensation)")
 
     if viewer_proc is not None:
         try:

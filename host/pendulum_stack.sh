@@ -229,8 +229,25 @@ run_replay_validation() {
     file=$(select_csv_file)
     if [ -z "$file" ]; then return; fi
 
-    calib_json=$(select_json_file "Calibration JSON (optional)")
-    param_json=$(select_json_file "Parameter JSON (optional)")
+    calib_json=""
+    if [ -f "$BASE_DIR/run_logs/calibration_latest.json" ]; then
+        calib_json="$BASE_DIR/run_logs/calibration_latest.json"
+        echo "[INFO] Auto calibration JSON: $calib_json"
+    fi
+
+    param_json=""
+    csv_base="${file%.csv}"
+    if [ -f "${csv_base}_best_param.json" ]; then
+        param_json="${csv_base}_best_param.json"
+    elif [ -f "$BASE_DIR/rl_results/latest/best_params.json" ]; then
+        param_json="$BASE_DIR/rl_results/latest/best_params.json"
+    fi
+    if [ -n "$param_json" ]; then
+        echo "[INFO] Auto parameter JSON: $param_json"
+    else
+        echo "[INFO] Auto parameter JSON: 없음"
+    fi
+
     read -p "Replay speed [1.0]: " replay_speed
     replay_speed=${replay_speed:-1.0}
 

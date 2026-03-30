@@ -90,7 +90,7 @@ Config switches include:
 - `nominal_bus_voltage`
 - `ina_*` robust filter window/threshold parameters
 
-## Online identification (`chrono_core/estimation.py`)
+## Online identification (`chrono_core/signal_filter.py`)
 
 Current EKF augmented state:
 - `[theta, omega, l_com, b_eq, tau_eq, delay_sec]`
@@ -113,7 +113,7 @@ CSV/meta logs now include (when available):
 ## Modules
 - `chrono_core/config.py`: runtime/config defaults
 - `chrono_core/dynamics.py`: Chrono pendulum model + unified torque/electrical model
-- `chrono_core/estimation.py`: delay estimator, robust filters, EKF, convergence monitor
+- `chrono_core/signal_filter.py`: robust bus/current signal filtering
 - `chrono_core/calibration_io.py`: calibration/radius JSON loading
 - `plot_pendulum.py`: log plotting
 - `train_pendulum_rl.py`: offline replay RL calibration (primary)
