@@ -116,29 +116,15 @@ run_chrono_pendulum() {
 
     calib_json=$(select_json_file "Calibration JSON")
 
-    echo "--------------------------------"
-    echo "Self-fitting mode:"
-    echo "1) ON  (online parameter fitting)"
-    echo "2) OFF (pure simulation)"
-    read -p "Enter number: " fit_mode_choice
-    if [ "$fit_mode_choice" == "1" ]; then
-        self_fit_mode="on"
-    elif [ "$fit_mode_choice" == "2" ]; then
-        self_fit_mode="off"
-    else
-        echo "[ERROR] Invalid self-fitting selection"
-        return
-    fi
-
     if [ "$mode" == "1" ]; then
         echo "[INFO] chrono_pendulum (HOST mode)"
-        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode host --self-fit "$self_fit_mode")
+        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode host)
         [ -n "$param_json" ] && cmd+=(--parameter-json "$param_json")
         [ -n "$calib_json" ] && cmd+=(--calibration-json "$calib_json" --radius-json "$calib_json")
         "${cmd[@]}"
     elif [ "$mode" == "2" ]; then
         echo "[INFO] chrono_pendulum (JETSON mode)"
-        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode jetson --self-fit "$self_fit_mode")
+        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode jetson)
         [ -n "$param_json" ] && cmd+=(--parameter-json "$param_json")
         [ -n "$calib_json" ] && cmd+=(--calibration-json "$calib_json" --radius-json "$calib_json")
         "${cmd[@]}"
@@ -199,11 +185,6 @@ run_rl_fitting() {
     read -p "seed [7]: " seed
     seed=${seed:-7}
 
-    read -p "learn_delay ON? (y/n) [n]: " learn_delay_yn
-    learn_delay_yn=${learn_delay_yn:-n}
-    read -p "delay_override sec (blank=auto): " delay_override
-    read -p "delay_jitter_ms [3.0]: " delay_jitter_ms
-    delay_jitter_ms=${delay_jitter_ms:-3.0}
     read -p "domain_randomization ON? (y/n) [y]: " dr_yn
     dr_yn=${dr_yn:-y}
 
@@ -211,18 +192,13 @@ run_rl_fitting() {
     run_outdir="$BASE_DIR/rl_results/runs/$run_id"
     latest_link="$BASE_DIR/rl_results/latest"
 
-    cmd=(python3 "$BASE_DIR/train_pendulum_rl.py" --calibration_json "$calib_json" --outdir "$run_outdir" --num_episodes "$num_episodes" --batch_size "$batch_size" --seed "$seed" --delay_jitter_ms "$delay_jitter_ms")
+    cmd=(python3 "$BASE_DIR/train_pendulum_rl.py" --calibration_json "$calib_json" --outdir "$run_outdir" --num_episodes "$num_episodes" --batch_size "$batch_size" --seed "$seed")
     if [ "$use_csv_dir" == "1" ]; then
         cmd+=(--csv_dir "$CSV_DIR")
     else
         cmd+=(--csv "$file")
     fi
     [ -n "$param_json" ] && cmd+=(--parameter_json "$param_json")
-    [ -n "$delay_override" ] && cmd+=(--delay_override "$delay_override")
-
-    if [[ "$learn_delay_yn" =~ ^[Yy]$ ]]; then
-        cmd+=(--learn_delay)
-    fi
     if [[ "$dr_yn" =~ ^[Yy]$ ]]; then
         cmd+=(--domain_randomizationON)
     else
