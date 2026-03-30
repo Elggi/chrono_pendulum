@@ -231,6 +231,8 @@ def plot_simulation(df, csv_path: str, args):
     theta_real = col_any(df, ["theta_real"], n)
     omega_real = col_any(df, ["omega_real"], n)
     alpha_real = col_any(df, ["alpha_real"], n)
+    theta_sim = unwrap_and_zero(theta_sim)
+    theta_real = unwrap_and_zero(theta_real)
     if np.isfinite(theta_real).any():
         theta_real = moving_average(theta_real, args.real_theta_smooth)
     theta_sim = unwrap_and_zero(theta_sim)
