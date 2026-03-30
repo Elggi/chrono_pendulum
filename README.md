@@ -116,6 +116,8 @@ High-level structure:
   2. roll out replay dynamics over logged command inputs,
   3. compute reward from tracking error/cost,
   4. update policy/value networks with PPO clipped objective.
+<img width="445" height="141" alt="image" src="https://github.com/user-attachments/assets/1fe7a225-d6b6-4f91-af81-2c152dacc166" />
+
 - **Outputs**:
   - best parameter JSON,
   - replay CSV for direct comparison plots,
