@@ -106,6 +106,7 @@ PPO training is implemented in the replay optimization path (`train_pendulum_rl.
 
 High-level structure:
 - **Environment objective**: minimize mismatch between simulated and measured trajectories (theta/omega/alpha, plus optional smoothness penalties).
+<img width="987" height="141" alt="image" src="https://github.com/user-attachments/assets/eb1c06ff-0762-4e91-b76f-7dc785323409" />
 - **Action meaning**: update candidate surrogate parameters (e.g., `l_com`, `b_eq`, `tau_eq`, `K_u`) within bounded ranges.
 - **Episode loop**:
   1. sample/init parameters,
