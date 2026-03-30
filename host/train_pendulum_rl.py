@@ -5,6 +5,7 @@ import argparse
 import csv
 import json
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +49,7 @@ def train_with_sb3(env, val_env, args, history, param_hist):
         import gymnasium as gym
         from gymnasium import spaces
         from stable_baselines3 import PPO
+        from stable_baselines3.common.monitor import Monitor
     except Exception as exc:
         raise SystemExit(f"SB3 backend requested but dependencies are missing: {exc}")
 
@@ -71,33 +73,56 @@ def train_with_sb3(env, val_env, args, history, param_hist):
             return np.asarray(obs, dtype=np.float32), float(rew), bool(done), False, info
 
     sb3_env = _SB3ReplayEnv(env)
-    total_steps = max(1, int(args.num_episodes * env.max_refine_steps))
+    monitor_path = str(Path(args.outdir) / "sb3_monitor.csv")
+    sb3_env = Monitor(sb3_env, filename=monitor_path)
+    steps_per_episode = max(1, int(env.max_refine_steps))
+    tb_dir = args.tensorboard_log if args.tensorboard_log else str(Path(args.outdir) / "tensorboard")
     model = PPO(
         "MlpPolicy",
         sb3_env,
+        device=args.device,
         seed=args.seed,
         n_steps=max(env.max_refine_steps * 4, 32),
         batch_size=min(64, max(16, env.max_refine_steps * 2)),
         learning_rate=3e-4,
         gamma=args.gamma,
+        tensorboard_log=tb_dir,
         verbose=0,
     )
-    model.learn(total_timesteps=total_steps, progress_bar=False)
-
-    train_loss, train_rmse = evaluate_dataset(env, env.best_params)
-    val_loss, val_rmse = evaluate_dataset(val_env, env.best_params)
-    history["reward"].append(float(-train_loss))
-    history["train_loss"].append(float(train_loss))
-    history["val_loss"].append(float(val_loss))
-    history["rmse_theta"].append(float(train_rmse["theta"]))
-    history["rmse_omega"].append(float(train_rmse["omega"]))
-    history["rmse_alpha"].append(float(train_rmse["alpha"]))
-    history["val_rmse_theta"].append(float(val_rmse["theta"]))
-    history["val_rmse_omega"].append(float(val_rmse["omega"]))
-    history["val_rmse_alpha"].append(float(val_rmse["alpha"]))
-    for k in env.param_keys:
-        param_hist[k].append(float(env.best_params[k]))
-    return float(val_loss), env.best_params.copy()
+    best_val = float("inf")
+    best_params = env.best_params.copy()
+    t_start = time.time()
+    for ep in range(1, int(args.num_episodes) + 1):
+        model.learn(
+            total_timesteps=steps_per_episode,
+            progress_bar=False,
+            reset_num_timesteps=False,
+            tb_log_name="ppo_pendulum",
+        )
+        train_loss, train_rmse = evaluate_dataset(env, env.best_params)
+        val_loss, val_rmse = evaluate_dataset(val_env, env.best_params)
+        history["reward"].append(float(-train_loss))
+        history["train_loss"].append(float(train_loss))
+        history["val_loss"].append(float(val_loss))
+        history["rmse_theta"].append(float(train_rmse["theta"]))
+        history["rmse_omega"].append(float(train_rmse["omega"]))
+        history["rmse_alpha"].append(float(train_rmse["alpha"]))
+        history["val_rmse_theta"].append(float(val_rmse["theta"]))
+        history["val_rmse_omega"].append(float(val_rmse["omega"]))
+        history["val_rmse_alpha"].append(float(val_rmse["alpha"]))
+        for k in env.param_keys:
+            param_hist[k].append(float(env.best_params[k]))
+        if val_loss < best_val:
+            best_val = float(val_loss)
+            best_params = env.best_params.copy()
+        if ep == 1 or ep % max(1, int(args.log_every_episodes)) == 0 or ep == int(args.num_episodes):
+            elapsed = time.time() - t_start
+            print(
+                f"[RL] ep {ep}/{args.num_episodes} | "
+                f"train_loss={train_loss:.5f} val_loss={val_loss:.5f} | "
+                f"best_val={best_val:.5f} | elapsed={elapsed:.1f}s"
+            )
+    return best_val, best_params
 
 
 def gather_csv_paths(csv: str | None, csv_dir: str | None):
@@ -141,6 +166,7 @@ def maybe_prompt(args, parser):
     args.lam = ask_float("lam", args.lam)
     args.kl_targ = ask_float("kl_targ", args.kl_targ)
     args.batch_size = ask_int("batch_size", args.batch_size)
+    args.device = input(f"device [cpu/cuda] [{args.device}]: ").strip() or args.device
     args.learn_delay = ask_bool("learn_delay", args.learn_delay)
     args.domain_randomization = ask_bool("domain_randomization", args.domain_randomization)
     return args
@@ -217,6 +243,7 @@ def main():
     ap.add_argument("-l", "--lam", type=float, default=0.98)
     ap.add_argument("-k", "--kl_targ", type=float, default=0.003)
     ap.add_argument("-b", "--batch_size", type=int, default=20)
+    ap.add_argument("--device", type=str, default="cpu")
 
     ap.add_argument("--learn_delay", action="store_true", default=False)
     ap.add_argument("--delay_override", type=float, default=None)
@@ -226,6 +253,8 @@ def main():
     ap.set_defaults(domain_randomization=True)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--max_refine_steps", type=int, default=12)
+    ap.add_argument("--log_every_episodes", type=int, default=10)
+    ap.add_argument("--tensorboard_log", type=str, default="")
 
     args = maybe_prompt(ap.parse_args(), ap)
 
@@ -289,6 +318,8 @@ def main():
     metadata = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "settings": vars(args),
+        "calibration_json": args.calibration_json,
+        "cpr": None if not np.isfinite(cfg.cpr) else float(cfg.cpr),
         "dataset_files": [str(p) for p in csv_paths],
         "reward_weights": env.reward_weights,
         "randomization": {
@@ -297,6 +328,8 @@ def main():
         },
         "best_validation_score": best_val,
         "delay_estimates_sec": delay_map,
+        "tensorboard_log": args.tensorboard_log if args.tensorboard_log else str(outdir / "tensorboard"),
+        "sb3_monitor_csv": str(outdir / "sb3_monitor.csv"),
     }
     with open(outdir / "training_metadata.json", "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
@@ -327,6 +360,9 @@ def main():
     plot_overlay(rep.t, rep.hw_pwm, sim["cmd_delayed"], "PWM", outdir / "overlay_pwm_aligned.png")
 
     print("Saved outputs in", outdir)
+    print(f"[INFO] SB3 Monitor CSV: {outdir / 'sb3_monitor.csv'}")
+    print(f"[INFO] TensorBoard logdir: {args.tensorboard_log if args.tensorboard_log else str(outdir / 'tensorboard')}")
+    print(f"[INFO] TensorBoard run: tensorboard --logdir \"{args.tensorboard_log if args.tensorboard_log else str(outdir / 'tensorboard')}\"")
 
 
 if __name__ == "__main__":

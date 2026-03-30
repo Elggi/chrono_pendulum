@@ -32,6 +32,30 @@ def load_meta_if_exists(csv_path):
         return json.load(f)
 
 
+def load_cpr_fallback(csv_path: str):
+    folder = os.path.dirname(csv_path)
+    candidates = [
+        os.path.join(folder, "training_metadata.json"),
+        os.path.join(os.path.dirname(folder), "training_metadata.json"),
+    ]
+    for p in candidates:
+        if not os.path.exists(p):
+            continue
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            cal = meta.get("settings", {}).get("calibration_json") or meta.get("calibration_json")
+            if cal and os.path.exists(cal):
+                with open(cal, "r", encoding="utf-8") as cf:
+                    calib = json.load(cf)
+                sm = calib.get("summary", {})
+                if sm.get("mean_cpr") is not None:
+                    return float(sm["mean_cpr"])
+        except Exception:
+            continue
+    return None
+
+
 def moving_average(x: np.ndarray, win: int):
     if win <= 1:
         return x.copy()
@@ -146,6 +170,10 @@ def plot_simulation(df, csv_path: str, args):
     cpr = args.counts_per_revolution
     if cpr is None and meta is not None and meta.get("cpr_mean") is not None:
         cpr = float(meta["cpr_mean"])
+    if cpr is None and meta is not None and meta.get("cpr_fixed") is not None:
+        cpr = float(meta["cpr_fixed"])
+    if cpr is None:
+        cpr = load_cpr_fallback(csv_path)
 
     if "wall_elapsed" in df.columns:
         t = col_to_numpy(df, "wall_elapsed")
@@ -164,14 +192,13 @@ def plot_simulation(df, csv_path: str, args):
     omega_sim = col_any(df, ["omega", "sim_omega"], n)
     alpha_sim = col_any(df, ["alpha", "sim_alpha"], n)
     cmd_u = col_any(df, ["cmd_u_raw", "cmd_u"], n)
-    cmd_used = col_any(df, ["cmd_u_used", "cmd_u", "hw_pwm"], n)
     hw_pwm = col_any(df, ["hw_pwm"], n)
     enc = col_any(df, ["hw_enc"], n)
-    delay_ms = col_any(df, ["delay_ms"], n)
-    J_est = col_any(df, ["J_est"], n)
-    b_est = col_any(df, ["b_est"], n)
-    tau_c_est = col_any(df, ["tau_c_est"], n)
-    mgl_est = col_any(df, ["mgl_est"], n)
+    tau_cmd = col_any(df, ["tau_cmd"], n)
+    tau_motor = col_any(df, ["tau_motor"], n)
+    tau_res = col_any(df, ["tau_res"], n)
+    tau_visc = col_any(df, ["tau_visc"], n)
+    tau_coul = col_any(df, ["tau_coul"], n)
 
     if not np.isfinite(theta_sim).any() and all(k in df.columns for k in ["imu_qx", "imu_qy", "imu_qz", "imu_qw"]):
         qx = col_to_numpy(df, "imu_qx")
@@ -193,6 +220,8 @@ def plot_simulation(df, csv_path: str, args):
     theta_real = col_any(df, ["theta_real", "est_theta"], n)
     omega_real = col_any(df, ["omega_real", "est_omega"], n)
     alpha_real = col_any(df, ["alpha_real", "est_alpha"], n)
+    if np.isfinite(theta_real).any():
+        theta_real = moving_average(theta_real, args.real_theta_smooth)
     has_real = np.isfinite(theta_real).any() or np.isfinite(omega_real).any() or np.isfinite(alpha_real).any()
     if not has_real and cpr is not None and np.isfinite(enc).any():
         theta_real = derive_theta_from_encoder(enc, cpr, sign=args.theta_sign, offset=args.theta_offset)
@@ -219,13 +248,11 @@ def plot_simulation(df, csv_path: str, args):
     ax = axes.ravel()
 
     ax[0].plot(t_cmd, cmd_u, label="cmd_u")
-    ax[0].plot(t, cmd_used, label="cmd_used")
     ax[0].plot(t, hw_pwm, label="hw_pwm")
-    ax[0].plot(t, delay_ms, label="delay_ms")
     ax[0].grid(True)
     ax[0].legend()
     ax[0].set_xlabel("time [s]")
-    ax[0].set_title("Command / PWM / delay")
+    ax[0].set_title("Command / PWM")
 
     ax[1].plot(t, theta_sim, label="theta sim")
     if np.isfinite(theta_real).any():
@@ -254,9 +281,26 @@ def plot_simulation(df, csv_path: str, args):
     ax[3].set_ylabel("rad/s^2")
     ax[3].set_title("Alpha")
 
+    if args.recompute_real_derivatives and np.isfinite(theta_real).any():
+        dt = np.diff(t, prepend=t[0])
+        if len(dt) > 1:
+            dt[0] = dt[1]
+        dt[dt <= 0] = np.median(dt[dt > 0]) if np.any(dt > 0) else 0.01
+        omega_real = moving_average(np.gradient(theta_real, dt), args.real_derivative_smooth)
+        alpha_real = moving_average(np.gradient(omega_real, dt), args.real_derivative_smooth)
+
     e_theta = theta_sim - theta_real if np.isfinite(theta_real).any() else np.full(n, np.nan)
     e_omega = omega_sim - omega_real if np.isfinite(omega_real).any() else np.full(n, np.nan)
     e_alpha = alpha_sim - alpha_real if np.isfinite(alpha_real).any() else np.full(n, np.nan)
+    ignore_mask = t < max(args.ignore_error_initial_sec, 0.0)
+    e_theta[ignore_mask] = np.nan
+    e_omega[ignore_mask] = np.nan
+    e_alpha[ignore_mask] = np.nan
+    for arr in (e_theta, e_omega, e_alpha):
+        finite = np.isfinite(arr)
+        if np.any(finite):
+            thr = np.quantile(np.abs(arr[finite]), args.error_clip_quantile)
+            arr[np.abs(arr) > max(thr, 1e-9)] = np.nan
     if np.isfinite(e_theta).any():
         ax[4].plot(t, np.sqrt(np.maximum(e_theta * e_theta, 0.0)), label="|e_theta|")
     if np.isfinite(e_omega).any():
@@ -268,18 +312,21 @@ def plot_simulation(df, csv_path: str, args):
     ax[4].set_xlabel("time [s]")
     ax[4].set_title("Absolute tracking error")
 
-    if np.isfinite(J_est).any():
-        ax[5].plot(t, J_est, label="J_est")
-    if np.isfinite(b_est).any():
-        ax[5].plot(t, b_est, label="b_est")
-    if np.isfinite(tau_c_est).any():
-        ax[5].plot(t, tau_c_est, label="tau_c_est")
-    if np.isfinite(mgl_est).any():
-        ax[5].plot(t, mgl_est, label="mgl_est")
+    if np.isfinite(tau_cmd).any():
+        ax[5].plot(t, tau_cmd, label="tau_cmd(net)")
+    if np.isfinite(tau_motor).any():
+        ax[5].plot(t, tau_motor, label="tau_motor")
+    if np.isfinite(tau_res).any():
+        ax[5].plot(t, tau_res, label="tau_res(total)")
+    if np.isfinite(tau_visc).any():
+        ax[5].plot(t, tau_visc, label="tau_visc")
+    if np.isfinite(tau_coul).any():
+        ax[5].plot(t, tau_coul, label="tau_coul")
     ax[5].grid(True)
     ax[5].legend()
     ax[5].set_xlabel("time [s]")
-    ax[5].set_title("Estimated parameter trajectories")
+    ax[5].set_ylabel("N·m")
+    ax[5].set_title("Torque analysis")
 
     fig.tight_layout()
     plt.show()
@@ -336,6 +383,13 @@ def main():
     ap.add_argument("--theta-sign", type=float, default=1.0)
     ap.add_argument("--theta-offset", type=float, default=0.0)
     ap.add_argument("--alpha-smooth", type=int, default=5)
+    ap.add_argument("--real-theta-smooth", type=int, default=7)
+    ap.add_argument("--real-derivative-smooth", type=int, default=11)
+    ap.add_argument("--recompute-real-derivatives", dest="recompute_real_derivatives", action="store_true")
+    ap.add_argument("--use-logged-real-derivatives", dest="recompute_real_derivatives", action="store_false")
+    ap.set_defaults(recompute_real_derivatives=True)
+    ap.add_argument("--ignore-error-initial-sec", type=float, default=0.35)
+    ap.add_argument("--error-clip-quantile", type=float, default=0.995)
     ap.add_argument("--apply-cmd-delay-from-meta", action="store_true")
     ap.add_argument("--history-csv", default=None, help="RL history.csv path (for RL summary plot)")
     ap.add_argument("--rl-dir", default=None, help="directory containing history.csv and replay_best.csv")
