@@ -150,6 +150,7 @@ def plot_simulation(df, csv_path: str, args):
     if "wall_elapsed" in df.columns:
         t = col_to_numpy(df, "wall_elapsed")
     elif "sim_time" in df.columns:
+        # backward compatibility with old logs only
         t = col_to_numpy(df, "sim_time")
     elif "wall_time" in df.columns:
         tw = col_to_numpy(df, "wall_time")
@@ -163,14 +164,13 @@ def plot_simulation(df, csv_path: str, args):
     omega_sim = col_any(df, ["omega", "sim_omega"], n)
     alpha_sim = col_any(df, ["alpha", "sim_alpha"], n)
     cmd_u = col_any(df, ["cmd_u_raw", "cmd_u"], n)
-    cmd_used = col_any(df, ["cmd_u_used", "cmd_u", "hw_pwm"], n)
     hw_pwm = col_any(df, ["hw_pwm"], n)
     enc = col_any(df, ["hw_enc"], n)
-    delay_ms = col_any(df, ["delay_ms"], n)
-    J_est = col_any(df, ["J_est"], n)
-    b_est = col_any(df, ["b_est"], n)
-    tau_c_est = col_any(df, ["tau_c_est"], n)
-    mgl_est = col_any(df, ["mgl_est"], n)
+    tau_cmd = col_any(df, ["tau_cmd"], n)
+    tau_motor = col_any(df, ["tau_motor"], n)
+    tau_res = col_any(df, ["tau_res"], n)
+    tau_visc = col_any(df, ["tau_visc"], n)
+    tau_coul = col_any(df, ["tau_coul"], n)
 
     if not np.isfinite(theta_sim).any() and all(k in df.columns for k in ["imu_qx", "imu_qy", "imu_qz", "imu_qw"]):
         qx = col_to_numpy(df, "imu_qx")
@@ -218,13 +218,11 @@ def plot_simulation(df, csv_path: str, args):
     ax = axes.ravel()
 
     ax[0].plot(t_cmd, cmd_u, label="cmd_u")
-    ax[0].plot(t, cmd_used, label="cmd_used")
     ax[0].plot(t, hw_pwm, label="hw_pwm")
-    ax[0].plot(t, delay_ms, label="delay_ms")
     ax[0].grid(True)
     ax[0].legend()
     ax[0].set_xlabel("time [s]")
-    ax[0].set_title("Command / PWM / delay")
+    ax[0].set_title("Command / PWM")
 
     ax[1].plot(t, theta_sim, label="theta sim")
     if np.isfinite(theta_real).any():
@@ -267,18 +265,64 @@ def plot_simulation(df, csv_path: str, args):
     ax[4].set_xlabel("time [s]")
     ax[4].set_title("Absolute tracking error")
 
-    if np.isfinite(J_est).any():
-        ax[5].plot(t, J_est, label="J_est")
-    if np.isfinite(b_est).any():
-        ax[5].plot(t, b_est, label="b_est")
-    if np.isfinite(tau_c_est).any():
-        ax[5].plot(t, tau_c_est, label="tau_c_est")
-    if np.isfinite(mgl_est).any():
-        ax[5].plot(t, mgl_est, label="mgl_est")
+    if np.isfinite(tau_cmd).any():
+        ax[5].plot(t, tau_cmd, label="tau_cmd(net)")
+    if np.isfinite(tau_motor).any():
+        ax[5].plot(t, tau_motor, label="tau_motor")
+    if np.isfinite(tau_res).any():
+        ax[5].plot(t, tau_res, label="tau_res(total)")
+    if np.isfinite(tau_visc).any():
+        ax[5].plot(t, tau_visc, label="tau_visc")
+    if np.isfinite(tau_coul).any():
+        ax[5].plot(t, tau_coul, label="tau_coul")
     ax[5].grid(True)
     ax[5].legend()
     ax[5].set_xlabel("time [s]")
-    ax[5].set_title("Estimated parameter trajectories")
+    ax[5].set_ylabel("N·m")
+    ax[5].set_title("Torque analysis")
+
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_rl_summary(history_csv: str, replay_csv: str):
+    if pd is None:
+        raise RuntimeError("pandas is required for --history-csv/--rl-dir plotting.")
+    h = pd.read_csv(history_csv)
+    r = pd.read_csv(replay_csv)
+
+    fig, axs = plt.subplots(2, 2, figsize=(14, 9), num="RL + Replay Summary")
+
+    ep = h["episode"].to_numpy(dtype=float) if "episode" in h.columns else np.arange(len(h), dtype=float)
+    if "reward" in h.columns:
+        axs[0, 0].plot(ep, h["reward"].to_numpy(dtype=float), label="reward")
+    axs[0, 0].set_title("Episode Reward")
+    axs[0, 0].set_xlabel("episode")
+    axs[0, 0].grid(True, alpha=0.3)
+
+    if "train_loss" in h.columns:
+        axs[0, 1].plot(ep, h["train_loss"].to_numpy(dtype=float), label="train_loss")
+    if "val_loss" in h.columns:
+        axs[0, 1].plot(ep, h["val_loss"].to_numpy(dtype=float), label="val_loss")
+    axs[0, 1].set_title("Loss")
+    axs[0, 1].set_xlabel("episode")
+    axs[0, 1].legend(loc="best")
+    axs[0, 1].grid(True, alpha=0.3)
+
+    t = r["wall_elapsed"].to_numpy(dtype=float) if "wall_elapsed" in r.columns else r["sim_time"].to_numpy(dtype=float)
+    axs[1, 0].plot(t, r["theta_real"].to_numpy(dtype=float), label="theta_real")
+    axs[1, 0].plot(t, r["theta"].to_numpy(dtype=float), label="theta_sim")
+    axs[1, 0].set_title("Replay Theta Overlay")
+    axs[1, 0].set_xlabel("time [s]")
+    axs[1, 0].legend(loc="best")
+    axs[1, 0].grid(True, alpha=0.3)
+
+    axs[1, 1].plot(t, r["omega_real"].to_numpy(dtype=float), label="omega_real")
+    axs[1, 1].plot(t, r["omega"].to_numpy(dtype=float), label="omega_sim")
+    axs[1, 1].set_title("Replay Omega Overlay")
+    axs[1, 1].set_xlabel("time [s]")
+    axs[1, 1].legend(loc="best")
+    axs[1, 1].grid(True, alpha=0.3)
 
     fig.tight_layout()
     plt.show()
@@ -293,7 +337,20 @@ def main():
     ap.add_argument("--theta-offset", type=float, default=0.0)
     ap.add_argument("--alpha-smooth", type=int, default=5)
     ap.add_argument("--apply-cmd-delay-from-meta", action="store_true")
+    ap.add_argument("--history-csv", default=None, help="RL history.csv path (for RL summary plot)")
+    ap.add_argument("--rl-dir", default=None, help="directory containing history.csv and replay_best.csv")
     args = ap.parse_args()
+
+    if args.rl_dir is not None:
+        history_csv = os.path.join(args.rl_dir, "history.csv")
+        replay_csv = os.path.join(args.rl_dir, "replay_best.csv")
+        plot_rl_summary(history_csv, replay_csv)
+        return
+    if args.history_csv is not None:
+        if args.csv is None:
+            raise SystemExit("--history-csv requires --csv replay file.")
+        plot_rl_summary(args.history_csv, args.csv)
+        return
 
     csv_path = args.csv if args.csv is not None else find_latest_csv(args.dir)
     df = load_csv_frame(csv_path)

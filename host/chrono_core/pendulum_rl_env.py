@@ -41,8 +41,37 @@ def _safe_col(df: pd.DataFrame, col: str, fallback: float = 0.0):
 def _gradient(x: np.ndarray, dt: np.ndarray):
     if len(x) < 2:
         return np.zeros_like(x)
-    h = np.maximum(dt, 1e-6)
-    return np.gradient(x, h)
+    h = np.maximum(np.asarray(dt, dtype=float), 1e-6)
+    t = np.cumsum(h)
+    t -= t[0]
+    # np.gradient with time-axis coordinates is numerically safer than passing raw dt.
+    return np.gradient(x, t, edge_order=1)
+
+
+def _sanitize_timeseries(arr: np.ndarray):
+    out = np.asarray(arr, dtype=float).copy()
+    n = len(out)
+    if n == 0:
+        return out
+    good = np.isfinite(out)
+    if np.all(good):
+        return out
+    if not np.any(good):
+        out[:] = 0.0
+        return out
+    idx = np.arange(n, dtype=float)
+    out[~good] = np.interp(idx[~good], idx[good], out[good])
+    return out
+
+
+def _winsorize_abs(x: np.ndarray, q: float = 99.5):
+    y = np.asarray(x, dtype=float).copy()
+    if len(y) == 0:
+        return y
+    lim = float(np.nanpercentile(np.abs(y), q))
+    if np.isfinite(lim) and lim > 0.0:
+        y = np.clip(y, -lim, lim)
+    return y
 
 
 def estimate_delay_from_signals(t: np.ndarray, cmd_u: np.ndarray, hw_pwm: np.ndarray, max_delay_sec: float = 0.25):
@@ -91,14 +120,19 @@ def simulate_trajectory(traj: ReplayTrajectory, params: dict[str, float], cfg: B
     tau_res = np.zeros(n, dtype=float)
     cmd_delayed = shifted_signal(t, traj.cmd_u, delay_sec)
 
-    theta[0] = float(traj.theta_real[0])
-    omega[0] = float(traj.omega_real[0])
+    theta[0] = float(traj.theta_real[0]) if np.isfinite(traj.theta_real[0]) else 0.0
+    omega[0] = float(traj.omega_real[0]) if np.isfinite(traj.omega_real[0]) else 0.0
 
     m_total = cfg.link_mass + cfg.imu_mass
     J_pivot = max(float(params["J_cm_base"] + m_total * (params["l_com"] ** 2)), 1e-6)
+    max_theta = 6.0 * math.pi
+    max_omega = 2.0e3
 
     for k in range(n - 1):
         h = max(float(dt[k]), 1e-6)
+        if not np.isfinite(theta[k]) or not np.isfinite(omega[k]):
+            theta[k] = 0.0
+            omega[k] = 0.0
         u = cmd_delayed[k]
         duty = np.clip(u / max(cfg.pwm_limit, 1e-9), -1.0, 1.0)
         vb = traj.bus_v[k] if np.isfinite(traj.bus_v[k]) and traj.bus_v[k] > 0.0 else cfg.nominal_bus_voltage
@@ -108,11 +142,13 @@ def simulate_trajectory(traj: ReplayTrajectory, params: dict[str, float], cfg: B
         tm = params["k_t"] * i_eff
         tv = params["b_eq"] * omega[k]
         tc = params["tau_eq"] * math.tanh(omega[k] / max(cfg.tanh_eps, 1e-6))
-        tg = m_total * cfg.gravity * params["l_com"] * math.sin(theta[k])
+        th_k = float(np.clip(theta[k], -max_theta, max_theta))
+        tg = m_total * cfg.gravity * params["l_com"] * math.sin(th_k)
         domega = (tm - tv - tc - tg) / J_pivot
+        domega = float(np.clip(domega, -1.0e6, 1.0e6))
 
-        theta[k + 1] = theta[k] + h * omega[k]
-        omega[k + 1] = omega[k] + h * domega
+        theta[k + 1] = float(np.clip(theta[k] + h * omega[k], -max_theta, max_theta))
+        omega[k + 1] = float(np.clip(omega[k] + h * domega, -max_omega, max_omega))
 
         i_pred[k] = i_eff
         v_applied[k] = v
@@ -144,10 +180,24 @@ def simulate_trajectory(traj: ReplayTrajectory, params: dict[str, float], cfg: B
     }
 
 
-def compute_error_features(traj: ReplayTrajectory, sim: dict[str, np.ndarray], delay_quality: float = 1.0):
-    e_th = sim["theta"] - traj.theta_real
-    e_om = sim["omega"] - traj.omega_real
-    e_al = sim["alpha"] - traj.alpha_real
+def compute_error_features(
+    traj: ReplayTrajectory,
+    sim: dict[str, np.ndarray],
+    delay_quality: float = 1.0,
+    align_shift_sec: float = 0.0,
+):
+    if abs(float(align_shift_sec)) > 1e-9:
+        th_sim = shifted_signal(traj.t, sim["theta"], float(align_shift_sec))
+        om_sim = shifted_signal(traj.t, sim["omega"], float(align_shift_sec))
+        al_sim = shifted_signal(traj.t, sim["alpha"], float(align_shift_sec))
+    else:
+        th_sim = sim["theta"]
+        om_sim = sim["omega"]
+        al_sim = sim["alpha"]
+
+    e_th = _winsorize_abs(th_sim - traj.theta_real, q=99.5)
+    e_om = _winsorize_abs(om_sim - traj.omega_real, q=99.5)
+    e_al = _winsorize_abs(al_sim - traj.alpha_real, q=99.5)
 
     rmse_theta = float(np.sqrt(np.mean(e_th ** 2)))
     rmse_omega = float(np.sqrt(np.mean(e_om ** 2)))
@@ -155,7 +205,7 @@ def compute_error_features(traj: ReplayTrajectory, sim: dict[str, np.ndarray], d
 
     bias_theta = float(np.mean(e_th))
     bias_omega = float(np.mean(e_om))
-    peak_amp_mismatch = float(np.max(np.abs(sim["theta"])) - np.max(np.abs(traj.theta_real)))
+    peak_amp_mismatch = float(np.max(np.abs(th_sim)) - np.max(np.abs(traj.theta_real)))
 
     return {
         "rmse_theta": rmse_theta,
@@ -183,7 +233,13 @@ def weighted_loss(feat: dict[str, float], weights: dict[str, float]):
 def load_replay_csv(path: str | Path, cfg: BridgeConfig, delay_override: float | None = None):
     p = Path(path)
     df = pd.read_csv(p)
-    t = _safe_col(df, "sim_time")
+    if "wall_elapsed" in df.columns:
+        t = _safe_col(df, "wall_elapsed")
+    elif "wall_time" in df.columns:
+        wt = _safe_col(df, "wall_time")
+        t = wt - wt[0] if len(wt) > 0 else wt
+    else:
+        t = np.arange(len(df), dtype=float) * cfg.step
     if len(t) < 2:
         t = np.arange(len(df), dtype=float) * cfg.step
     dt = np.diff(t, prepend=t[0])
@@ -204,14 +260,35 @@ def load_replay_csv(path: str | Path, cfg: BridgeConfig, delay_override: float |
         omega_real = _safe_col(df, "omega")
     if not np.isfinite(alpha_real).any():
         alpha_real = _safe_col(df, "alpha")
+    theta_real = _sanitize_timeseries(theta_real)
+    omega_real = _sanitize_timeseries(omega_real)
+    alpha_real = _sanitize_timeseries(alpha_real)
+    omega_from_theta = _gradient(theta_real, dt)
+    alpha_from_omega = _gradient(omega_from_theta, dt)
+
+    # If runtime logging briefly broke real-state channels, repair them from theta.
+    if float(np.nanpercentile(np.abs(omega_real), 99.5)) > 80.0 and float(np.nanpercentile(np.abs(omega_from_theta), 99.5)) < 50.0:
+        omega_real = omega_from_theta
+    if float(np.nanpercentile(np.abs(alpha_real), 99.5)) > 800.0 and float(np.nanpercentile(np.abs(alpha_from_omega), 99.5)) < 300.0:
+        alpha_real = alpha_from_omega
+
+    omega_real = _winsorize_abs(omega_real, q=99.5)
+    alpha_real = _winsorize_abs(alpha_real, q=99.5)
 
     bus_v = _safe_col(df, "bus_v_filtered", cfg.nominal_bus_voltage)
     current_a = _safe_col(df, "current_filtered_A", 0.0)
     power_w = _safe_col(df, "power_raw_W", 0.0)
 
-    delay_sec = estimate_delay_from_signals(t, cmd_u, hw_pwm)
     if delay_override is not None:
         delay_sec = float(delay_override)
+    elif "delay_sec_est" in df.columns:
+        delay_arr = _safe_col(df, "delay_sec_est", cfg.delay_init_ms / 1000.0)
+        delay_sec = float(np.median(delay_arr)) if len(delay_arr) > 0 else (cfg.delay_init_ms / 1000.0)
+    elif "delay_ms" in df.columns:
+        delay_ms_arr = _safe_col(df, "delay_ms", cfg.delay_init_ms)
+        delay_sec = 1e-3 * float(np.median(delay_ms_arr)) if len(delay_ms_arr) > 0 else (cfg.delay_init_ms / 1000.0)
+    else:
+        delay_sec = cfg.delay_init_ms / 1000.0
 
     return ReplayTrajectory(
         name=p.name,
@@ -317,7 +394,7 @@ class PendulumRLEnv:
         for traj in self.trajectories:
             d = float(params.get("delay_sec", traj.delay_sec_est + jitter))
             sim = simulate_trajectory(traj, params, self.cfg, delay_sec=max(0.0, d))
-            f = compute_error_features(traj, sim, delay_quality=1.0)
+            f = compute_error_features(traj, sim, delay_quality=1.0, align_shift_sec=traj.delay_sec_est)
             feats.append(f)
             losses.append(weighted_loss(f, self.reward_weights))
         loss = float(np.mean(losses)) if losses else 0.0
@@ -408,6 +485,7 @@ def build_init_params(cfg: BridgeConfig, calibration: dict[str, Any] | None = No
         "i0": float(cfg.i0_init),
         "R": float(cfg.R_init),
         "k_e": float(cfg.k_e_init),
+        "delay_sec": float(cfg.delay_init_ms) / 1000.0,
     }
 
     def _merge(src):
@@ -419,6 +497,10 @@ def build_init_params(cfg: BridgeConfig, calibration: dict[str, Any] | None = No
 
     if calibration:
         _merge(calibration.get("model_init", calibration.get("best_params", {})))
+        if isinstance(calibration.get("delay"), dict) and "effective_control_delay_ms" in calibration["delay"]:
+            out["delay_sec"] = float(calibration["delay"]["effective_control_delay_ms"]) / 1000.0
     if parameter_json:
         _merge(parameter_json.get("model_init", parameter_json.get("best_params", parameter_json)))
+        if isinstance(parameter_json.get("delay"), dict) and "effective_control_delay_ms" in parameter_json["delay"]:
+            out["delay_sec"] = float(parameter_json["delay"]["effective_control_delay_ms"]) / 1000.0
     return out

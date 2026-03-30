@@ -24,12 +24,26 @@ select_csv_file() {
     echo "--------------------------------" >&2
     echo "[INFO] CSV 파일 선택" >&2
 
-    if [ ! -d "$CSV_DIR" ]; then
-        echo "[ERROR] run_logs 폴더 없음" >&2
+    local search_dirs=("$BASE_DIR/run_logs" "$BASE_DIR/rl_results")
+    local files=()
+    local d
+    for d in "${search_dirs[@]}"; do
+        if [ -d "$d" ]; then
+            while IFS= read -r -d '' f; do
+                files+=("$f")
+            done < <(find "$d" -type f -name "*.csv" -print0 2>/dev/null)
+        fi
+    done
+
+    if [ "${#files[@]}" -eq 0 ]; then
+        echo "[ERROR] 선택 가능한 CSV가 없습니다 (run_logs, rl_results 확인)." >&2
         return 1
     fi
 
-    select file in "$CSV_DIR"/*.csv; do
+    IFS=$'\n' files=($(printf "%s\n" "${files[@]}" | sort))
+    unset IFS
+
+    select file in "${files[@]}"; do
         if [ -n "$file" ]; then
             echo "[INFO] Selected: $file" >&2
             echo "$file"
@@ -102,31 +116,17 @@ run_chrono_pendulum() {
 
     calib_json=$(select_json_file "Calibration JSON")
 
-    echo "--------------------------------"
-    echo "Self-fitting mode:"
-    echo "1) ON  (online parameter fitting)"
-    echo "2) OFF (pure simulation)"
-    read -p "Enter number: " fit_mode_choice
-    if [ "$fit_mode_choice" == "1" ]; then
-        self_fit_mode="on"
-    elif [ "$fit_mode_choice" == "2" ]; then
-        self_fit_mode="off"
-    else
-        echo "[ERROR] Invalid self-fitting selection"
-        return
-    fi
-
     if [ "$mode" == "1" ]; then
         echo "[INFO] chrono_pendulum (HOST mode)"
-        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode host --self-fit "$self_fit_mode")
-        [ -n "$param_json" ] && cmd+=(--calibration-json "$param_json")
-        [ -n "$calib_json" ] && cmd+=(--radius-json "$calib_json")
+        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode host)
+        [ -n "$param_json" ] && cmd+=(--parameter-json "$param_json")
+        [ -n "$calib_json" ] && cmd+=(--calibration-json "$calib_json" --radius-json "$calib_json")
         "${cmd[@]}"
     elif [ "$mode" == "2" ]; then
         echo "[INFO] chrono_pendulum (JETSON mode)"
-        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode jetson --self-fit "$self_fit_mode")
-        [ -n "$param_json" ] && cmd+=(--calibration-json "$param_json")
-        [ -n "$calib_json" ] && cmd+=(--radius-json "$calib_json")
+        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode jetson)
+        [ -n "$param_json" ] && cmd+=(--parameter-json "$param_json")
+        [ -n "$calib_json" ] && cmd+=(--calibration-json "$calib_json" --radius-json "$calib_json")
         "${cmd[@]}"
     else
         echo "[ERROR] Invalid selection"
@@ -185,38 +185,75 @@ run_rl_fitting() {
     read -p "seed [7]: " seed
     seed=${seed:-7}
 
-    read -p "prefit ON? (y/n) [y]: " prefit_yn
-    prefit_yn=${prefit_yn:-y}
-    read -p "learn_delay ON? (y/n) [n]: " learn_delay_yn
-    learn_delay_yn=${learn_delay_yn:-n}
-    read -p "delay_override sec (blank=auto): " delay_override
-    read -p "delay_jitter_ms [3.0]: " delay_jitter_ms
-    delay_jitter_ms=${delay_jitter_ms:-3.0}
     read -p "domain_randomization ON? (y/n) [y]: " dr_yn
     dr_yn=${dr_yn:-y}
 
-    cmd=(python3 "$BASE_DIR/train_pendulum_rl.py" --calibration_json "$calib_json" --outdir "$BASE_DIR/rl_results" --renderOFF --num_episodes "$num_episodes" --batch_size "$batch_size" --seed "$seed" --delay_jitter_ms "$delay_jitter_ms")
+    run_id=$(date -u +"run_%Y%m%d_%H%M%S")
+    run_outdir="$BASE_DIR/rl_results/runs/$run_id"
+    latest_link="$BASE_DIR/rl_results/latest"
+
+    cmd=(python3 "$BASE_DIR/train_pendulum_rl.py" --calibration_json "$calib_json" --outdir "$run_outdir" --num_episodes "$num_episodes" --batch_size "$batch_size" --seed "$seed")
     if [ "$use_csv_dir" == "1" ]; then
         cmd+=(--csv_dir "$CSV_DIR")
     else
         cmd+=(--csv "$file")
     fi
     [ -n "$param_json" ] && cmd+=(--parameter_json "$param_json")
-    [ -n "$delay_override" ] && cmd+=(--delay_override "$delay_override")
-
-    if [[ "$prefit_yn" =~ ^[Yy]$ ]]; then
-        cmd+=(--prefitON)
-    else
-        cmd+=(--prefitOFF)
-    fi
-    if [[ "$learn_delay_yn" =~ ^[Yy]$ ]]; then
-        cmd+=(--learn_delay)
-    fi
     if [[ "$dr_yn" =~ ^[Yy]$ ]]; then
         cmd+=(--domain_randomizationON)
     else
         cmd+=(--domain_randomizationOFF)
     fi
+    echo "[INFO] command: ${cmd[*]}"
+    "${cmd[@]}"
+
+    mkdir -p "$BASE_DIR/rl_results"
+    ln -sfn "$run_outdir" "$latest_link"
+    echo "[INFO] latest -> $run_outdir"
+
+    if [ -f "$run_outdir/rl_dashboard.png" ]; then
+        echo "[INFO] RL dashboard: $run_outdir/rl_dashboard.png"
+    fi
+    if [ -f "$run_outdir/replay_best.csv" ]; then
+        echo "[INFO] replay export CSV: $run_outdir/replay_best.csv"
+        echo "[INFO] replay plot: python3 $BASE_DIR/plot_pendulum.py --csv $run_outdir/replay_best.csv"
+    fi
+    if [ -f "$run_outdir/history.csv" ]; then
+        echo "[INFO] RL+replay one-window plot: python3 $BASE_DIR/plot_pendulum.py --rl-dir $run_outdir"
+    fi
+}
+
+run_replay_validation() {
+    echo "--------------------------------"
+    echo "[INFO] Replay Validation (Chrono + IMU dual viewer)"
+    file=$(select_csv_file)
+    if [ -z "$file" ]; then return; fi
+
+    calib_json=""
+    if [ -f "$BASE_DIR/run_logs/calibration_latest.json" ]; then
+        calib_json="$BASE_DIR/run_logs/calibration_latest.json"
+        echo "[INFO] Auto calibration JSON: $calib_json"
+    fi
+
+    param_json=""
+    csv_base="${file%.csv}"
+    if [ -f "${csv_base}_best_param.json" ]; then
+        param_json="${csv_base}_best_param.json"
+    elif [ -f "$BASE_DIR/rl_results/latest/best_params.json" ]; then
+        param_json="$BASE_DIR/rl_results/latest/best_params.json"
+    fi
+    if [ -n "$param_json" ]; then
+        echo "[INFO] Auto parameter JSON: $param_json"
+    else
+        echo "[INFO] Auto parameter JSON: 없음"
+    fi
+
+    read -p "Replay speed [1.0]: " replay_speed
+    replay_speed=${replay_speed:-1.0}
+
+    cmd=(python3 "$BASE_DIR/replay_pendulum_cli.py" --csv "$file" --speed "$replay_speed")
+    [ -n "$calib_json" ] && cmd+=(--calibration_json "$calib_json")
+    [ -n "$param_json" ] && cmd+=(--parameter_json "$param_json")
 
     echo "[INFO] command: ${cmd[*]}"
     "${cmd[@]}"
@@ -240,7 +277,8 @@ while true; do
     echo "3) Parameter Optimization (Reinforcement Learning)"
     echo "4) Chrono Pendulum (Select Host/Jetson mode)"
     echo "5) Plot Data"
-    echo "6) Exit"
+    echo "6) Replay Validation (Chrono + IMU Dual Viewer)"
+    echo "7) Exit"
     echo "=========================================="
 
     read -p "Select option: " choice
@@ -267,6 +305,10 @@ while true; do
             pause
             ;;
         6)
+            run_replay_validation
+            pause
+            ;;
+        7)
             echo "Bye!"
             exit 0
             ;;

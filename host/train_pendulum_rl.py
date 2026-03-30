@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import argparse
+import csv
 import json
 import sys
 from dataclasses import dataclass
@@ -12,12 +13,14 @@ import numpy as np
 
 from chrono_core.calibration_io import apply_calibration_json
 from chrono_core.config import BridgeConfig
+from chrono_core.log_schema import PENDULUM_LOG_COLUMNS
 from chrono_core.pendulum_rl_env import (
     PARAM_KEYS,
     PendulumRLEnv,
     build_init_params,
     load_replay_csv,
     simulate_trajectory,
+    shifted_signal,
     split_trajectories,
     weighted_loss,
     compute_error_features,
@@ -26,6 +29,7 @@ from chrono_core.pendulum_rl_plots import (
     plot_delay_diagnostics,
     plot_overlay,
     plot_param_convergence,
+    plot_rl_dashboard,
     plot_training_curves,
 )
 
@@ -39,72 +43,62 @@ class TrainConfig:
     batch_size: int = 20
 
 
-class GaussianPolicy:
-    """Small numpy policy used for PPO-style episodic updates."""
+def train_with_sb3(env, val_env, args, history, param_hist):
+    try:
+        import gymnasium as gym
+        from gymnasium import spaces
+        from stable_baselines3 import PPO
+    except Exception as exc:
+        raise SystemExit(f"SB3 backend requested but dependencies are missing: {exc}")
 
-    def __init__(self, obs_dim: int, act_dim: int, seed: int = 0):
-        self.rng = np.random.default_rng(seed)
-        self.W = self.rng.normal(0.0, 0.05, size=(act_dim, obs_dim))
-        self.b = np.zeros(act_dim, dtype=float)
-        self.log_std = np.full(act_dim, -0.5, dtype=float)
+    class _SB3ReplayEnv(gym.Env):
+        metadata = {"render_modes": []}
 
-    def mean(self, obs: np.ndarray):
-        return np.tanh(self.W @ obs + self.b)
+        def __init__(self, wrapped_env):
+            super().__init__()
+            self.wrapped = wrapped_env
+            self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(self.wrapped.state_dim,), dtype=np.float32)
+            self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(self.wrapped.action_dim,), dtype=np.float32)
 
-    def sample(self, obs: np.ndarray):
-        mu = self.mean(obs)
-        std = np.exp(self.log_std)
-        act = mu + std * self.rng.normal(size=mu.shape)
-        return np.clip(act, -1.0, 1.0), mu, std
+        def reset(self, *, seed=None, options=None):
+            if seed is not None:
+                np.random.seed(seed)
+            obs = self.wrapped.reset()
+            return np.asarray(obs, dtype=np.float32), {}
 
-    def log_prob(self, a: np.ndarray, mu: np.ndarray, std: np.ndarray):
-        z = (a - mu) / (std + 1e-9)
-        return -0.5 * np.sum(z * z + 2.0 * np.log(std + 1e-9) + np.log(2 * np.pi))
+        def step(self, action):
+            obs, rew, done, info = self.wrapped.step(np.asarray(action, dtype=float))
+            return np.asarray(obs, dtype=np.float32), float(rew), bool(done), False, info
 
-    def ppo_update(self, batch, lr: float = 1e-2, clip_eps: float = 0.2):
-        dW = np.zeros_like(self.W)
-        db = np.zeros_like(self.b)
-        dls = np.zeros_like(self.log_std)
-        kl_terms = []
-        for item in batch:
-            obs, act, adv, old_mu, old_std, old_lp = item
-            mu = self.mean(obs)
-            std = np.exp(self.log_std)
-            lp = self.log_prob(act, mu, std)
-            ratio = np.exp(lp - old_lp)
-            ratio_c = np.clip(ratio, 1.0 - clip_eps, 1.0 + clip_eps)
-            w = ratio if abs(ratio - 1.0) < abs(ratio_c - 1.0) else ratio_c
+    sb3_env = _SB3ReplayEnv(env)
+    total_steps = max(1, int(args.num_episodes * env.max_refine_steps))
+    model = PPO(
+        "MlpPolicy",
+        sb3_env,
+        device=args.device,
+        seed=args.seed,
+        n_steps=max(env.max_refine_steps * 4, 32),
+        batch_size=min(64, max(16, env.max_refine_steps * 2)),
+        learning_rate=3e-4,
+        gamma=args.gamma,
+        verbose=0,
+    )
+    model.learn(total_timesteps=total_steps, progress_bar=False)
 
-            grad_lp_mu = (act - mu) / (std ** 2 + 1e-9)
-            grad_mu_raw = (1.0 - mu ** 2)
-            dW += np.outer(grad_lp_mu * grad_mu_raw * adv * w, obs)
-            db += grad_lp_mu * grad_mu_raw * adv * w
-            dls += ((act - mu) ** 2 / (std ** 2 + 1e-9) - 1.0) * adv * w
-            kl_terms.append(np.mean(np.log(std / (old_std + 1e-9)) + (old_std ** 2 + (old_mu - mu) ** 2) / (2 * std ** 2 + 1e-9) - 0.5))
-
-        n = max(len(batch), 1)
-        self.W += lr * dW / n
-        self.b += lr * db / n
-        self.log_std += lr * 0.1 * dls / n
-        self.log_std = np.clip(self.log_std, -3.0, 0.7)
-        return float(np.mean(kl_terms)) if kl_terms else 0.0
-
-
-def deterministic_prefit(env: PendulumRLEnv, iters: int = 80, seed: int = 0):
-    rng = np.random.default_rng(seed)
-    best = env.best_params.copy()
-    best_loss = env.best_loss
-    keys = list(env.param_keys)
-
-    for _ in range(iters):
-        cand = best.copy()
-        k = keys[int(rng.integers(0, len(keys)))]
-        lo, hi = env.bounds[k]
-        cand[k] = float(np.clip(cand[k] + rng.normal(0.0, 0.08 * (hi - lo)), lo, hi))
-        loss, _ = env._rollout_loss(cand)
-        if loss < best_loss:
-            best, best_loss = cand, loss
-    return best, best_loss
+    train_loss, train_rmse = evaluate_dataset(env, env.best_params)
+    val_loss, val_rmse = evaluate_dataset(val_env, env.best_params)
+    history["reward"].append(float(-train_loss))
+    history["train_loss"].append(float(train_loss))
+    history["val_loss"].append(float(val_loss))
+    history["rmse_theta"].append(float(train_rmse["theta"]))
+    history["rmse_omega"].append(float(train_rmse["omega"]))
+    history["rmse_alpha"].append(float(train_rmse["alpha"]))
+    history["val_rmse_theta"].append(float(val_rmse["theta"]))
+    history["val_rmse_omega"].append(float(val_rmse["omega"]))
+    history["val_rmse_alpha"].append(float(val_rmse["alpha"]))
+    for k in env.param_keys:
+        param_hist[k].append(float(env.best_params[k]))
+    return float(val_loss), env.best_params.copy()
 
 
 def gather_csv_paths(csv: str | None, csv_dir: str | None):
@@ -148,7 +142,7 @@ def maybe_prompt(args, parser):
     args.lam = ask_float("lam", args.lam)
     args.kl_targ = ask_float("kl_targ", args.kl_targ)
     args.batch_size = ask_int("batch_size", args.batch_size)
-    args.prefit = ask_bool("prefit", args.prefit)
+    args.device = input(f"device [cpu/cuda] [{args.device}]: ").strip() or args.device
     args.learn_delay = ask_bool("learn_delay", args.learn_delay)
     args.domain_randomization = ask_bool("domain_randomization", args.domain_randomization)
     return args
@@ -160,12 +154,56 @@ def evaluate_dataset(env: PendulumRLEnv, params: dict[str, float]):
     for traj in env.trajectories:
         d = params.get("delay_sec", traj.delay_sec_est)
         sim = simulate_trajectory(traj, params, env.cfg, delay_sec=d)
-        feat = compute_error_features(traj, sim)
+        feat = compute_error_features(traj, sim, align_shift_sec=traj.delay_sec_est)
         losses.append(weighted_loss(feat, env.reward_weights))
         rmses["theta"].append(feat["rmse_theta"])
         rmses["omega"].append(feat["rmse_omega"])
         rmses["alpha"].append(feat["rmse_alpha"])
     return float(np.mean(losses)), {k: float(np.mean(v)) for k, v in rmses.items()}
+
+
+def sanitize_metric(x: float):
+    return float(x) if np.isfinite(x) else 0.0
+
+
+def sanitize_dict(metrics: dict[str, float]):
+    return {k: sanitize_metric(v) for k, v in metrics.items()}
+
+
+def save_history_csv(history: dict, outpath: Path):
+    keys = ["reward", "train_loss", "val_loss", "rmse_theta", "rmse_omega", "rmse_alpha",
+            "val_rmse_theta", "val_rmse_omega", "val_rmse_alpha"]
+    n = len(history.get("reward", []))
+    with outpath.open("w", newline="", encoding="utf-8") as f:
+        wr = csv.writer(f)
+        wr.writerow(["episode", *keys])
+        for i in range(n):
+            wr.writerow([i + 1, *[sanitize_metric(history.get(k, [0.0] * n)[i]) for k in keys]])
+
+
+def save_best_replay_csv(outpath: Path, traj, sim: dict[str, np.ndarray], params: dict[str, float], loss: float, delay_sec: float):
+    outpath.parent.mkdir(parents=True, exist_ok=True)
+    with outpath.open("w", newline="", encoding="utf-8") as f:
+        wr = csv.writer(f)
+        wr.writerow(PENDULUM_LOG_COLUMNS)
+        best_cost = float(loss)
+        for i in range(len(traj.t)):
+            wr.writerow([
+                0.0, traj.t[i], "replay",
+                traj.cmd_u[i], sim["cmd_delayed"][i], traj.hw_pwm[i], traj.delay_sec_est, sim["tau_motor"][i] - sim["tau_res"][i],
+                sim["theta"][i], sim["omega"][i], sim["alpha"][i],
+                "", "",
+                traj.theta_real[i], traj.omega_real[i], traj.alpha_real[i],
+                delay_sec * 1000.0,
+                params["l_com"], params["b_eq"], params["tau_eq"], params["k_t"], params["i0"], params["R"], params["k_e"],
+                traj.bus_v[i], traj.bus_v[i], traj.current_a[i], traj.current_a[i], traj.power_w[i],
+                sim["tau_motor"][i], sim["tau_res"][i], sim["tau_visc"][i], sim["tau_coul"][i], sim["i_pred"][i], sim["v_applied"][i],
+                loss, best_cost,
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, sim["omega"][i],
+                0.0, 0.0, 0.0,
+                loss, 1, 1, json.dumps(params),
+            ])
 
 
 def main():
@@ -177,17 +215,12 @@ def main():
     ap.add_argument("--outdir", default="rl_calibration_out")
 
     ap.add_argument("-n", "--num_episodes", type=int, default=1000)
-    ap.add_argument("--renderON", dest="render", action="store_true")
-    ap.add_argument("--renderOFF", dest="render", action="store_false")
-    ap.set_defaults(render=False)
     ap.add_argument("-g", "--gamma", type=float, default=0.995)
     ap.add_argument("-l", "--lam", type=float, default=0.98)
     ap.add_argument("-k", "--kl_targ", type=float, default=0.003)
     ap.add_argument("-b", "--batch_size", type=int, default=20)
+    ap.add_argument("--device", type=str, default="cpu")
 
-    ap.add_argument("--prefitON", dest="prefit", action="store_true")
-    ap.add_argument("--prefitOFF", dest="prefit", action="store_false")
-    ap.set_defaults(prefit=True)
     ap.add_argument("--learn_delay", action="store_true", default=False)
     ap.add_argument("--delay_override", type=float, default=None)
     ap.add_argument("--delay_jitter_ms", type=float, default=3.0)
@@ -243,67 +276,11 @@ def main():
     with open(outdir / "initial_params.json", "w", encoding="utf-8") as f:
         json.dump(init_params, f, indent=2)
 
-    if args.prefit:
-        env.reset()
-        pref_params, pref_loss = deterministic_prefit(env, iters=120, seed=args.seed)
-        with open(outdir / "prefit_params.json", "w", encoding="utf-8") as f:
-            json.dump({"loss": pref_loss, "model_init": pref_params}, f, indent=2)
-        init_params.update(pref_params)
-        env.center.update(pref_params)
-        val_env.center.update(pref_params)
-
-    policy = GaussianPolicy(obs_dim=env.state_dim, act_dim=env.action_dim, seed=args.seed)
-
     history = {"reward": [], "train_loss": [], "val_loss": [], "rmse_theta": [], "rmse_omega": [], "rmse_alpha": [],
                "val_rmse_theta": [], "val_rmse_omega": [], "val_rmse_alpha": []}
     param_hist = {k: [] for k in env.param_keys}
-    best_val = float("inf")
-    best_params = dict(init_params)
-
-    for ep in range(1, args.num_episodes + 1):
-        obs = env.reset()
-        traj_batch = []
-        ep_reward = 0.0
-        done = False
-        while not done:
-            act, mu, std = policy.sample(obs)
-            old_lp = policy.log_prob(act, mu, std)
-            nobs, rew, done, info = env.step(act)
-            traj_batch.append((obs, act, rew, mu, std, old_lp))
-            ep_reward += rew
-            obs = nobs
-
-        rews = np.array([x[2] for x in traj_batch], dtype=float)
-        adv = (rews - np.mean(rews)) / (np.std(rews) + 1e-9)
-        batch = []
-        for i, item in enumerate(traj_batch):
-            batch.append((item[0], item[1], adv[i], item[3], item[4], item[5]))
-        kl = policy.ppo_update(batch, lr=8e-3)
-        if kl > args.kl_targ * 2.0:
-            policy.ppo_update(batch, lr=3e-3)
-
-        train_loss, train_rmse = evaluate_dataset(env, env.best_params)
-        val_loss, val_rmse = evaluate_dataset(val_env, env.best_params)
-
-        history["reward"].append(float(ep_reward))
-        history["train_loss"].append(float(train_loss))
-        history["val_loss"].append(float(val_loss))
-        history["rmse_theta"].append(train_rmse["theta"])
-        history["rmse_omega"].append(train_rmse["omega"])
-        history["rmse_alpha"].append(train_rmse["alpha"])
-        history["val_rmse_theta"].append(val_rmse["theta"])
-        history["val_rmse_omega"].append(val_rmse["omega"])
-        history["val_rmse_alpha"].append(val_rmse["alpha"])
-
-        for k in env.param_keys:
-            param_hist[k].append(float(env.best_params[k]))
-
-        if val_loss < best_val:
-            best_val = val_loss
-            best_params = env.best_params.copy()
-
-        if ep % max(1, args.batch_size) == 0:
-            print(f"ep={ep:4d} reward={ep_reward: .4f} train_loss={train_loss:.5f} val_loss={val_loss:.5f}")
+    best_val, best_params = train_with_sb3(env, val_env, args, history, param_hist)
+    print(f"[SB3] train_loss={history['train_loss'][-1]:.5f} val_loss={history['val_loss'][-1]:.5f}")
 
     if not args.learn_delay:
         best_params.pop("delay_sec", None)
@@ -329,17 +306,27 @@ def main():
 
     with open(outdir / "history.json", "w", encoding="utf-8") as f:
         json.dump(history, f, indent=2)
+    save_history_csv(history, outdir / "history.csv")
 
     plot_training_curves(history, outdir)
     plot_param_convergence(param_hist, outdir)
     plot_delay_diagnostics(delay_map, outdir)
+    plot_rl_dashboard(history, param_hist, outdir)
 
     # Representative overlay from first test trajectory
     rep = test_traj[0]
-    sim = simulate_trajectory(rep, best_params, cfg, delay_sec=best_params.get("delay_sec", rep.delay_sec_est))
-    plot_overlay(rep.t, rep.theta_real, sim["theta"], "theta [rad]", outdir / "overlay_theta.png")
-    plot_overlay(rep.t, rep.omega_real, sim["omega"], "omega [rad/s]", outdir / "overlay_omega.png")
-    plot_overlay(rep.t, rep.alpha_real, sim["alpha"], "alpha [rad/s^2]", outdir / "overlay_alpha.png")
+    rep_delay = best_params.get("delay_sec", rep.delay_sec_est)
+    sim = simulate_trajectory(rep, best_params, cfg, delay_sec=rep_delay)
+    rep_feat = compute_error_features(rep, sim, align_shift_sec=rep.delay_sec_est)
+    rep_loss = weighted_loss(rep_feat, env.reward_weights)
+    sim_aligned = dict(sim)
+    sim_aligned["theta"] = shifted_signal(rep.t, sim["theta"], rep.delay_sec_est)
+    sim_aligned["omega"] = shifted_signal(rep.t, sim["omega"], rep.delay_sec_est)
+    sim_aligned["alpha"] = shifted_signal(rep.t, sim["alpha"], rep.delay_sec_est)
+    save_best_replay_csv(outdir / "replay_best.csv", rep, sim_aligned, best_params, rep_loss, rep_delay)
+    plot_overlay(rep.t, rep.theta_real, sim_aligned["theta"], "theta [rad]", outdir / "overlay_theta.png")
+    plot_overlay(rep.t, rep.omega_real, sim_aligned["omega"], "omega [rad/s]", outdir / "overlay_omega.png")
+    plot_overlay(rep.t, rep.alpha_real, sim_aligned["alpha"], "alpha [rad/s^2]", outdir / "overlay_alpha.png")
     plot_overlay(rep.t, rep.hw_pwm, sim["cmd_delayed"], "PWM", outdir / "overlay_pwm_aligned.png")
 
     print("Saved outputs in", outdir)

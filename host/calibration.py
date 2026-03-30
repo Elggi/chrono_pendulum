@@ -9,6 +9,7 @@
 
 import argparse
 import json
+import math
 import os
 import select
 import shutil
@@ -20,6 +21,9 @@ import time
 import tty
 from dataclasses import dataclass
 from statistics import mean
+from collections import deque
+
+import numpy as np
 
 import rclpy
 from rclpy.executors import SingleThreadedExecutor
@@ -311,7 +315,6 @@ class CprCollector:
             tip_now = self.state.last_tip.copy() if hasattr(self.state, "last_tip") else self.state.tip0.copy()
             self.state.tip0 = tip_now.copy()
             self.state.tip_hist.append(tip_now.copy())
-
 
 def _collect_cpr_and_r_from_imu(args) -> tuple[list[dict], float, list[dict], float]:
     collector = CprCollector(imu_topic=args.imu_topic, enc_topic=args.hw_enc_topic)
