@@ -164,10 +164,8 @@ def plot_simulation(df, csv_path: str, args):
     omega_sim = col_any(df, ["omega", "sim_omega"], n)
     alpha_sim = col_any(df, ["alpha", "sim_alpha"], n)
     cmd_u = col_any(df, ["cmd_u_raw", "cmd_u"], n)
-    cmd_used = col_any(df, ["cmd_u_used", "cmd_u", "hw_pwm"], n)
     hw_pwm = col_any(df, ["hw_pwm"], n)
     enc = col_any(df, ["hw_enc"], n)
-    delay_ms = col_any(df, ["delay_ms"], n)
     J_est = col_any(df, ["J_est"], n)
     b_est = col_any(df, ["b_est"], n)
     tau_c_est = col_any(df, ["tau_c_est"], n)
@@ -219,13 +217,11 @@ def plot_simulation(df, csv_path: str, args):
     ax = axes.ravel()
 
     ax[0].plot(t_cmd, cmd_u, label="cmd_u")
-    ax[0].plot(t, cmd_used, label="cmd_used")
     ax[0].plot(t, hw_pwm, label="hw_pwm")
-    ax[0].plot(t, delay_ms, label="delay_ms")
     ax[0].grid(True)
     ax[0].legend()
     ax[0].set_xlabel("time [s]")
-    ax[0].set_title("Command / PWM / delay")
+    ax[0].set_title("Command / PWM")
 
     ax[1].plot(t, theta_sim, label="theta sim")
     if np.isfinite(theta_real).any():
