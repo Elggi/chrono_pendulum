@@ -108,6 +108,9 @@ High-level structure:
 - **Environment objective**: minimize mismatch between simulated and measured trajectories (theta/omega/alpha, plus optional smoothness penalties).
 <img width="987" height="141" alt="image" src="https://github.com/user-attachments/assets/eb1c06ff-0762-4e91-b76f-7dc785323409" />
 - **Action meaning**: update candidate surrogate parameters (e.g., `l_com`, `b_eq`, `tau_eq`, `K_u`) within bounded ranges.
+<img width="252" height="32" alt="image" src="https://github.com/user-attachments/assets/b21ad714-62b7-42b8-9e2d-7d33215b101d" />
+<img width="330" height="91" alt="image" src="https://github.com/user-attachments/assets/5a43782a-8e95-4c62-93df-d3f76c61b8bc" />
+
 - **Episode loop**:
   1. sample/init parameters,
   2. roll out replay dynamics over logged command inputs,
