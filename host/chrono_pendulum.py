@@ -30,7 +30,7 @@ from sensor_msgs.msg import Imu
 from chrono_core.config import BridgeConfig
 from chrono_core.utils import clamp, now_wall, terminal_status_line, sanitize_float, make_numbered_path
 from chrono_core.estimation import OnlineParameterEKF, ObservationLPF, FitConvergenceMonitor, RobustSignalFilter
-from chrono_core.dynamics import PendulumModel, compute_model_torque_and_electrics, blend_parameters_for_sim, enc_to_theta
+from chrono_core.dynamics import PendulumModel, compute_model_torque_and_electrics, blend_parameters_for_sim
 from chrono_core.calibration_io import apply_calibration_json, extract_radius_from_json
 from chrono_core.pendulum_rl_env import build_init_params
 from chrono_core.log_schema import PENDULUM_LOG_COLUMNS
@@ -226,31 +226,75 @@ class HostCommandController:
         self.apply_key(key)
 
 
-class FixedDelayBuffer:
-    def __init__(self, delay_sec: float, buffer_sec: float = 4.0):
-        self.delay_sec = max(0.0, float(delay_sec))
-        self.buffer_sec = max(float(buffer_sec), self.delay_sec + 1.0)
-        self.buf = deque()
+class DelayObserver:
+    """Estimate cmd->hw pwm delay for logging/plotting only (no compensation)."""
 
-    def get(self, wall_now: float, cmd_now: float):
-        self.buf.append((float(wall_now), float(cmd_now)))
+    def __init__(self, max_delay_ms: float = 250.0, buffer_sec: float = 4.0):
+        self.max_delay_ms = float(max_delay_ms)
+        self.buffer_sec = float(buffer_sec)
+        self.cmd_hist = deque()
+        self.pwm_hist = deque()
+        self.delay_sec = 0.0
+        self.last_update = 0.0
+
+    def push(self, wall_now: float, cmd_u: float, hw_pwm: float):
+        self.cmd_hist.append((float(wall_now), float(cmd_u)))
+        self.pwm_hist.append((float(wall_now), float(hw_pwm)))
         tmin = wall_now - self.buffer_sec
-        while self.buf and self.buf[0][0] < tmin:
-            self.buf.popleft()
-        if len(self.buf) < 2 or self.delay_sec <= 1e-9:
-            return float(cmd_now)
-        target = wall_now - self.delay_sec
-        if target <= self.buf[0][0]:
-            return float(self.buf[0][1])
-        if target >= self.buf[-1][0]:
-            return float(self.buf[-1][1])
-        for i in range(len(self.buf) - 1):
-            t0, u0 = self.buf[i]
-            t1, u1 = self.buf[i + 1]
-            if t0 <= target <= t1:
-                a = (target - t0) / max(t1 - t0, 1e-9)
-                return (1.0 - a) * u0 + a * u1
-        return float(cmd_now)
+        while self.cmd_hist and self.cmd_hist[0][0] < tmin:
+            self.cmd_hist.popleft()
+        while self.pwm_hist and self.pwm_hist[0][0] < tmin:
+            self.pwm_hist.popleft()
+
+    def estimate(self, wall_now: float):
+        if wall_now - self.last_update < 0.25:
+            return self.delay_sec
+        self.last_update = wall_now
+        if len(self.cmd_hist) < 20 or len(self.pwm_hist) < 20:
+            return self.delay_sec
+        t0 = max(self.cmd_hist[0][0], self.pwm_hist[0][0])
+        t1 = min(self.cmd_hist[-1][0], self.pwm_hist[-1][0])
+        if (t1 - t0) < 0.8:
+            return self.delay_sec
+        dt = 0.01
+        ts = np.arange(t0, t1, dt)
+        if len(ts) < 30:
+            return self.delay_sec
+
+        def interp(hist, t):
+            xs = list(hist)
+            if t <= xs[0][0]:
+                return xs[0][1]
+            if t >= xs[-1][0]:
+                return xs[-1][1]
+            for i in range(len(xs) - 1):
+                t0i, y0 = xs[i]
+                t1i, y1 = xs[i + 1]
+                if t0i <= t <= t1i:
+                    a = (t - t0i) / max(t1i - t0i, 1e-9)
+                    return (1.0 - a) * y0 + a * y1
+            return xs[-1][1]
+
+        cmd = np.array([interp(self.cmd_hist, t) for t in ts], dtype=float)
+        pwm = np.array([interp(self.pwm_hist, t) for t in ts], dtype=float)
+        cmd = cmd - np.mean(cmd)
+        pwm = pwm - np.mean(pwm)
+        if np.std(cmd) < 1e-6 or np.std(pwm) < 1e-6:
+            return self.delay_sec
+        max_lag = int((self.max_delay_ms / 1000.0) / dt)
+        best_lag = 0
+        best_score = -1e18
+        for lag in range(max_lag + 1):
+            if lag >= len(cmd) - 2:
+                break
+            a = cmd[:-lag] if lag > 0 else cmd
+            b = pwm[lag:] if lag > 0 else pwm
+            score = float(np.dot(a, b)) / max(len(a), 1)
+            if score > best_score:
+                best_score = score
+                best_lag = lag
+        self.delay_sec = float(best_lag * dt)
+        return self.delay_sec
 
 
 # ============================================================
@@ -647,8 +691,8 @@ def main():
     best_eval = {"cost": float("inf"), "time": None, "params": ekf.get_params().copy()}
     prev_u_eff = 0.0
     prev_du = 0.0
-    delay_sec_used = max(0.0, cfg.delay_init_ms / 1000.0)
-    cmd_delay = FixedDelayBuffer(delay_sec_used)
+    delay_sec_used = 0.0
+    delay_obs = DelayObserver(max_delay_ms=250.0, buffer_sec=4.0)
 
     viewer_proc = None
     if cfg.enable_imu_viewer:
@@ -678,12 +722,9 @@ def main():
         omega_prev = model.get_omega()
         t_prev = 0.0
         enc_ref = None
-        theta_ref = None
         theta_real_prev = None
         omega_real_prev = 0.0
         t_real_prev = None
-        est_theta_ref = None
-        est_theta_model_ref = None
         run_limit_sec = float("inf") if args.duration <= 0.0 else float(args.duration)
 
         if host_controller is not None:
@@ -739,7 +780,9 @@ def main():
 
                 snap = shared.snapshot()
                 wall_now = now_wall()
-                cmd_u_used = cmd_delay.get(wall_now, cmd_u_raw)
+                cmd_u_used = cmd_u_raw
+                delay_obs.push(wall_now, cmd_u_raw, snap["hw_pwm"])
+                delay_sec_used = delay_obs.estimate(wall_now)
 
                 fit_params = ekf.get_params()
                 sim_params = blend_parameters_for_sim(fit_params, cfg)
@@ -778,16 +821,15 @@ def main():
 
                 if enc_ref is None and np.isfinite(snap["hw_enc"]):
                     enc_ref = float(snap["hw_enc"])
-                    theta_ref = float(theta)
-                theta_from_enc = enc_to_theta(snap["hw_enc"], enc_ref, theta_ref, cfg.cpr) if enc_ref is not None else None
-                if est_theta_ref is None and np.isfinite(snap["est_theta"]):
-                    est_theta_ref = float(snap["est_theta"])
-                    est_theta_model_ref = float(theta)
 
-                if np.isfinite(snap["est_theta"]) and est_theta_ref is not None and est_theta_model_ref is not None:
-                    theta_real = est_theta_model_ref + (float(snap["est_theta"]) - est_theta_ref)
-                else:
-                    theta_real = theta_from_enc if theta_from_enc is not None else theta
+                theta_from_enc = None
+                if enc_ref is not None and np.isfinite(snap["hw_enc"]) and np.isfinite(cfg.cpr) and cfg.cpr > 1.0:
+                    cur_enc = float(snap["hw_enc"])
+                    # Always treat startup encoder value as offset only.
+                    theta_from_enc = float((2.0 * math.pi / float(cfg.cpr)) * (cur_enc - enc_ref))
+                # Prefer encoder-based real angle so startup offset is always zeroed from
+                # the current encoder baseline; this avoids absolute-angle jumps.
+                theta_real = theta_from_enc if theta_from_enc is not None else theta
 
                 if theta_real_prev is not None and t_real_prev is not None:
                     omega_real = (theta_real - theta_real_prev) / max(sim_t - t_real_prev, cfg.step)
@@ -948,7 +990,7 @@ def main():
     print(f"saved meta : {log_meta}")
     if cfg.self_fit_mode == "on":
         print(f"saved best : {log_best_param}")
-    print(f"applied fixed delay: {1000.0 * delay_sec_used:.1f} ms (from parameter/calibration)")
+    print(f"observed cmd->hw delay (final): {1000.0 * delay_sec_used:.1f} ms (logging-only, no compensation)")
 
     if viewer_proc is not None:
         try:
