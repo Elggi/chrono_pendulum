@@ -593,6 +593,10 @@ def main():
     model.update_identified_structure(sim_params)
     bus_filter = RobustSignalFilter(cfg.ina_bus_median_window, cfg.ina_bus_hampel_k, cfg.ina_bus_hampel_sigma, cfg.ina_bus_lpf_tau_sec)
     current_filter = RobustSignalFilter(cfg.ina_current_median_window, cfg.ina_current_hampel_k, cfg.ina_current_hampel_sigma, cfg.ina_current_lpf_tau_sec)
+    # Real observations are noisier than simulation -> use stronger filtering.
+    real_theta_filter = RobustSignalFilter(21, 21, 2.5, 0.18)
+    real_omega_filter = RobustSignalFilter(21, 21, 2.5, 0.14)
+    real_alpha_filter = RobustSignalFilter(25, 25, 2.2, 0.20)
     prev_u_eff = 0.0
     prev_du = 0.0
 
@@ -628,6 +632,7 @@ def main():
         theta_real_prev = None
         omega_real_prev = 0.0
         t_real_prev = None
+        stable_real_start = False
         run_limit_sec = float("inf") if args.duration <= 0.0 else float(args.duration)
 
         if host_controller is not None:
@@ -730,21 +735,35 @@ def main():
                     cur_enc = float(snap["hw_enc"])
                     denc = cur_enc - enc_prev
                     # Startup/transport glitches can create unrealistic jumps. Ignore them.
-                    if abs(denc) <= max(0.35 * float(cfg.cpr), 2.0):
+                    if abs(denc) <= max(0.15 * float(cfg.cpr), 1.0):
                         theta_from_enc = float((2.0 * math.pi / float(cfg.cpr)) * (cur_enc - enc_ref))
                     enc_prev = cur_enc
                 # Prefer encoder-based real angle so startup offset is always zeroed from
                 # the current encoder baseline; this avoids absolute-angle jumps.
                 theta_real = theta_from_enc if theta_from_enc is not None else theta
+                if not stable_real_start and sim_t < 0.35:
+                    theta_real = theta
+                elif not stable_real_start and theta_from_enc is not None:
+                    stable_real_start = True
+                if theta_real_prev is not None and abs(theta_real - theta_real_prev) > math.radians(45.0):
+                    theta_real = theta_real_prev
+                dt_theta = max(sim_t - t_real_prev, cfg.step) if t_real_prev is not None else cfg.step
+                theta_real = real_theta_filter.update(theta_real, dt_theta)
 
                 if theta_real_prev is not None and t_real_prev is not None:
-                    omega_real = (theta_real - theta_real_prev) / max(sim_t - t_real_prev, cfg.step)
+                    dt_real = max(sim_t - t_real_prev, cfg.step)
+                    omega_real_raw = (theta_real - theta_real_prev) / dt_real
                 else:
-                    omega_real = omega
+                    dt_real = cfg.step
+                    omega_real_raw = omega
+                omega_real_raw = clamp(omega_real_raw, -80.0, 80.0)
+                omega_real = real_omega_filter.update(omega_real_raw, dt_real)
                 if t_real_prev is not None:
-                    alpha_real = (omega_real - omega_real_prev) / max(sim_t - t_real_prev, cfg.step)
+                    alpha_real_raw = (omega_real - omega_real_prev) / dt_real
                 else:
-                    alpha_real = alpha
+                    alpha_real_raw = alpha
+                alpha_real_raw = clamp(alpha_real_raw, -6000.0, 6000.0)
+                alpha_real = real_alpha_filter.update(alpha_real_raw, dt_real)
                 theta_real_prev = theta_real
                 omega_real_prev = omega_real
                 t_real_prev = sim_t

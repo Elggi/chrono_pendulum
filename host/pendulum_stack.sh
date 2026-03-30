@@ -59,19 +59,24 @@ select_json_file() {
     echo "--------------------------------" >&2
     echo "[INFO] ${label} 선택" >&2
 
-    local files=("$BASE_DIR"/run_logs/*.json "$BASE_DIR"/rl_results/*.json)
     local valid=()
-    for f in "${files[@]}"; do
-        if [ ! -f "$f" ]; then
+    local search_dirs=("$BASE_DIR/run_logs" "$BASE_DIR/rl_results")
+    local d
+    for d in "${search_dirs[@]}"; do
+        if [ ! -d "$d" ]; then
             continue
         fi
-        if [[ "$f" == *.meta.json ]]; then
-            continue
-        fi
-        if [ -f "$f" ]; then
+        while IFS= read -r -d '' f; do
+            if [[ "$f" == *.meta.json ]]; then
+                continue
+            fi
             valid+=("$f")
-        fi
+        done < <(find "$d" -type f -name "*.json" -print0 2>/dev/null)
     done
+    if [ "${#valid[@]}" -gt 0 ]; then
+        IFS=$'\n' valid=($(printf "%s\n" "${valid[@]}" | sort))
+        unset IFS
+    fi
 
     if [ "${#valid[@]}" -eq 0 ]; then
         echo "[WARN] 선택 가능한 json 파일이 없습니다. 없음으로 진행합니다." >&2
@@ -239,6 +244,8 @@ run_replay_validation() {
     csv_base="${file%.csv}"
     if [ -f "${csv_base}_best_param.json" ]; then
         param_json="${csv_base}_best_param.json"
+    elif [ -f "$BASE_DIR/rl_results/latest/final_params_rl.json" ]; then
+        param_json="$BASE_DIR/rl_results/latest/final_params_rl.json"
     elif [ -f "$BASE_DIR/rl_results/latest/best_params.json" ]; then
         param_json="$BASE_DIR/rl_results/latest/best_params.json"
     fi
