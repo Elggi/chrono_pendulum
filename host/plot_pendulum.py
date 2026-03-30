@@ -66,6 +66,18 @@ def moving_average(x: np.ndarray, win: int):
     return y[: len(x)]
 
 
+def unwrap_and_zero(theta: np.ndarray):
+    out = np.asarray(theta, dtype=float).copy()
+    finite = np.isfinite(out)
+    if not np.any(finite):
+        return out
+    idx = np.where(finite)[0]
+    unwrapped = np.unwrap(out[idx])
+    unwrapped = unwrapped - unwrapped[0]
+    out[idx] = unwrapped
+    return out
+
+
 def derive_theta_from_encoder(enc, counts_per_rev, sign=1.0, offset=0.0):
     return sign * (2.0 * np.pi / counts_per_rev) * (enc - enc[0]) + offset
 
@@ -188,9 +200,9 @@ def plot_simulation(df, csv_path: str, args):
         t = np.arange(n, dtype=float)
 
     n = len(t)
-    theta_sim = col_any(df, ["theta", "sim_theta"], n)
-    omega_sim = col_any(df, ["omega", "sim_omega"], n)
-    alpha_sim = col_any(df, ["alpha", "sim_alpha"], n)
+    theta_sim = col_any(df, ["theta"], n)
+    omega_sim = col_any(df, ["omega"], n)
+    alpha_sim = col_any(df, ["alpha"], n)
     cmd_u = col_any(df, ["cmd_u_raw", "cmd_u"], n)
     hw_pwm = col_any(df, ["hw_pwm"], n)
     enc = col_any(df, ["hw_enc"], n)
@@ -216,9 +228,11 @@ def plot_simulation(df, csv_path: str, args):
         dt[dt <= 0] = np.median(dt[dt > 0]) if np.any(dt > 0) else 0.01
         alpha_sim = np.gradient(omega_sim, dt)
 
-    theta_real = col_any(df, ["theta_real", "est_theta"], n)
-    omega_real = col_any(df, ["omega_real", "est_omega"], n)
-    alpha_real = col_any(df, ["alpha_real", "est_alpha"], n)
+    theta_real = col_any(df, ["theta_real"], n)
+    omega_real = col_any(df, ["omega_real"], n)
+    alpha_real = col_any(df, ["alpha_real"], n)
+    theta_sim = unwrap_and_zero(theta_sim)
+    theta_real = unwrap_and_zero(theta_real)
     if np.isfinite(theta_real).any():
         theta_real = moving_average(theta_real, args.real_theta_smooth)
     has_real = np.isfinite(theta_real).any() or np.isfinite(omega_real).any() or np.isfinite(alpha_real).any()
