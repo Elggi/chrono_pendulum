@@ -10,8 +10,6 @@ import numpy as np
 import pandas as pd
 
 from .config import BridgeConfig
-from .signal_filter import estimate_filtered_alpha_from_omega
-
 PARAM_KEYS = ["K_u", "b_eq", "tau_eq", "l_com"]
 
 
@@ -274,7 +272,7 @@ def load_replay_csv(path: str | Path, cfg: BridgeConfig, delay_override: float |
     if not np.isfinite(omega_real).any():
         omega_real = _safe_col(df, "omega")
     if not np.isfinite(alpha_real_raw).any():
-        alpha_real_raw = _safe_col(df, "alpha")
+        raise ValueError(f"{p}: required column 'alpha_real' has no valid numeric samples.")
     theta_real = _unwrap_angle_series(theta_real)
     omega_real = _sanitize_timeseries(omega_real)
     alpha_real_raw = _sanitize_timeseries(alpha_real_raw)
@@ -282,8 +280,7 @@ def load_replay_csv(path: str | Path, cfg: BridgeConfig, delay_override: float |
     # If runtime logging briefly broke real-state channels, repair them from theta.
     if float(np.nanpercentile(np.abs(omega_real), 99.5)) > 80.0 and float(np.nanpercentile(np.abs(omega_from_theta), 99.5)) < 50.0:
         omega_real = omega_from_theta
-    # Effective alpha target is always filtered d(omega)/dt.
-    alpha_real = estimate_filtered_alpha_from_omega(omega_real, t=t)
+    alpha_real = alpha_real_raw.copy()
 
     omega_real = _winsorize_abs(omega_real, q=99.5)
     alpha_real = _winsorize_abs(alpha_real, q=99.5)

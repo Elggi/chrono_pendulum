@@ -22,7 +22,6 @@ from chrono_core.pendulum_rl_env import (
     simulate_trajectory,
     weighted_loss,
 )
-from chrono_core.signal_filter import estimate_filtered_alpha_from_omega
 from chrono_core.pendulum_rl_plots import (
     plot_param_convergence,
     plot_stage1_regression_summary,
@@ -62,11 +61,8 @@ def choose_one_csv(items: list[Path], title: str) -> Path:
     print(title)
     for i, item in enumerate(items, start=1):
         print(f"[{i}] {item.name}")
-    raw = _input("Select indices for Stage4 PPO (comma separated, default: same as Stage3): ", "")
-    if raw.strip() == "":
-        return []
     while True:
-        raw = input("Select index: ").strip()
+        raw = _input("Select index: ")
         try:
             idx = int(raw)
             chosen = items[idx - 1]
@@ -171,7 +167,7 @@ def _stage_metadata_base(stage: int, csv_path: Path, excitation_type: str, activ
         "omega_source": omega_source,
         "alpha_source": alpha_source,
         "input_source": input_source,
-        "target_source": "J*real_alpha_filtered",
+        "target_source": f"J*{alpha_source}",
         "K_u_interpretation": K_U_INTERPRETATION,
     }
 
@@ -186,18 +182,10 @@ def _load_regression_data(csv_path: Path):
     theta = pd.to_numeric(df["theta_real"], errors="coerce").to_numpy(dtype=float)
     omega = pd.to_numeric(df["omega_real"], errors="coerce").to_numpy(dtype=float)
 
-    # Keep regression target as filtered real alpha.
-    # Prefer precomputed real_alpha_filtered; otherwise synthesize from omega_real.
-    if "real_alpha_filtered" in df.columns:
-        alpha = pd.to_numeric(df["real_alpha_filtered"], errors="coerce").to_numpy(dtype=float)
-        alpha_source = "real_alpha_filtered"
-    else:
-        t = None
-        if "wall_elapsed" in df.columns:
-            t = pd.to_numeric(df["wall_elapsed"], errors="coerce").to_numpy(dtype=float)
-        alpha = estimate_filtered_alpha_from_omega(omega, t=t)
-        alpha_source = "real_alpha_filtered(from_omega_real)"
-        print("[INFO] real_alpha_filtered not found. Using filtered derivative from omega_real.")
+    if "alpha_real" not in df.columns:
+        raise ValueError(f"Missing required measured column 'alpha_real' in {csv_path}")
+    alpha = pd.to_numeric(df["alpha_real"], errors="coerce").to_numpy(dtype=float)
+    alpha_source = "alpha_real"
 
     input_source = "hw_pwm"
     u = pd.to_numeric(df["hw_pwm"], errors="coerce").to_numpy(dtype=float)
@@ -246,7 +234,7 @@ def _fit_stage1(data: dict, cfg: BridgeConfig, k_bounds: tuple[float, float]):
     }
 
 
-def _fit_stage2(data: dict, cfg: BridgeConfig, prev: dict[str, float], omega_deadband: float):
+def _fit_stage2(data: dict, cfg: BridgeConfig, prev: dict[str, float], omega_deadband: float, b_bounds: tuple[float, float]):
     m_total, j_pivot = _compute_geometry(cfg)
     residual_b = j_pivot * data["alpha"] - prev["K_u"] * data["u"] + m_total * cfg.gravity * prev["l_com"] * np.sin(data["theta"])
     omega = data["omega"]
@@ -258,17 +246,18 @@ def _fit_stage2(data: dict, cfg: BridgeConfig, prev: dict[str, float], omega_dea
     rb = residual_b[mask]
     if len(om) < 8:
         raise ValueError("Too few samples after omega deadband filtering for Stage 2")
-    b_eq = float(np.clip(-(om @ rb) / max(om @ om, 1e-12), 0.0, cfg.b_eq_max))
+    b_eq = float(np.clip(-(om @ rb) / max(om @ om, 1e-12), b_bounds[0], b_bounds[1]))
     rb_hat = -b_eq * om
     return {
         "b_eq": b_eq,
         "rmse": float(np.sqrt(np.mean((rb_hat - rb) ** 2))),
         "used_ratio": float(len(om) / len(omega)),
         "omega_deadband": float(omega_deadband),
+        "bounds": {"b_eq": [float(b_bounds[0]), float(b_bounds[1])]},
     }
 
 
-def _fit_stage3(data: dict, cfg: BridgeConfig, prev: dict[str, float], tanh_eps: float, high_speed_ref: float):
+def _fit_stage3(data: dict, cfg: BridgeConfig, prev: dict[str, float], tanh_eps: float, high_speed_ref: float, tau_bounds: tuple[float, float]):
     m_total, j_pivot = _compute_geometry(cfg)
     omega = data["omega"]
     residual_tau = (
@@ -281,7 +270,7 @@ def _fit_stage3(data: dict, cfg: BridgeConfig, prev: dict[str, float], tanh_eps:
     weights = 1.0 / (1.0 + (np.abs(omega) / max(high_speed_ref, 1e-6)) ** 2)
     num = -np.sum(weights * reg * residual_tau)
     den = max(np.sum(weights * reg * reg), 1e-12)
-    tau_eq = float(np.clip(num / den, 0.0, cfg.tau_eq_max))
+    tau_eq = float(np.clip(num / den, tau_bounds[0], tau_bounds[1]))
     pred = -tau_eq * reg
     low_speed_ratio = float(np.mean(np.abs(omega) <= high_speed_ref))
     return {
@@ -290,6 +279,7 @@ def _fit_stage3(data: dict, cfg: BridgeConfig, prev: dict[str, float], tanh_eps:
         "low_speed_ratio": low_speed_ratio,
         "high_speed_ref": float(high_speed_ref),
         "tanh_eps": float(tanh_eps),
+        "bounds": {"tau_eq": [float(tau_bounds[0]), float(tau_bounds[1])]},
     }
 
 
@@ -304,6 +294,27 @@ def _print_init_state(init_params: dict[str, float], loaded: bool):
     print(f"  - tau_eq_init: {init_params['tau_eq']}")
 
 
+def _prompt_bounds(name: str, lo: float, hi: float) -> tuple[float, float]:
+    print(f"[INPUT] {name} bounds (current: [{lo}, {hi}])")
+    new_lo = float(_input(f"  - {name}_lower [{lo}]: ", str(lo)))
+    new_hi = float(_input(f"  - {name}_upper [{hi}]: ", str(hi)))
+    if new_lo > new_hi:
+        print(f"[WARN] lower > upper for {name}. Swapping values.")
+        new_lo, new_hi = new_hi, new_lo
+    return float(new_lo), float(new_hi)
+
+
+def _prompt_stage_decision() -> str:
+    print("A) Accept and move on to next stage")
+    print("B) Rerun with different bounds")
+    print("C) quit")
+    while True:
+        choice = _input("Select action [A/B/C]: ", "A").strip().upper()
+        if choice in ("A", "B", "C"):
+            return choice
+        print("Invalid choice. Please select A, B, or C.")
+
+
 def run_stage1(cfg: BridgeConfig, csv_path: Path, outdir: Path, k_bounds: tuple[float, float]):
     print("[INFO] stage1_dataset_policy:")
     print(f"  - csv_path: {csv_path}")
@@ -316,7 +327,7 @@ def run_stage1(cfg: BridgeConfig, csv_path: Path, outdir: Path, k_bounds: tuple[
     print("  - omega_source: omega_real")
     print(f"  - alpha_source: {data['alpha_source']}")
     print(f"  - input_source: {data['input_source']}")
-    print("  - target_source: J*real_alpha_filtered")
+    print(f"  - target_source: J*{data['alpha_source']}")
     print(f"  - K_u_interpretation: {K_U_INTERPRETATION}")
 
     res = _fit_stage1(data, cfg, k_bounds)
@@ -334,7 +345,7 @@ def run_stage1(cfg: BridgeConfig, csv_path: Path, outdir: Path, k_bounds: tuple[
     return payload
 
 
-def run_stage2(cfg: BridgeConfig, csv_path: Path, outdir: Path, stage1_payload: dict, omega_deadband: float):
+def run_stage2(cfg: BridgeConfig, csv_path: Path, outdir: Path, stage1_payload: dict, omega_deadband: float, b_bounds: tuple[float, float]):
     print("[INFO] stage2_dataset_policy:")
     print(f"  - csv_path: {csv_path}")
     print("  - excitation_type: square")
@@ -343,13 +354,14 @@ def run_stage2(cfg: BridgeConfig, csv_path: Path, outdir: Path, stage1_payload: 
 
     prev = stage1_payload["identified_params"]
     data = _load_regression_data(csv_path)
-    res = _fit_stage2(data, cfg, prev=prev, omega_deadband=omega_deadband)
+    res = _fit_stage2(data, cfg, prev=prev, omega_deadband=omega_deadband, b_bounds=b_bounds)
     payload = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "model": "residual_b = J*alpha - K_u*u + m*g*l_com*sin(theta) ~= -b_eq*omega",
         "identified_params": {"b_eq": res["b_eq"]},
         "fixed_params": {"K_u": prev["K_u"], "l_com": prev["l_com"]},
         "metrics": {"rmse": res["rmse"], "omega_deadband": res["omega_deadband"], "used_ratio": res["used_ratio"]},
+        "bounds": res["bounds"],
         "metadata": {
             **_stage_metadata_base(2, csv_path, "square", ["b_eq"], ["K_u", "l_com"], "theta_real", "omega_real", data["alpha_source"], data["input_source"]),
             "filtering_policy": {
@@ -362,7 +374,7 @@ def run_stage2(cfg: BridgeConfig, csv_path: Path, outdir: Path, stage1_payload: 
     return payload
 
 
-def run_stage3(cfg: BridgeConfig, csv_path: Path, outdir: Path, stage1_payload: dict, stage2_payload: dict, tanh_eps: float, high_speed_ref: float):
+def run_stage3(cfg: BridgeConfig, csv_path: Path, outdir: Path, stage1_payload: dict, stage2_payload: dict, tanh_eps: float, high_speed_ref: float, tau_bounds: tuple[float, float]):
     print("[INFO] stage3_dataset_policy:")
     print(f"  - csv_path: {csv_path}")
     print("  - excitation_type: burst")
@@ -375,7 +387,7 @@ def run_stage3(cfg: BridgeConfig, csv_path: Path, outdir: Path, stage1_payload: 
         "l_com": stage1_payload["identified_params"]["l_com"],
         "b_eq": stage2_payload["identified_params"]["b_eq"],
     }
-    res = _fit_stage3(data, cfg, prev=prev, tanh_eps=tanh_eps, high_speed_ref=high_speed_ref)
+    res = _fit_stage3(data, cfg, prev=prev, tanh_eps=tanh_eps, high_speed_ref=high_speed_ref, tau_bounds=tau_bounds)
     print(f"[INFO] stage3_low_speed_usage: ratio={res['low_speed_ratio']:.4f} (|omega| <= {high_speed_ref})")
     payload = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -388,6 +400,7 @@ def run_stage3(cfg: BridgeConfig, csv_path: Path, outdir: Path, stage1_payload: 
             "high_speed_ref": res["high_speed_ref"],
             "tanh_eps": res["tanh_eps"],
         },
+        "bounds": res["bounds"],
         "metadata": {
             **_stage_metadata_base(3, csv_path, "burst", ["tau_eq"], ["K_u", "l_com", "b_eq"], "theta_real", "omega_real", data["alpha_source"], data["input_source"]),
             "filtering_policy": {
@@ -642,14 +655,54 @@ def main():
     stage3 = None
 
     if args.mode in ("regression", "all"):
-        print("[INFO] Running regression stages 1->3 sequentially.")
-        stage1_csv = choose_one_csv(csv_files, "Select Stage 1 CSV (sin excitation):")
-        stage2_csv = choose_one_csv(csv_files, "Select Stage 2 CSV (square excitation):")
-        stage3_csv = choose_one_csv(csv_files, "Select Stage 3 CSV (burst excitation):")
-        stage1 = run_stage1(cfg, stage1_csv, outdir, k_bounds=(args.k_u_min, args.k_u_max))
-        stage2 = run_stage2(cfg, stage2_csv, outdir, stage1_payload=stage1, omega_deadband=args.omega_deadband)
-        stage3 = run_stage3(cfg, stage3_csv, outdir, stage1_payload=stage1, stage2_payload=stage2,
-                            tanh_eps=args.tanh_eps, high_speed_ref=args.high_speed_ref)
+        print("[INFO] Running regression stages 1->3 with per-stage iterative confirmation.")
+
+        k_bounds = (args.k_u_min, args.k_u_max)
+        while True:
+            print("--------------------------------")
+            print("[INFO] Stage 1 (sin) setup")
+            stage1_csv = choose_one_csv(csv_files, "Select Stage 1 CSV (sin excitation):")
+            k_bounds = _prompt_bounds("K_u", k_bounds[0], k_bounds[1])
+            stage1 = run_stage1(cfg, stage1_csv, outdir, k_bounds=k_bounds)
+            print(f"[INFO] Stage 1 result: K_u={stage1['identified_params']['K_u']}, l_com={stage1['identified_params']['l_com']}")
+            action = _prompt_stage_decision()
+            if action == "A":
+                break
+            if action == "C":
+                print("[INFO] Quit requested during Stage 1.")
+                return
+
+        b_bounds = (0.0, float(cfg.b_eq_max))
+        while True:
+            print("--------------------------------")
+            print("[INFO] Stage 2 (square) setup")
+            stage2_csv = choose_one_csv(csv_files, "Select Stage 2 CSV (square excitation):")
+            b_bounds = _prompt_bounds("b_eq", b_bounds[0], b_bounds[1])
+            stage2 = run_stage2(cfg, stage2_csv, outdir, stage1_payload=stage1, omega_deadband=args.omega_deadband, b_bounds=b_bounds)
+            print(f"[INFO] Stage 2 result: b_eq={stage2['identified_params']['b_eq']}")
+            action = _prompt_stage_decision()
+            if action == "A":
+                break
+            if action == "C":
+                print("[INFO] Quit requested during Stage 2.")
+                return
+
+        tau_bounds = (0.0, float(cfg.tau_eq_max))
+        while True:
+            print("--------------------------------")
+            print("[INFO] Stage 3 (burst) setup")
+            stage3_csv = choose_one_csv(csv_files, "Select Stage 3 CSV (burst excitation):")
+            tau_bounds = _prompt_bounds("tau_eq", tau_bounds[0], tau_bounds[1])
+            stage3 = run_stage3(cfg, stage3_csv, outdir, stage1_payload=stage1, stage2_payload=stage2,
+                                tanh_eps=args.tanh_eps, high_speed_ref=args.high_speed_ref, tau_bounds=tau_bounds)
+            print(f"[INFO] Stage 3 result: tau_eq={stage3['identified_params']['tau_eq']}")
+            action = _prompt_stage_decision()
+            if action == "A":
+                break
+            if action == "C":
+                print("[INFO] Quit requested during Stage 3.")
+                return
+
         plot_stage123_regression_summary(
             {"stage1": stage1, "stage2": stage2, "stage3": stage3},
             outdir / "stage123_regression_summary.png",
