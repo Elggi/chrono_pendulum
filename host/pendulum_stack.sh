@@ -157,18 +157,8 @@ run_chrono_pendulum() {
     echo "2) Jetson mode (ROS input)"
     read -p "Enter number: " mode
     echo "--------------------------------"
-    echo "Select real alpha source:"
-    echo "1) derivative (omega_diff)"
-    echo "2) from linear acceleration (tangential_accel)"
-    echo "3) mixed (blend)"
-    read -p "Enter number [1]: " alpha_mode
-    alpha_mode=${alpha_mode:-1}
+    echo "Real alpha source is fixed: filtered derivative (omega_diff)"
     alpha_arg="omega_diff"
-    if [ "$alpha_mode" == "2" ]; then
-        alpha_arg="tangential_accel"
-    elif [ "$alpha_mode" == "3" ]; then
-        alpha_arg="blend"
-    fi
 
     param_json=$(select_json_file "Model Parameter JSON")
 

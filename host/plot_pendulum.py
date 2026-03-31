@@ -9,6 +9,7 @@ import math
 
 import numpy as np
 import matplotlib.pyplot as plt
+from chrono_core.signal_filter import estimate_filtered_alpha_from_omega
 
 try:
     import pandas as pd
@@ -233,8 +234,8 @@ def plot_simulation(df, csv_path: str, args):
     if not np.isfinite(omega_sim).any() and "imu_wz" in df.columns:
         omega_sim = col_to_numpy(df, "imu_wz")
 
-    if not np.isfinite(alpha_sim).any() and np.isfinite(omega_sim).any():
-        alpha_sim = safe_gradient(omega_sim, t)
+    if np.isfinite(omega_sim).any():
+        alpha_sim = estimate_filtered_alpha_from_omega(omega_sim, t=t)
 
     theta_real = col_any(df, ["theta_real"], n)
     omega_real = col_any(df, ["omega_real"], n)
@@ -250,8 +251,8 @@ def plot_simulation(df, csv_path: str, args):
         theta_real = derive_theta_from_encoder(enc, cpr, sign=args.theta_sign, offset=args.theta_offset)
         omega_real = safe_gradient(theta_real, t)
         omega_real = moving_average(omega_real, args.alpha_smooth)
-        alpha_real = safe_gradient(omega_real, t)
-        alpha_real = moving_average(alpha_real, args.alpha_smooth)
+    if np.isfinite(omega_real).any():
+        alpha_real = estimate_filtered_alpha_from_omega(omega_real, t=t)
 
     t_cmd = t.copy()
     if args.apply_cmd_delay_from_meta and meta is not None and meta.get("estimated_delay_ms_final") is not None:
@@ -307,7 +308,7 @@ def plot_simulation(df, csv_path: str, args):
 
     if args.recompute_real_derivatives and np.isfinite(theta_real).any():
         omega_real = moving_average(safe_gradient(theta_real, t), args.real_derivative_smooth)
-        alpha_real = moving_average(safe_gradient(omega_real, t), args.real_derivative_smooth)
+        alpha_real = estimate_filtered_alpha_from_omega(omega_real, t=t)
 
     e_theta = theta_sim - theta_real if np.isfinite(theta_real).any() else np.full(n, np.nan)
     e_omega = omega_sim - omega_real if np.isfinite(omega_real).any() else np.full(n, np.nan)
