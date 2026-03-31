@@ -66,6 +66,18 @@ def moving_average(x: np.ndarray, win: int):
     return y[: len(x)]
 
 
+def safe_gradient(x: np.ndarray, t: np.ndarray):
+    x = np.asarray(x, dtype=float)
+    t = np.asarray(t, dtype=float)
+    if len(x) < 2 or len(t) < 2:
+        return np.zeros_like(x, dtype=float)
+    tc = t.copy()
+    for i in range(1, len(tc)):
+        if not np.isfinite(tc[i]) or tc[i] <= tc[i - 1]:
+            tc[i] = tc[i - 1] + 1e-6
+    return np.gradient(x, tc, edge_order=1)
+
+
 def unwrap_and_zero(theta: np.ndarray):
     out = np.asarray(theta, dtype=float).copy()
     finite = np.isfinite(out)
@@ -222,11 +234,7 @@ def plot_simulation(df, csv_path: str, args):
         omega_sim = col_to_numpy(df, "imu_wz")
 
     if not np.isfinite(alpha_sim).any() and np.isfinite(omega_sim).any():
-        dt = np.diff(t, prepend=t[0])
-        if len(dt) > 1:
-            dt[0] = dt[1]
-        dt[dt <= 0] = np.median(dt[dt > 0]) if np.any(dt > 0) else 0.01
-        alpha_sim = np.gradient(omega_sim, dt)
+        alpha_sim = safe_gradient(omega_sim, t)
 
     theta_real = col_any(df, ["theta_real"], n)
     omega_real = col_any(df, ["omega_real"], n)
@@ -240,13 +248,9 @@ def plot_simulation(df, csv_path: str, args):
     has_real = np.isfinite(theta_real).any() or np.isfinite(omega_real).any() or np.isfinite(alpha_real).any()
     if not has_real and cpr is not None and np.isfinite(enc).any():
         theta_real = derive_theta_from_encoder(enc, cpr, sign=args.theta_sign, offset=args.theta_offset)
-        dt = np.diff(t, prepend=t[0])
-        if len(dt) > 1:
-            dt[0] = dt[1]
-        dt[dt <= 0] = np.median(dt[dt > 0]) if np.any(dt > 0) else 0.01
-        omega_real = np.gradient(theta_real, dt)
+        omega_real = safe_gradient(theta_real, t)
         omega_real = moving_average(omega_real, args.alpha_smooth)
-        alpha_real = np.gradient(omega_real, dt)
+        alpha_real = safe_gradient(omega_real, t)
         alpha_real = moving_average(alpha_real, args.alpha_smooth)
 
     t_cmd = t.copy()
@@ -302,12 +306,8 @@ def plot_simulation(df, csv_path: str, args):
     ax_alpha.set_title("Alpha")
 
     if args.recompute_real_derivatives and np.isfinite(theta_real).any():
-        dt = np.diff(t, prepend=t[0])
-        if len(dt) > 1:
-            dt[0] = dt[1]
-        dt[dt <= 0] = np.median(dt[dt > 0]) if np.any(dt > 0) else 0.01
-        omega_real = moving_average(np.gradient(theta_real, dt), args.real_derivative_smooth)
-        alpha_real = moving_average(np.gradient(omega_real, dt), args.real_derivative_smooth)
+        omega_real = moving_average(safe_gradient(theta_real, t), args.real_derivative_smooth)
+        alpha_real = moving_average(safe_gradient(omega_real, t), args.real_derivative_smooth)
 
     e_theta = theta_sim - theta_real if np.isfinite(theta_real).any() else np.full(n, np.nan)
     e_omega = omega_sim - omega_real if np.isfinite(omega_real).any() else np.full(n, np.nan)

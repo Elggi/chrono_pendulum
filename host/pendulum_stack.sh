@@ -200,13 +200,16 @@ run_rl_fitting() {
     num_episodes=${num_episodes:-1000}
     read -p "batch_size [20]: " batch_size
     batch_size=${batch_size:-20}
-    read -p "seed [7]: " seed
-    seed=${seed:-7}
+    read -p "seed [auto]: " seed
+    if [ -z "$seed" ]; then
+        seed=$(date +%s)
+        echo "[INFO] auto seed: $seed"
+    fi
 
     read -p "domain_randomization ON? (y/n) [y]: " dr_yn
     dr_yn=${dr_yn:-y}
 
-    run_id=$(date -u +"run_%Y%m%d_%H%M%S")
+    run_id=$(date +"run_%Y%m%d_%H%M%S")
     run_outdir="$BASE_DIR/rl_results/runs/$run_id"
     latest_link="$BASE_DIR/rl_results/latest"
 
