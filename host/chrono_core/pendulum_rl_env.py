@@ -387,7 +387,9 @@ class PendulumRLEnv:
         for traj in self.trajectories:
             d = float(params.get("delay_sec", traj.delay_sec_est + jitter))
             sim = simulate_trajectory(traj, params, self.cfg, delay_sec=max(0.0, d))
-            f = compute_error_features(traj, sim, delay_quality=1.0, align_shift_sec=traj.delay_sec_est)
+            # simulate_trajectory already applies delay via delayed command input.
+            # Do not apply an additional alignment shift here.
+            f = compute_error_features(traj, sim, delay_quality=1.0, align_shift_sec=0.0)
             feats.append(f)
             losses.append(weighted_loss(f, self.reward_weights))
         loss = float(np.mean(losses)) if losses else 0.0
