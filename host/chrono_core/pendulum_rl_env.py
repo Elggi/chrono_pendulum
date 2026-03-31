@@ -27,6 +27,62 @@ class ReplayTrajectory:
     delay_sec_est: float
 
 
+def slice_replay_trajectory(traj: ReplayTrajectory, start_idx: int, end_idx: int, name_suffix: str):
+    """Return a contiguous replay-trajectory slice with local time reset."""
+    s = int(max(0, start_idx))
+    e = int(min(len(traj.t), end_idx))
+    if e - s < 2:
+        raise ValueError(f"Trajectory slice too short: {e - s} rows")
+    t = np.asarray(traj.t[s:e], dtype=float).copy()
+    t -= t[0]
+    dt = np.diff(t, prepend=t[0])
+    if len(dt) > 1:
+        dt[0] = dt[1]
+    dt = np.maximum(dt, 1e-6)
+    return ReplayTrajectory(
+        name=f"{traj.name}:{name_suffix}",
+        t=t,
+        dt=dt,
+        cmd_u=np.asarray(traj.cmd_u[s:e], dtype=float).copy(),
+        hw_pwm=np.asarray(traj.hw_pwm[s:e], dtype=float).copy(),
+        theta_real=np.asarray(traj.theta_real[s:e], dtype=float).copy(),
+        omega_real=np.asarray(traj.omega_real[s:e], dtype=float).copy(),
+        alpha_real=np.asarray(traj.alpha_real[s:e], dtype=float).copy(),
+        delay_sec_est=float(traj.delay_sec_est),
+    )
+
+
+def split_replay_trajectory_segments(
+    traj: ReplayTrajectory,
+    seed: int = 0,
+    train_ratio: float = 0.7,
+    val_ratio: float = 0.15,
+    min_segment_len: int = 64,
+):
+    """Split one trajectory into non-overlapping train/val/test segments."""
+    n = len(traj.t)
+    if n < 3 * min_segment_len:
+        raise ValueError(
+            f"Single CSV trajectory has only {n} rows; need at least {3 * min_segment_len} "
+            f"rows to form train/val/test segments of >= {min_segment_len} rows."
+        )
+    train_end = int(max(min_segment_len, min(n - 2 * min_segment_len, train_ratio * n)))
+    val_len = int(max(min_segment_len, min(n - train_end - min_segment_len, val_ratio * n)))
+    val_end = train_end + val_len
+    if val_end > n - min_segment_len:
+        val_end = n - min_segment_len
+    # deterministic segment naming and optional flip for seed parity
+    if int(seed) % 2 == 0:
+        tr = slice_replay_trajectory(traj, 0, train_end, "train")
+        va = slice_replay_trajectory(traj, train_end, val_end, "val")
+        te = slice_replay_trajectory(traj, val_end, n, "test")
+    else:
+        te = slice_replay_trajectory(traj, 0, n - val_end, "test")
+        va = slice_replay_trajectory(traj, n - val_end, n - train_end, "val")
+        tr = slice_replay_trajectory(traj, n - train_end, n, "train")
+    return [tr], [va], [te]
+
+
 def _safe_col(df: pd.DataFrame, col: str, fallback: float = 0.0):
     if col not in df.columns:
         return np.full(len(df), float(fallback), dtype=float)

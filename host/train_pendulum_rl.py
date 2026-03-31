@@ -20,6 +20,7 @@ from chrono_core.pendulum_rl_env import (
     PendulumRLEnv,
     build_init_params,
     load_replay_csv,
+    split_replay_trajectory_segments,
     simulate_trajectory,
     split_trajectories,
     weighted_loss,
@@ -91,25 +92,52 @@ def train_with_sb3(env, val_env, args, history, param_hist):
             self._cursor = len(self.episode_rewards)
             return new
 
-    def _rollout_policy_params(model_obj, sb3_env_obj, deterministic_eval: bool):
-        obs, _ = sb3_env_obj.reset()
+    def _rollout_policy_params(model_obj, eval_env_obj, deterministic_eval: bool):
+        obs, _ = eval_env_obj.reset()
         done = False
         last_info = {}
         while not done:
             action, _ = model_obj.predict(obs, deterministic=deterministic_eval)
-            obs, _, terminated, truncated, info = sb3_env_obj.step(action)
+            obs, _, terminated, truncated, info = eval_env_obj.step(action)
             done = bool(terminated or truncated)
             last_info = info
         params = last_info.get("params", {})
         return {k: float(v) for k, v in params.items()}
 
+    def _coerce_batch_size(requested: int, n_steps_eff: int):
+        req = int(max(1, requested))
+        # Prefer exact divisor to avoid SB3 truncated minibatch warning.
+        divisors = [d for d in range(1, n_steps_eff + 1) if (n_steps_eff % d) == 0]
+        candidates = [d for d in divisors if d <= req]
+        if candidates:
+            return int(max(candidates))
+        return int(min(divisors)) if divisors else 1
+
     sb3_env = _SB3ReplayEnv(env)
     monitor_path = str(Path(args.outdir) / "sb3_monitor.csv")
     sb3_env = Monitor(sb3_env, filename=monitor_path)
+    eval_policy_env = _SB3ReplayEnv(
+        PendulumRLEnv(
+            trajectories=env.trajectories,
+            cfg=env.cfg,
+            init_params=env.center,
+            learn_delay=env.learn_delay,
+            delay_jitter_ms=0.0,
+            domain_randomization=False,
+            seed=args.seed + 1001,
+            max_refine_steps=env.max_refine_steps,
+            reward_weights=env.reward_weights,
+        )
+    )
     steps_per_episode = max(1, int(env.max_refine_steps))
     tb_dir = args.tensorboard_log if args.tensorboard_log else str(Path(args.outdir) / "tensorboard")
     n_steps_eff = max(1, int(args.n_steps))
-    batch_size_eff = min(max(1, int(args.batch_size)), n_steps_eff)
+    batch_size_eff = _coerce_batch_size(args.batch_size, n_steps_eff)
+    if int(batch_size_eff) != int(args.batch_size):
+        print(
+            f"[PPO-CONFIG] adjusted batch_size from {int(args.batch_size)} "
+            f"to {batch_size_eff} so it divides n_steps={n_steps_eff}."
+        )
     reward_cb = _EpisodeRewardCallback()
     model = PPO(
         "MlpPolicy",
@@ -149,7 +177,7 @@ def train_with_sb3(env, val_env, args, history, param_hist):
         )
         ep_rewards = reward_cb.pop_new_rewards()
         ep_reward = float(np.mean(ep_rewards)) if ep_rewards else float("nan")
-        current_params = _rollout_policy_params(model, sb3_env, deterministic_eval=bool(args.eval_deterministic))
+        current_params = _rollout_policy_params(model, eval_policy_env, deterministic_eval=bool(args.eval_deterministic))
         train_loss, train_rmse = evaluate_dataset(env, current_params)
         val_loss, val_rmse = evaluate_dataset(val_env, current_params)
         history["episode_reward"].append(sanitize_metric(ep_reward))
@@ -358,24 +386,38 @@ def main():
             param_data = json.load(f)
 
     init_params = build_init_params(cfg, calibration=calib, parameter_json=param_data)
-    tr_paths, va_paths, te_paths = split_trajectories(
-        csv_paths,
-        seed=args.seed,
-        allow_small_split=(args.allow_small_split or args.run_mode == "debug"),
-    )
-    print(f"[DATA] split counts | train={len(tr_paths)} val={len(va_paths)} test={len(te_paths)}")
-    tr_set = {str(p.resolve()) for p in tr_paths}
-    va_set = {str(p.resolve()) for p in va_paths}
-    overlap = tr_set.intersection(va_set)
-    if overlap:
-        msg = f"Train/val split overlap detected ({len(overlap)} files): {sorted(overlap)}"
-        if args.run_mode != "debug":
-            raise SystemExit(f"[SPLIT-ERROR] {msg}")
-        print(f"[SPLIT-WARN] {msg} (allowed only in debug mode)")
-
-    train_traj = [load_replay_csv(p, cfg, delay_override=args.delay_override) for p in tr_paths]
-    val_traj = [load_replay_csv(p, cfg, delay_override=args.delay_override) for p in va_paths]
-    test_traj = [load_replay_csv(p, cfg, delay_override=args.delay_override) for p in te_paths]
+    if len(csv_paths) == 1:
+        full_traj = load_replay_csv(csv_paths[0], cfg, delay_override=args.delay_override)
+        train_traj, val_traj, test_traj = split_replay_trajectory_segments(
+            full_traj,
+            seed=args.seed,
+            train_ratio=0.7,
+            val_ratio=0.15,
+            min_segment_len=64,
+        )
+        tr_paths, va_paths, te_paths = [csv_paths[0]], [csv_paths[0]], [csv_paths[0]]
+        print(
+            f"[DATA] single_csv_segment_split rows | "
+            f"train={len(train_traj[0].t)} val={len(val_traj[0].t)} test={len(test_traj[0].t)}"
+        )
+    else:
+        tr_paths, va_paths, te_paths = split_trajectories(
+            csv_paths,
+            seed=args.seed,
+            allow_small_split=(args.allow_small_split or args.run_mode == "debug"),
+        )
+        print(f"[DATA] split counts | train={len(tr_paths)} val={len(va_paths)} test={len(te_paths)}")
+        tr_set = {str(p.resolve()) for p in tr_paths}
+        va_set = {str(p.resolve()) for p in va_paths}
+        overlap = tr_set.intersection(va_set)
+        if overlap:
+            msg = f"Train/val split overlap detected ({len(overlap)} files): {sorted(overlap)}"
+            if args.run_mode != "debug":
+                raise SystemExit(f"[SPLIT-ERROR] {msg}")
+            print(f"[SPLIT-WARN] {msg} (allowed only in debug mode)")
+        train_traj = [load_replay_csv(p, cfg, delay_override=args.delay_override) for p in tr_paths]
+        val_traj = [load_replay_csv(p, cfg, delay_override=args.delay_override) for p in va_paths]
+        test_traj = [load_replay_csv(p, cfg, delay_override=args.delay_override) for p in te_paths]
 
     env = PendulumRLEnv(
         trajectories=train_traj,
@@ -446,6 +488,12 @@ def main():
         "calibration_json": args.calibration_json,
         "cpr": None if not np.isfinite(cfg.cpr) else float(cfg.cpr),
         "dataset_files": [str(p) for p in csv_paths],
+        "dataset_split": {
+            "method": "single_csv_segments" if len(csv_paths) == 1 else "file_level",
+            "train_count": len(train_traj),
+            "val_count": len(val_traj),
+            "test_count": len(test_traj),
+        },
         "reward_weights": env.reward_weights,
         "randomization": {
             "domain_randomization": args.domain_randomization,
