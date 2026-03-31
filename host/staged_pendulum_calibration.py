@@ -38,6 +38,64 @@ class StageContext:
     stage3: dict[str, float] | None = None
 
 
+def _input(prompt: str, default: str | None = None) -> str:
+    raw = input(prompt).strip()
+    if raw == "" and default is not None:
+        return default
+    return raw
+
+
+def list_csv_logs(base_dir: Path) -> list[Path]:
+    return sorted(base_dir.glob("*.csv"))
+
+
+def choose_one_csv(items: list[Path], title: str) -> Path:
+    if not items:
+        raise ValueError("No CSV files found in run_logs.")
+    print(title)
+    for i, item in enumerate(items, start=1):
+        print(f"[{i}] {item.name}")
+    while True:
+        raw = _input("Select index: ")
+        try:
+            idx = int(raw)
+            chosen = items[idx - 1]
+            print(f"[INFO] selected_csv: {chosen}")
+            return chosen
+        except (ValueError, IndexError):
+            print("Invalid selection. Please choose a valid index.")
+
+
+def choose_many_csv(items: list[Path], title: str) -> list[Path]:
+    if not items:
+        raise ValueError("No CSV files found in run_logs.")
+    print(title)
+    for i, item in enumerate(items, start=1):
+        print(f"[{i}] {item.name}")
+    raw = _input("Select indices for Stage4 PPO (comma separated, default: same as Stage3): ", "")
+    if raw.strip() == "":
+        return []
+    while True:
+        try:
+            idx = []
+            for tok in raw.split(","):
+                tok = tok.strip()
+                if tok:
+                    idx.append(int(tok))
+            chosen = [items[i - 1] for i in idx]
+            print(f"[INFO] selected_stage4_csv: {[str(p) for p in chosen]}")
+            return chosen
+        except (ValueError, IndexError):
+            raw = _input("Invalid selection. Re-enter comma separated indices (or Enter to skip): ", "")
+            if raw.strip() == "":
+                return []
+
+
+def load_stage_json(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 def save_stage_json(path: Path, payload: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
@@ -419,14 +477,15 @@ def run_stage4(cfg: BridgeConfig, outdir: Path, stage1_payload: dict, stage2_pay
     plot_param_convergence(param_hist, stage_dir)
     return payload
 
+    cfg.K_u_init = 1.0e-5
+    cfg.b_eq_init = 0.0
+    cfg.tau_eq_init = 0.0
+    cfg.l_com_init = 0.5 * float(cfg.link_L)
 
 def parse_args():
     p = argparse.ArgumentParser(description="Sequential staged identification + PPO fine-tuning")
     p.add_argument("--run_logs", type=Path, default=Path(__file__).resolve().parent / "run_logs")
-    p.add_argument("--stage1_csv", type=Path)
-    p.add_argument("--stage2_csv", type=Path)
-    p.add_argument("--stage3_csv", type=Path)
-    p.add_argument("--stage4_csv", nargs="*", type=Path, default=[])
+    p.add_argument("--mode", choices=["regression", "rl", "all"], default="all")
     p.add_argument("--calibration_json", type=Path, default=None)
     p.add_argument("--k_u_min", type=float, default=1e-6)
     p.add_argument("--k_u_max", type=float, default=1.0)
@@ -434,9 +493,10 @@ def parse_args():
     p.add_argument("--tanh_eps", type=float, default=0.2)
     p.add_argument("--high_speed_ref", type=float, default=3.0)
     p.add_argument("--ppo_episodes", type=int, default=80)
-    p.add_argument("--skip_stage4", action="store_true")
     return p.parse_args()
 
+    init_params = build_init_params(cfg, calibration=None, parameter_json=None)
+    _print_init_state(init_params, loaded=loaded)
 
 def main():
     args = parse_args()
@@ -455,19 +515,39 @@ def main():
     init_params = build_init_params(cfg, calibration=None, parameter_json=None)
     _print_init_state(init_params, loaded=loaded)
 
-    if args.stage1_csv is None or args.stage2_csv is None or args.stage3_csv is None:
-        raise ValueError("stage1_csv, stage2_csv, and stage3_csv are required for sequential identification")
-
     outdir = args.run_logs
     outdir.mkdir(parents=True, exist_ok=True)
 
-    stage1 = run_stage1(cfg, args.stage1_csv, outdir, k_bounds=(args.k_u_min, args.k_u_max))
-    stage2 = run_stage2(cfg, args.stage2_csv, outdir, stage1_payload=stage1, omega_deadband=args.omega_deadband)
-    stage3 = run_stage3(cfg, args.stage3_csv, outdir, stage1_payload=stage1, stage2_payload=stage2,
-                        tanh_eps=args.tanh_eps, high_speed_ref=args.high_speed_ref)
+    csv_files = list_csv_logs(outdir)
 
-    if not args.skip_stage4:
-        stage4_csv = args.stage4_csv if args.stage4_csv else [args.stage3_csv]
+    stage1 = None
+    stage2 = None
+    stage3 = None
+
+    if args.mode in ("regression", "all"):
+        print("[INFO] Running regression stages 1->3 sequentially.")
+        stage1_csv = choose_one_csv(csv_files, "Select Stage 1 CSV (sin excitation):")
+        stage2_csv = choose_one_csv(csv_files, "Select Stage 2 CSV (square excitation):")
+        stage3_csv = choose_one_csv(csv_files, "Select Stage 3 CSV (burst excitation):")
+        stage1 = run_stage1(cfg, stage1_csv, outdir, k_bounds=(args.k_u_min, args.k_u_max))
+        stage2 = run_stage2(cfg, stage2_csv, outdir, stage1_payload=stage1, omega_deadband=args.omega_deadband)
+        stage3 = run_stage3(cfg, stage3_csv, outdir, stage1_payload=stage1, stage2_payload=stage2,
+                            tanh_eps=args.tanh_eps, high_speed_ref=args.high_speed_ref)
+
+    if args.mode in ("rl", "all"):
+        print("[INFO] Running Stage 4 PPO fine-tuning only.")
+        if stage1 is None:
+            stage1_path = outdir / "stage1_params.json"
+            stage2_path = outdir / "stage2_params.json"
+            stage3_path = outdir / "stage3_params.json"
+            if not (stage1_path.exists() and stage2_path.exists() and stage3_path.exists()):
+                raise FileNotFoundError("Stage4 requires stage1_params.json, stage2_params.json, stage3_params.json in run_logs.")
+            stage1 = load_stage_json(stage1_path)
+            stage2 = load_stage_json(stage2_path)
+            stage3 = load_stage_json(stage3_path)
+        stage4_csv = choose_many_csv(csv_files, "Select Stage 4 PPO CSV list (Enter => use Stage3 csv policy).")
+        if not stage4_csv:
+            stage4_csv = [choose_one_csv(csv_files, "Select fallback CSV for Stage 4 PPO:")]
         run_stage4(cfg, outdir, stage1_payload=stage1, stage2_payload=stage2, stage3_payload=stage3,
                    stage4_csv=stage4_csv, episodes=args.ppo_episodes)
 
