@@ -1,400 +1,109 @@
 {
-  "created_at_utc": "2026-03-29T22:44:13Z",
+  "created_at_utc": "2026-03-30T18:39:39Z",
   "method": "manual_rotation_with_orientation",
   "summary": {
-    "mean_cpr": 195.25,
-    "mean_radius_m": 0.24978997226333738,
-    "trial_count_cpr": 8,
-    "trial_count_r": 70
-  },
-  "delay": {
-    "effective_control_delay_ms": 149.99999999999997,
-    "locked": true
+    "mean_cpr": 199.6,
+    "mean_radius_m": 0.2497968804675245,
+    "trial_count_cpr": 5,
+    "trial_count_r": 15
   },
   "cpr_trials": [
     {
       "trial": 1,
-      "cpr": 199.0
+      "cpr": 191.0
     },
     {
       "trial": 2,
-      "cpr": 189.0
-    },
-    {
-      "trial": 3,
-      "cpr": 189.0
-    },
-    {
-      "trial": 4,
       "cpr": 187.0
     },
     {
+      "trial": 3,
+      "cpr": 226.0
+    },
+    {
+      "trial": 4,
+      "cpr": 172.0
+    },
+    {
       "trial": 5,
-      "cpr": 185.0
-    },
-    {
-      "trial": 6,
-      "cpr": 182.0
-    },
-    {
-      "trial": 7,
-      "cpr": 196.0
-    },
-    {
-      "trial": 8,
-      "cpr": 235.0
+      "cpr": 222.0
     }
   ],
   "radius_trials": [
     {
-      "trial": 579,
+      "trial": 437,
       "method": "anti_parallel_chord",
-      "radius_m": 0.24966446493119845
+      "radius_m": 0.24978227208984458
     },
     {
-      "trial": 580,
+      "trial": 438,
       "method": "anti_parallel_chord",
-      "radius_m": 0.24990208846324533
+      "radius_m": 0.24998287747494974
     },
     {
-      "trial": 581,
+      "trial": 439,
       "method": "anti_parallel_chord",
-      "radius_m": 0.2499869257970506
+      "radius_m": 0.24987562169811536
     },
     {
-      "trial": 582,
+      "trial": 440,
       "method": "anti_parallel_chord",
-      "radius_m": 0.24990597109603113
+      "radius_m": 0.24941447564919733
     },
     {
-      "trial": 583,
+      "trial": 480,
       "method": "anti_parallel_chord",
-      "radius_m": 0.24965286790473312
+      "radius_m": 0.24999178377524545
     },
     {
-      "trial": 704,
+      "trial": 515,
       "method": "anti_parallel_chord",
-      "radius_m": 0.2495353412403364
+      "radius_m": 0.24987673458106935
     },
     {
-      "trial": 705,
+      "trial": 516,
       "method": "anti_parallel_chord",
-      "radius_m": 0.2496916456118477
+      "radius_m": 0.24985090985304678
     },
     {
-      "trial": 706,
+      "trial": 736,
       "method": "anti_parallel_chord",
-      "radius_m": 0.24981299174397392
+      "radius_m": 0.24955857799559347
     },
     {
-      "trial": 707,
+      "trial": 737,
       "method": "anti_parallel_chord",
-      "radius_m": 0.24990127937019016
+      "radius_m": 0.2499594469327493
     },
     {
-      "trial": 708,
+      "trial": 738,
       "method": "anti_parallel_chord",
-      "radius_m": 0.24995751086557574
+      "radius_m": 0.24988737968220462
     },
     {
-      "trial": 709,
+      "trial": 779,
       "method": "anti_parallel_chord",
-      "radius_m": 0.24998188712772346
+      "radius_m": 0.2495098482148213
     },
     {
-      "trial": 710,
+      "trial": 780,
       "method": "anti_parallel_chord",
-      "radius_m": 0.2499741882538545
+      "radius_m": 0.24989013280790986
     },
     {
-      "trial": 711,
+      "trial": 781,
       "method": "anti_parallel_chord",
-      "radius_m": 0.2499340622274359
+      "radius_m": 0.2499970407447538
     },
     {
-      "trial": 712,
+      "trial": 782,
       "method": "anti_parallel_chord",
-      "radius_m": 0.24986066766077242
+      "radius_m": 0.24986265747216682
     },
     {
-      "trial": 713,
+      "trial": 783,
       "method": "anti_parallel_chord",
-      "radius_m": 0.24975392231186244
-    },
-    {
-      "trial": 714,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24961490538621145
-    },
-    {
-      "trial": 715,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24944238090674764
-    },
-    {
-      "trial": 793,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.2494855876469785
-    },
-    {
-      "trial": 794,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24967877706538236
-    },
-    {
-      "trial": 795,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.2498246054693112
-    },
-    {
-      "trial": 796,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24992185709963335
-    },
-    {
-      "trial": 797,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24997570429309454
-    },
-    {
-      "trial": 798,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.249984215983543
-    },
-    {
-      "trial": 799,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.2499448500037752
-    },
-    {
-      "trial": 800,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.2498559972185182
-    },
-    {
-      "trial": 801,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24971502644204635
-    },
-    {
-      "trial": 802,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24952178698547078
-    },
-    {
-      "trial": 884,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24938073551164835
-    },
-    {
-      "trial": 885,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24969022556902187
-    },
-    {
-      "trial": 886,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24988662980069518
-    },
-    {
-      "trial": 887,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.249958471365839
-    },
-    {
-      "trial": 888,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24988943313544226
-    },
-    {
-      "trial": 889,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24967147947836538
-    },
-    {
-      "trial": 1190,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.2496760516556612
-    },
-    {
-      "trial": 1191,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.2498891672534973
-    },
-    {
-      "trial": 1192,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24996925473382267
-    },
-    {
-      "trial": 1193,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.2498964426585543
-    },
-    {
-      "trial": 1194,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24964790878424253
-    },
-    {
-      "trial": 1484,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24980440936573906
-    },
-    {
-      "trial": 1485,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24998053645292023
-    },
-    {
-      "trial": 1486,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.2498699526381829
-    },
-    {
-      "trial": 1487,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24945204063034213
-    },
-    {
-      "trial": 1589,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24948011123334402
-    },
-    {
-      "trial": 1590,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24978641379015382
-    },
-    {
-      "trial": 1591,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24995616850817542
-    },
-    {
-      "trial": 1592,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.2499905805276932
-    },
-    {
-      "trial": 1593,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24988374426366203
-    },
-    {
-      "trial": 1594,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.249631701602425
-    },
-    {
-      "trial": 1895,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24954271213693055
-    },
-    {
-      "trial": 1896,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24973678528908233
-    },
-    {
-      "trial": 1897,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24987706076581334
-    },
-    {
-      "trial": 1898,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24995957573622446
-    },
-    {
-      "trial": 1899,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24997440004947952
-    },
-    {
-      "trial": 1900,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24990699730807936
-    },
-    {
-      "trial": 1901,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24974120941796876
-    },
-    {
-      "trial": 1902,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24946135695504498
-    },
-    {
-      "trial": 1964,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24943847057068072
-    },
-    {
-      "trial": 1965,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24981333569792216
-    },
-    {
-      "trial": 1966,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24997862802453252
-    },
-    {
-      "trial": 1967,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24992441227581294
-    },
-    {
-      "trial": 1968,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24964165284684417
-    },
-    {
-      "trial": 2045,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24953096828129898
-    },
-    {
-      "trial": 2046,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.2497072265634354
-    },
-    {
-      "trial": 2047,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24984503276767267
-    },
-    {
-      "trial": 2048,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.2499393853998444
-    },
-    {
-      "trial": 2049,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.24999114374083617
-    },
-    {
-      "trial": 2050,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.2499954573786091
-    },
-    {
-      "trial": 2051,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.2499448878759611
-    },
-    {
-      "trial": 2052,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.2498309916466528
-    },
-    {
-      "trial": 2053,
-      "method": "anti_parallel_chord",
-      "radius_m": 0.2496433996389179
+      "radius_m": 0.2495134480411997
     }
   ]
 }
