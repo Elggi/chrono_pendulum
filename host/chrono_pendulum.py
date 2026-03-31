@@ -814,6 +814,15 @@ def main():
     meta = {
         "log_csv": log_csv,
         "config": asdict(cfg),
+        "inertia": {
+            "J_rod": float(model.J_rod),
+            "J_imu": float(model.J_imu),
+            "J_total": float(model.J_total),
+            "rod_mass": float(cfg.rod_mass),
+            "rod_length": float(cfg.rod_length),
+            "imu_mass": float(cfg.imu_mass),
+            "r_imu": float(cfg.r_imu),
+        },
         "calibration_json": cfg.calibration_json if calib is not None else None,
         "radius_json": args.radius_json,
         "estimated_delay_ms_final": 0.0,
