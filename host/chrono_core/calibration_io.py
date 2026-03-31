@@ -5,7 +5,7 @@ import os
 from .config import BridgeConfig
 
 
-def apply_calibration_json(cfg: BridgeConfig, json_path: str | None):
+def apply_calibration_json(cfg: BridgeConfig, json_path: str | None, apply_model_init: bool = False):
     if not json_path or not os.path.exists(json_path):
         return None
 
@@ -30,10 +30,14 @@ def apply_calibration_json(cfg: BridgeConfig, json_path: str | None):
     if not isinstance(calib.get("summary"), dict):
         calib["summary"] = summary
 
-    cfg.l_com_init = float(model_init.get("l_com", cfg.l_com_init))
-    cfg.b_eq_init = float(model_init.get("b_eq", model_init.get("b", cfg.b_eq_init)))
-    cfg.tau_eq_init = float(model_init.get("tau_eq", model_init.get("tau_c", cfg.tau_eq_init)))
-    cfg.K_u_init = float(model_init.get("K_u", model_init.get("k_u", cfg.K_u_init)))
+    # Keep fresh surrogate init values unless explicitly requested otherwise.
+    # This prevents calibration JSON model fields from silently overriding
+    # initialization before staged regression / RL finds new parameters.
+    if apply_model_init:
+        cfg.l_com_init = float(model_init.get("l_com", cfg.l_com_init))
+        cfg.b_eq_init = float(model_init.get("b_eq", model_init.get("b", cfg.b_eq_init)))
+        cfg.tau_eq_init = float(model_init.get("tau_eq", model_init.get("tau_c", cfg.tau_eq_init)))
+        cfg.K_u_init = float(model_init.get("K_u", model_init.get("k_u", cfg.K_u_init)))
     cfg.r_imu = float(
         model_init.get(
             "r_imu",

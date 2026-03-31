@@ -33,6 +33,7 @@ from chrono_core.dynamics import PendulumModel, compute_model_torque_and_electri
 from chrono_core.calibration_io import apply_calibration_json, extract_radius_from_json
 from chrono_core.pendulum_rl_env import build_init_params
 from chrono_core.log_schema import PENDULUM_LOG_COLUMNS
+from chrono_core.signal_filter import estimate_filtered_alpha_from_omega
 
 
 # ============================================================
@@ -506,16 +507,16 @@ def main():
     ap.add_argument("--parameter-json", default="", help="RL/exported parameter JSON containing model_init and optional delay_sec")
     ap.add_argument("--radius-json", default="./run_logs/calibration_latest.json",
                     help="JSON file containing measured radius (e.g., calibration_latest.json).")
-    ap.add_argument("--l-com", type=float, default=0.1425)
-    ap.add_argument("--b", type=float, default=0.030)
-    ap.add_argument("--tau-c", type=float, default=0.080)
-    ap.add_argument("--k-u", type=float, default=0.0025, help="motor gain in tau_motor = K_u * u")
+    ap.add_argument("--l-com", type=float, default=None, help="default: link_length/2 for fresh runs")
+    ap.add_argument("--b", type=float, default=None, help="default: near-zero fresh initialization")
+    ap.add_argument("--tau-c", type=float, default=None, help="default: near-zero fresh initialization")
+    ap.add_argument("--k-u", type=float, default=None, help="default: near-zero positive fresh initialization")
     ap.add_argument("--r-imu", type=float, default=0.285, help="IMU radius from pivot [m]")
     ap.add_argument(
         "--real-alpha-source",
         choices=["omega_diff", "tangential_accel", "blend"],
         default="omega_diff",
-        help="real alpha estimation source",
+        help="deprecated; real alpha now always uses filtered d(omega)/dt",
     )
     args = ap.parse_args()
 
@@ -538,10 +539,10 @@ def main():
     cfg.link_L = args.link_length
     cfg.radius_m = args.link_length
     cfg.r_imu = args.r_imu
-    cfg.l_com_init = args.l_com
-    cfg.b_eq_init = args.b
-    cfg.tau_eq_init = args.tau_c
-    cfg.K_u_init = args.k_u
+    cfg.l_com_init = float(args.l_com) if args.l_com is not None else (0.5 * float(args.link_length))
+    cfg.b_eq_init = float(args.b) if args.b is not None else float(cfg.b_eq_init)
+    cfg.tau_eq_init = float(args.tau_c) if args.tau_c is not None else float(cfg.tau_eq_init)
+    cfg.K_u_init = float(args.k_u) if args.k_u is not None else float(cfg.K_u_init)
     cfg.delay_init_ms = args.delay_ms
 
     calib = apply_calibration_json(cfg, args.calibration_json)
@@ -607,17 +608,15 @@ def main():
         wr.writerow(PENDULUM_LOG_COLUMNS)
 
         wall_t0 = now_wall()
-        alpha_prev = 0.0
         omega_prev = model.get_omega()
         t_prev = 0.0
         enc_ref = None
         enc_prev = None
         theta_real_prev = None
-        omega_real_prev = 0.0
-        t_real_prev = None
         warmup_sec = 1.0
         imu_R0 = None
-        gravity_ref = None
+        real_omega_hist = deque(maxlen=401)
+        real_time_hist = deque(maxlen=401)
         run_limit_sec = float("inf") if args.duration <= 0.0 else float(args.duration)
 
         if host_controller is not None:
@@ -639,7 +638,9 @@ def main():
             print(f"[INFO] run limit: {run_limit_sec:.1f}s")
         else:
             print("[INFO] run limit: none (quit with q/ESC)")
-        print(f"[INFO] real alpha source: {args.real_alpha_source}")
+        if args.real_alpha_source != "omega_diff":
+            print("[INFO] --real-alpha-source is deprecated and ignored; using filtered d(omega)/dt.")
+        print("[INFO] real alpha source: filtered derivative of omega")
 
         try:
             while (now_wall() - wall_t0) < run_limit_sec:
@@ -700,9 +701,7 @@ def main():
                 theta = model.get_theta()
                 omega = model.get_omega()
                 alpha = (omega - omega_prev) / max(sim_t - t_prev, cfg.step) if sim_t > 0 else 0.0
-                alpha = 0.8 * alpha_prev + 0.2 * alpha
                 alpha = sanitize_float(alpha)
-                alpha_prev = alpha
                 omega_prev = omega
                 t_prev = sim_t
 
@@ -719,42 +718,25 @@ def main():
                 if snap.get("imu_has_data", False):
                     q = snap["imu_q"]
                     w_imu_raw = snap["imu_w"]
-                    a_imu_raw = snap["imu_a"]
                     R_abs = quat_to_rotmat(float(q[0]), float(q[1]), float(q[2]), float(q[3]))
                     if imu_R0 is None:
                         imu_R0 = R_abs.copy()
-                        gravity_ref = np.asarray(a_imu_raw, dtype=float).copy()
                     R_rel = imu_R0.T @ R_abs
                     tip_vec = R_rel @ np.array([0.0, -cfg.radius_m, 0.0], dtype=float)
                     # User view is from behind -> use -x on XY plane.
                     theta_real = float(math.atan2(float(tip_vec[1]), float(-tip_vec[0])))
-                    if theta_real_prev is not None and t_real_prev is not None:
-                        dt_real = max(sim_t - t_real_prev, cfg.step)
-                    else:
-                        dt_real = cfg.step
                     omega_real = float(w_imu_raw[2])
-                    if t_real_prev is not None:
-                        alpha_diff = (omega_real - omega_real_prev) / dt_real
-                    else:
-                        alpha_diff = alpha
-                    if gravity_ref is not None and np.linalg.norm(tip_vec[:2]) > 1e-6:
-                        a_real = np.asarray(a_imu_raw, dtype=float) - gravity_ref
-                        r_hat = tip_vec / max(np.linalg.norm(tip_vec), 1e-9)
-                        a_tan = a_real - float(np.dot(a_real, r_hat)) * r_hat
-                        t_hat = np.array([-r_hat[1], -r_hat[0], 0.0], dtype=float)
-                        alpha_acc = float(np.dot(a_tan, t_hat)) / max(cfg.radius_m, 1e-6)
-                        if args.real_alpha_source == "tangential_accel":
-                            alpha_real = alpha_acc
-                        elif args.real_alpha_source == "blend":
-                            alpha_real = 0.7 * alpha_diff + 0.3 * alpha_acc
-                        else:
-                            alpha_real = alpha_diff
-                    else:
-                        alpha_real = alpha_diff
+
+                real_omega_hist.append(float(omega_real))
+                real_time_hist.append(float(sim_t))
+                alpha_real = float(
+                    estimate_filtered_alpha_from_omega(
+                        np.asarray(real_omega_hist, dtype=float),
+                        t=np.asarray(real_time_hist, dtype=float),
+                    )[-1]
+                )
 
                 theta_real_prev = theta_real
-                omega_real_prev = omega_real
-                t_real_prev = sim_t
                 e_theta = theta - theta_real
                 e_omega = omega - omega_real
                 e_alpha = alpha - alpha_real
