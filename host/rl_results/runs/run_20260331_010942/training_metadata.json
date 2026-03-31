@@ -1,0 +1,40 @@
+{
+  "timestamp": "2026-03-31T01:13:15.963976+00:00",
+  "settings": {
+    "calibration_json": "/home/kyudev/Documents/chrono_pendulum_final/host/run_logs/calibration_latest.json",
+    "parameter_json": "",
+    "csv": "/home/kyudev/Documents/chrono_pendulum_final/host/run_logs/chrono_run_1.csv",
+    "csv_dir": "",
+    "outdir": "/home/kyudev/Documents/chrono_pendulum_final/host/rl_results/runs/run_20260331_010942",
+    "num_episodes": 100,
+    "gamma": 0.995,
+    "lam": 0.98,
+    "kl_targ": 0.003,
+    "batch_size": 20,
+    "device": "cpu",
+    "learn_delay": false,
+    "delay_override": null,
+    "delay_jitter_ms": 3.0,
+    "domain_randomization": true,
+    "seed": 7,
+    "max_refine_steps": 12,
+    "log_every_episodes": 10,
+    "tensorboard_log": ""
+  },
+  "calibration_json": "/home/kyudev/Documents/chrono_pendulum_final/host/run_logs/calibration_latest.json",
+  "cpr": 199.6,
+  "dataset_files": [
+    "/home/kyudev/Documents/chrono_pendulum_final/host/run_logs/chrono_run_1.csv"
+  ],
+  "reward_weights": {},
+  "randomization": {
+    "domain_randomization": true,
+    "delay_jitter_ms": 3.0
+  },
+  "best_validation_score": 77.07024376854356,
+  "delay_estimates_sec": {
+    "chrono_run_1.csv": 0.0
+  },
+  "tensorboard_log": "/home/kyudev/Documents/chrono_pendulum_final/host/rl_results/runs/run_20260331_010942/tensorboard",
+  "sb3_monitor_csv": "/home/kyudev/Documents/chrono_pendulum_final/host/rl_results/runs/run_20260331_010942/sb3_monitor.csv"
+}

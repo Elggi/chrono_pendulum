@@ -243,6 +243,8 @@ def plot_simulation(df, csv_path: str, args):
     theta_real = unwrap_and_zero(theta_real)
     if np.isfinite(theta_real).any():
         theta_real = moving_average(theta_real, args.real_theta_smooth)
+    theta_sim = unwrap_and_zero(theta_sim)
+    theta_real = unwrap_and_zero(theta_real)
     has_real = np.isfinite(theta_real).any() or np.isfinite(omega_real).any() or np.isfinite(alpha_real).any()
     if not has_real and cpr is not None and np.isfinite(enc).any():
         theta_real = derive_theta_from_encoder(enc, cpr, sign=args.theta_sign, offset=args.theta_offset)
