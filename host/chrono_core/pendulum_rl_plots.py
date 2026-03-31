@@ -156,3 +156,26 @@ def plot_rl_dashboard(history: dict, param_history: dict, outdir: Path):
     ax.legend(loc="best")
 
     _save(fig, outdir / "rl_dashboard.png")
+
+
+def plot_stage1_regression_summary(y_true, y_pred, outpath: Path):
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    if y_true.size == 0:
+        return
+    fig, axs = plt.subplots(1, 2, figsize=(11, 4.2))
+    axs[0].plot(y_true, label="target J*alpha", alpha=0.8)
+    axs[0].plot(y_pred, label="regression fit", alpha=0.8)
+    axs[0].set_xlabel("sample")
+    axs[0].set_ylabel("torque [N*m]")
+    axs[0].grid(True, alpha=0.3)
+    axs[0].legend(loc="best")
+
+    axs[1].scatter(y_true, y_pred, s=6, alpha=0.4)
+    y_min = float(np.nanmin([np.min(y_true), np.min(y_pred)]))
+    y_max = float(np.nanmax([np.max(y_true), np.max(y_pred)]))
+    axs[1].plot([y_min, y_max], [y_min, y_max], "k--", linewidth=1.0)
+    axs[1].set_xlabel("target J*alpha")
+    axs[1].set_ylabel("predicted")
+    axs[1].grid(True, alpha=0.3)
+    _save(fig, outpath)
