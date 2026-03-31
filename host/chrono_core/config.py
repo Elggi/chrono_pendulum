@@ -34,9 +34,9 @@ class BridgeConfig:
     rod_length: float = 0.285
     # IMU radius from pivot (loaded from calibration when available)
     r_imu: float = 0.285
-    l_com_init: float = 0.1425
+    l_com_init: float = 0.1425  # default midpoint for 0.285 m link
     # Motor gain in surrogate dynamics: tau_motor = K_u * u
-    K_u_init: float = 0.0025
+    K_u_init: float = 1.0e-5
     # Legacy aliases kept to avoid breaking old scripts/options.
     link_mass: float = 0.200
     J_cm_base: float = 0.0
@@ -55,8 +55,8 @@ class BridgeConfig:
     pwm_step: float = 10.0
 
     # Surrogate damping/friction parameters
-    b_eq_init: float = 0.030
-    tau_eq_init: float = 0.080
+    b_eq_init: float = 0.0
+    tau_eq_init: float = 0.0
     tanh_eps: float = 0.05
 
     # fixed control delay (set from CLI/calibration/parameter JSON)

@@ -74,7 +74,7 @@ def start_imu_viewer_process():
 def build_replay_series(args):
     cfg = BridgeConfig()
     if args.calibration_json:
-        apply_calibration_json(cfg, args.calibration_json)
+        apply_calibration_json(cfg, args.calibration_json, apply_model_init=True)
 
     if args.parameter_json:
         param_data = json.load(open(args.parameter_json, "r", encoding="utf-8"))

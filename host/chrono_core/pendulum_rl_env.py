@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from .config import BridgeConfig
+from .signal_filter import estimate_filtered_alpha_from_omega
 
 PARAM_KEYS = ["K_u", "b_eq", "tau_eq", "l_com"]
 
@@ -25,6 +26,12 @@ class ReplayTrajectory:
     omega_real: np.ndarray
     alpha_real: np.ndarray
     delay_sec_est: float
+    alpha_real_raw: np.ndarray | None = None
+    theta_source: str = "theta_real"
+    omega_source: str = "omega_real"
+    alpha_source: str = "real_alpha_filtered"
+    input_source: str = "cmd_u_raw"
+    target_source: str = "J*real_alpha_filtered"
 
 
 def _safe_col(df: pd.DataFrame, col: str, fallback: float = 0.0):
@@ -260,30 +267,40 @@ def load_replay_csv(path: str | Path, cfg: BridgeConfig, delay_override: float |
         dt[0] = dt[1]
     dt = np.maximum(dt, 1e-6)
 
-    cmd_u = _safe_col(df, "cmd_u_raw")
+    if "cmd_u_raw" in df.columns:
+        cmd_u = _safe_col(df, "cmd_u_raw")
+        input_source = "cmd_u_raw"
+    elif "cmd_u" in df.columns:
+        cmd_u = _safe_col(df, "cmd_u")
+        input_source = "cmd_u"
+    else:
+        cmd_u = _safe_col(df, "cmd_u_raw")
+        input_source = "cmd_u_raw_missing_fallback_zero"
     hw_pwm = _safe_col(df, "hw_pwm")
     theta_real = _safe_col(df, "theta_real", np.nan)
     omega_real = _safe_col(df, "omega_real", np.nan)
-    alpha_real = _safe_col(df, "alpha_real", np.nan)
+    alpha_real_raw = _safe_col(df, "alpha_real", np.nan)
+    theta_source = "theta_real"
+    omega_source = "omega_real"
 
     # fallback to sim columns when real estimates are absent in old logs
     if not np.isfinite(theta_real).any():
         theta_real = _safe_col(df, "theta")
+        theta_source = "theta(sim_fallback)"
     if not np.isfinite(omega_real).any():
         omega_real = _safe_col(df, "omega")
-    if not np.isfinite(alpha_real).any():
-        alpha_real = _safe_col(df, "alpha")
+        omega_source = "omega(sim_fallback)"
+    if not np.isfinite(alpha_real_raw).any():
+        alpha_real_raw = _safe_col(df, "alpha")
     theta_real = _unwrap_angle_series(theta_real)
     omega_real = _sanitize_timeseries(omega_real)
-    alpha_real = _sanitize_timeseries(alpha_real)
+    alpha_real_raw = _sanitize_timeseries(alpha_real_raw)
     omega_from_theta = _gradient(theta_real, dt)
-    alpha_from_omega = _gradient(omega_from_theta, dt)
-
     # If runtime logging briefly broke real-state channels, repair them from theta.
     if float(np.nanpercentile(np.abs(omega_real), 99.5)) > 80.0 and float(np.nanpercentile(np.abs(omega_from_theta), 99.5)) < 50.0:
         omega_real = omega_from_theta
-    if float(np.nanpercentile(np.abs(alpha_real), 99.5)) > 800.0 and float(np.nanpercentile(np.abs(alpha_from_omega), 99.5)) < 300.0:
-        alpha_real = alpha_from_omega
+    # Effective alpha target is always filtered d(omega)/dt.
+    alpha_real = estimate_filtered_alpha_from_omega(omega_real, t=t)
 
     omega_real = _winsorize_abs(omega_real, q=99.5)
     alpha_real = _winsorize_abs(alpha_real, q=99.5)
@@ -308,7 +325,13 @@ def load_replay_csv(path: str | Path, cfg: BridgeConfig, delay_override: float |
         theta_real=theta_real,
         omega_real=omega_real,
         alpha_real=alpha_real,
+        alpha_real_raw=alpha_real_raw,
         delay_sec_est=delay_sec,
+        theta_source=theta_source,
+        omega_source=omega_source,
+        alpha_source="real_alpha_filtered",
+        input_source=input_source,
+        target_source="J*real_alpha_filtered",
     )
 
 
@@ -369,6 +392,14 @@ class PendulumRLEnv:
         self.param_keys = list(param_keys_override) if param_keys_override else list(PARAM_KEYS)
         if self.learn_delay:
             self.param_keys.append("delay_sec")
+        # Keep full simulation parameter context even when only a subset is optimized.
+        self.base_params = {
+            "K_u": float(init_params.get("K_u", cfg.K_u_init)),
+            "l_com": float(init_params.get("l_com", cfg.l_com_init)),
+            "b_eq": float(init_params.get("b_eq", cfg.b_eq_init)),
+            "tau_eq": float(init_params.get("tau_eq", cfg.tau_eq_init)),
+            "delay_sec": float(init_params.get("delay_sec", cfg.delay_init_ms / 1000.0)),
+        }
         self.center = {k: float(init_params[k]) for k in self.param_keys if k in init_params}
         if self.learn_delay and "delay_sec" not in self.center:
             self.center["delay_sec"] = float(np.mean([t.delay_sec_est for t in trajectories]))
@@ -384,7 +415,10 @@ class PendulumRLEnv:
         self.reset()
 
     def _pack_params(self):
-        return {k: float(v) for k, v in zip(self.param_keys, self.param_vec)}
+        out = dict(self.base_params)
+        for k, v in zip(self.param_keys, self.param_vec):
+            out[k] = float(v)
+        return out
 
     def _normalize_params(self):
         out = []
@@ -526,6 +560,7 @@ def build_init_params(cfg: BridgeConfig, calibration: dict[str, Any] | None = No
         _merge(calibration.get("model_init", calibration.get("best_params", {})))
         if isinstance(calibration.get("delay"), dict) and "effective_control_delay_ms" in calibration["delay"]:
             out["delay_sec"] = float(calibration["delay"]["effective_control_delay_ms"]) / 1000.0
+
     if parameter_json:
         _merge(parameter_json.get("model_init", parameter_json.get("best_params", parameter_json)))
         if isinstance(parameter_json.get("delay"), dict) and "effective_control_delay_ms" in parameter_json["delay"]:

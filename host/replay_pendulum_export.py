@@ -22,7 +22,7 @@ def main():
     args = ap.parse_args()
 
     cfg = BridgeConfig()
-    calib = apply_calibration_json(cfg, args.calibration_json)
+    calib = apply_calibration_json(cfg, args.calibration_json, apply_model_init=True)
     param = None
     if args.parameter_json:
         with open(args.parameter_json, "r", encoding="utf-8") as f:

@@ -396,7 +396,7 @@ def main():
     print(f"[DATA] discovered_csv_files={len(csv_paths)}")
 
     cfg = BridgeConfig()
-    calib = apply_calibration_json(cfg, args.calibration_json)
+    calib = apply_calibration_json(cfg, args.calibration_json, apply_model_init=True)
     param_data = None
     if args.parameter_json:
         with open(args.parameter_json, "r", encoding="utf-8") as f:

@@ -144,6 +144,7 @@ def run_stage1(cfg: BridgeConfig, run_logs: Path):
     print("Use calibration JSON?\n[1] yes\n[2] no")
     use_calib = _input("> ", "1") == "1"
     calib_data = None
+    model_init_mode = "fresh"
     gravity_used = float(cfg.gravity)
     if use_calib:
         json_files = list_param_json(run_logs)
@@ -151,6 +152,7 @@ def run_stage1(cfg: BridgeConfig, run_logs: Path):
             picked = choose_from_list(json_files, "Select calibration JSON", min_count=1, allow_multi=False)
             if picked:
                 calib_data = apply_calibration_json(cfg, str(picked[0]))
+                model_init_mode = "calibration_geometry_only"
         else:
             print("No JSON files found; continuing without calibration JSON.")
         summary = calib_data.get("summary", {}) if isinstance(calib_data, dict) else {}
@@ -166,6 +168,21 @@ def run_stage1(cfg: BridgeConfig, run_logs: Path):
         hi = float(_input("Enter K_u maximum [default: 1.0]: ", "1.0"))
 
     trajs = [load_replay_csv(p, cfg) for p in selected_csv]
+    if trajs:
+        src = trajs[0]
+        print("[INFO] stage1_regression_sources:")
+        print(f"  - theta_source: {src.theta_source}")
+        print(f"  - omega_source: {src.omega_source}")
+        print(f"  - alpha_source: {src.alpha_source}")
+        print(f"  - input_source: {src.input_source}")
+        print(f"  - target_source: {src.target_source}")
+        print(
+            f"[INFO] model_init_mode: {model_init_mode} | "
+            f"K_u_init={cfg.K_u_init:.6g}, b_eq_init={cfg.b_eq_init:.6g}, "
+            f"tau_eq_init={cfg.tau_eq_init:.6g}, l_com_init={cfg.l_com_init:.6g}"
+        )
+        if "sim_fallback" in src.theta_source:
+            print("[WARN] theta_real missing in some logs; using sim theta fallback for Stage1.")
     while True:
         res = _fit_stage1_least_squares(trajs, cfg, gravity_used, (lo, hi))
         bku = check_bound_hit("K_u", res["K_u"], (lo, hi))
@@ -201,6 +218,17 @@ def run_stage1(cfg: BridgeConfig, run_logs: Path):
                 "metrics": {"rmse": float(res["rmse"])},
                 "csv_files": [str(p) for p in selected_csv],
                 "gravity_used": float(gravity_used),
+                "model_init_mode": model_init_mode,
+                "theta_source": src.theta_source if trajs else "theta_real",
+                "omega_source": src.omega_source if trajs else "omega_real",
+                "alpha_source": src.alpha_source if trajs else "real_alpha_filtered",
+                "input_source": src.input_source if trajs else "cmd_u_raw",
+                "target_source": src.target_source if trajs else "J*real_alpha_filtered",
+                "b_eq_init": float(cfg.b_eq_init),
+                "tau_eq_init": float(cfg.tau_eq_init),
+                "l_com_init": float(cfg.l_com_init),
+                "b_eq_trainable_in_stage2": True,
+                "tau_eq_trainable_in_stage2": True,
             }
             save_stage_json(run_logs / "stage1_params.json", payload)
             plot_stage1_regression_summary(
@@ -330,10 +358,19 @@ def run_stage_rl(cfg: BridgeConfig, run_logs: Path, stage_cfg: StageRLConfig):
     domain_randomization = _input("> ", "2") == "2"
 
     init_params = build_init_params(cfg, calibration=None, parameter_json=pjson)
+    model_init_mode = "loaded_parameter_json"
     # Fill from stage-style schema.
     if isinstance(pjson.get("identified_params"), dict):
         for k, v in pjson["identified_params"].items():
             init_params[k] = float(v)
+    if pjson.get("model_init_mode") == "fresh":
+        model_init_mode = "fresh_from_stage_json"
+
+    print("[INFO] stage2_rl_param_policy:")
+    print(f"  - b_eq_initial_for_stage2: {init_params.get('b_eq', cfg.b_eq_init):.6g}")
+    print(f"  - tau_eq_initial_for_stage2: {init_params.get('tau_eq', cfg.tau_eq_init):.6g}")
+    print(f"  - b_eq_trainable_in_ppo: {('b_eq' in stage_cfg.active_params)}")
+    print(f"  - tau_eq_trainable_in_ppo: {('tau_eq' in stage_cfg.active_params)}")
 
     hard_bounds = {
         "K_u": (1e-6, 1.0),
@@ -403,6 +440,17 @@ def run_stage_rl(cfg: BridgeConfig, run_logs: Path, stage_cfg: StageRLConfig):
             "final_episode_reward": float(history["episode_reward"][-1]) if history["episode_reward"] else None,
         },
         "domain_randomization": bool(domain_randomization),
+        "model_init_mode": model_init_mode,
+        "theta_source": train[0].theta_source if train else "theta_real",
+        "omega_source": train[0].omega_source if train else "omega_real",
+        "alpha_source": train[0].alpha_source if train else "real_alpha_filtered",
+        "input_source": train[0].input_source if train else "cmd_u_raw",
+        "target_source": train[0].target_source if train else "J*real_alpha_filtered",
+        "b_eq_init": float(init_params.get("b_eq", cfg.b_eq_init)),
+        "tau_eq_init": float(init_params.get("tau_eq", cfg.tau_eq_init)),
+        "l_com_init": float(init_params.get("l_com", cfg.l_com_init)),
+        "b_eq_trainable_in_stage2": bool("b_eq" in stage_cfg.active_params),
+        "tau_eq_trainable_in_stage2": bool("tau_eq" in stage_cfg.active_params),
     }
     save_stage_json(run_logs / stage_cfg.out_json, payload)
 
@@ -442,7 +490,7 @@ def main():
     while True:
         print("\n=== Pendulum Parameter Optimization ===\n")
         print("[1] Stage 1 Regression (K_u, l_com)")
-        print("[2] Stage 2 RL Fine-tuning (K_u, l_com, b_eq)")
+        print("[2] Stage 2 RL Fine-tuning (K_u, l_com, b_eq, tau_eq)")
         print("[3] Stage 3 RL Fine-tuning (K_u, l_com, b_eq, tau_eq)")
         print("[4] Show available CSV logs")
         print("[5] Show available parameter JSON files")
@@ -456,8 +504,8 @@ def main():
                 run_logs,
                 StageRLConfig(
                     stage=2,
-                    active_params=["K_u", "l_com", "b_eq"],
-                    fixed_params=["tau_eq"],
+                    active_params=["K_u", "l_com", "b_eq", "tau_eq"],
+                    fixed_params=[],
                     loss_mode="simplified",
                     out_json="stage2_params.json",
                 ),
