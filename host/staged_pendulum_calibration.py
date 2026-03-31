@@ -62,6 +62,9 @@ def choose_one_csv(items: list[Path], title: str) -> Path:
     print(title)
     for i, item in enumerate(items, start=1):
         print(f"[{i}] {item.name}")
+    raw = _input("Select indices for Stage4 PPO (comma separated, default: same as Stage3): ", "")
+    if raw.strip() == "":
+        return []
     while True:
         raw = input("Select index: ").strip()
         try:
