@@ -225,7 +225,7 @@ run_rl_fitting() {
     param_json=$(select_json_file "Parameter JSON (optional)")
 
     echo "--------------------------------"
-    echo "[INFO] Offline RL replay calibration 실행 (train_pendulum_rl.py)"
+    echo "[INFO] Parameter Finetuning (Reinforcement Learning) 실행 (train_pendulum_rl.py)"
     read -p "num_episodes [1000]: " num_episodes
     num_episodes=${num_episodes:-1000}
     read -p "batch_size [20]: " batch_size
@@ -289,13 +289,19 @@ run_rl_fitting() {
 
 run_staged_calibration() {
     echo "--------------------------------"
-    echo "[INFO] Stage-based Parameter Optimization 실행 (staged_pendulum_calibration.py)"
-    python3 "$BASE_DIR/staged_pendulum_calibration.py"
+    echo "[INFO] System Identification (Regression stage 1~3) 실행 (staged_pendulum_calibration.py)"
+    python3 "$BASE_DIR/staged_pendulum_calibration.py" --mode regression
+}
+
+run_stage4_rl_finetuning() {
+    echo "--------------------------------"
+    echo "[INFO] Stage 4 RL fine-tuning 실행 (staged_pendulum_calibration.py --mode rl)"
+    python3 "$BASE_DIR/staged_pendulum_calibration.py" --mode rl
 }
 
 run_replay_validation() {
     echo "--------------------------------"
-    echo "[INFO] Replay Validation (Chrono + IMU dual viewer)"
+    echo "[INFO] Replay Runs"
     file=$(select_csv_file)
     if [ -z "$file" ]; then return; fi
 
@@ -345,12 +351,12 @@ while true; do
     echo "      Pendulum Digital Twin Stack"
     echo "=========================================="
     echo "1) IMU Viewer (Standalone Viewer)"
-    echo "2) System Identification (Parameter Calibration)"
-    echo "3) Parameter Optimization (Reinforcement Learning)"
+    echo "2) Model Calibration (radius, IMU gravity)"
+    echo "3) Parameter Finetuning (Reinforcement Learning)"
     echo "4) Chrono Pendulum (Select Host/Jetson mode)"
-    echo "5) Plot Data"
-    echo "6) Replay Validation (Chrono + IMU Dual Viewer)"
-    echo "7) Parameter Optimization (Stage UI)"
+    echo "5) Plot Data (Sim vs Real)"
+    echo "6) Replay Runs"
+    echo "7) System Identification (Regression)"
     echo "8) Exit"
     echo "=========================================="
 
@@ -366,7 +372,7 @@ while true; do
             pause
             ;;
         3)
-            run_rl_fitting
+            run_stage4_rl_finetuning
             pause
             ;;
         4)
