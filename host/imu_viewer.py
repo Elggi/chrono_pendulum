@@ -340,7 +340,7 @@ def main():
         ax2d.set_xlim(-lim, lim)
         ax2d.set_ylim(-lim, lim)
         ax2d.set_aspect("equal", adjustable="box")
-        ax2d.set_xlabel("-X (behind view) [m]")
+        ax2d.set_xlabel("X [m]")
         ax2d.set_ylabel("Y [m]")
         ax2d.grid(True, alpha=0.35)
 

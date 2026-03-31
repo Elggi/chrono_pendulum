@@ -723,8 +723,9 @@ def main():
                         imu_R0 = R_abs.copy()
                     R_rel = imu_R0.T @ R_abs
                     tip_vec = R_rel @ np.array([0.0, -cfg.radius_m, 0.0], dtype=float)
-                    # User view is from behind -> use -x on XY plane.
-                    theta_real = float(math.atan2(float(tip_vec[1]), float(-tip_vec[0])))
+                    # Physical/logging convention: CCW positive on world XY.
+                    # (Viewer-only mirror transforms are handled in imu_viewer, not in logged data.)
+                    theta_real = float(math.atan2(float(tip_vec[1]), float(tip_vec[0])))
                     omega_real = float(w_imu_raw[2])
 
                 real_omega_hist.append(float(omega_real))
