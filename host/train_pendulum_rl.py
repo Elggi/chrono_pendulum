@@ -20,7 +20,6 @@ from chrono_core.pendulum_rl_env import (
     PendulumRLEnv,
     build_init_params,
     load_replay_csv,
-    split_replay_trajectory_segments,
     simulate_trajectory,
     split_trajectories,
     weighted_loss,
@@ -346,7 +345,6 @@ def main():
     ap.add_argument("--ent_coef", type=float, default=0.0)
     ap.add_argument("--device", type=str, default="cpu")
     ap.add_argument("--run_mode", choices=["debug", "research"], default="research")
-    ap.add_argument("--allow_small_split", action="store_true", default=False)
     ap.add_argument("--eval_stochastic", action="store_true", default=False)
     ap.add_argument("--action_step_frac", type=float, default=0.08)
     ap.add_argument("--init_noise_frac", type=float, default=0.07)
@@ -405,38 +403,14 @@ def main():
             param_data = json.load(f)
 
     init_params = build_init_params(cfg, calibration=calib, parameter_json=param_data)
-    if len(csv_paths) == 1:
-        full_traj = load_replay_csv(csv_paths[0], cfg, delay_override=args.delay_override)
-        train_traj, val_traj, test_traj = split_replay_trajectory_segments(
-            full_traj,
-            seed=args.seed,
-            train_ratio=0.7,
-            val_ratio=0.15,
-            min_segment_len=64,
-        )
-        tr_paths, va_paths, te_paths = [csv_paths[0]], [csv_paths[0]], [csv_paths[0]]
-        print(
-            f"[DATA] single_csv_segment_split rows | "
-            f"train={len(train_traj[0].t)} val={len(val_traj[0].t)} test={len(test_traj[0].t)}"
-        )
-    else:
-        tr_paths, va_paths, te_paths = split_trajectories(
-            csv_paths,
-            seed=args.seed,
-            allow_small_split=(args.allow_small_split or args.run_mode == "debug"),
-        )
-        print(f"[DATA] split counts | train={len(tr_paths)} val={len(va_paths)} test={len(te_paths)}")
-        tr_set = {str(p.resolve()) for p in tr_paths}
-        va_set = {str(p.resolve()) for p in va_paths}
-        overlap = tr_set.intersection(va_set)
-        if overlap:
-            msg = f"Train/val split overlap detected ({len(overlap)} files): {sorted(overlap)}"
-            if args.run_mode != "debug":
-                raise SystemExit(f"[SPLIT-ERROR] {msg}")
-            print(f"[SPLIT-WARN] {msg} (allowed only in debug mode)")
-        train_traj = [load_replay_csv(p, cfg, delay_override=args.delay_override) for p in tr_paths]
-        val_traj = [load_replay_csv(p, cfg, delay_override=args.delay_override) for p in va_paths]
-        test_traj = [load_replay_csv(p, cfg, delay_override=args.delay_override) for p in te_paths]
+    tr_paths, va_paths, te_paths = split_trajectories(
+        csv_paths,
+        seed=args.seed,
+    )
+    print(f"[DATA] split counts | train={len(tr_paths)} val={len(va_paths)} test={len(te_paths)}")
+    train_traj = [load_replay_csv(p, cfg, delay_override=args.delay_override) for p in tr_paths]
+    val_traj = [load_replay_csv(p, cfg, delay_override=args.delay_override) for p in va_paths]
+    test_traj = [load_replay_csv(p, cfg, delay_override=args.delay_override) for p in te_paths]
 
     env = PendulumRLEnv(
         trajectories=train_traj,
@@ -512,7 +486,7 @@ def main():
         "cpr": None if not np.isfinite(cfg.cpr) else float(cfg.cpr),
         "dataset_files": [str(p) for p in csv_paths],
         "dataset_split": {
-            "method": "single_csv_segments" if len(csv_paths) == 1 else "file_level",
+            "method": "file_level",
             "train_count": len(train_traj),
             "val_count": len(val_traj),
             "test_count": len(test_traj),

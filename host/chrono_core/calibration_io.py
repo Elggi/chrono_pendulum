@@ -27,6 +27,8 @@ def apply_calibration_json(cfg: BridgeConfig, json_path: str | None):
         model_init = dict(calib["fit_final_params"])
     delay = calib.get("delay", {})
     summary = calib.get("summary", {}) if isinstance(calib.get("summary", {}), dict) else {}
+    if not isinstance(calib.get("summary"), dict):
+        calib["summary"] = summary
 
     cfg.l_com_init = float(model_init.get("l_com", cfg.l_com_init))
     cfg.b_eq_init = float(model_init.get("b_eq", model_init.get("b", cfg.b_eq_init)))
@@ -53,6 +55,19 @@ def apply_calibration_json(cfg: BridgeConfig, json_path: str | None):
         if math.isfinite(cpr) and cpr > 1.0:
             cfg.cpr = cpr
             break
+
+    # Extend/normalize summary for staged calibration workflows.
+    summary.setdefault("mean_radius_m", float(cfg.r_imu))
+    if math.isfinite(float(cfg.cpr)):
+        summary.setdefault("mean_cpr", float(cfg.cpr))
+    if "g_eff_mps2" in summary:
+        try:
+            g_eff = float(summary["g_eff_mps2"])
+        except (TypeError, ValueError):
+            g_eff = None
+        if g_eff is not None and math.isfinite(g_eff) and g_eff > 0.0:
+            cfg.gravity = g_eff
+    calib["summary"] = summary
 
     cfg.calibration_json = json_path
     return calib
