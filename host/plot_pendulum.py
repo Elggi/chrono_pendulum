@@ -66,6 +66,18 @@ def moving_average(x: np.ndarray, win: int):
     return y[: len(x)]
 
 
+def unwrap_and_zero(theta: np.ndarray):
+    out = np.asarray(theta, dtype=float).copy()
+    finite = np.isfinite(out)
+    if not np.any(finite):
+        return out
+    idx = np.where(finite)[0]
+    unwrapped = np.unwrap(out[idx])
+    unwrapped = unwrapped - unwrapped[0]
+    out[idx] = unwrapped
+    return out
+
+
 def derive_theta_from_encoder(enc, counts_per_rev, sign=1.0, offset=0.0):
     return sign * (2.0 * np.pi / counts_per_rev) * (enc - enc[0]) + offset
 
@@ -188,9 +200,9 @@ def plot_simulation(df, csv_path: str, args):
         t = np.arange(n, dtype=float)
 
     n = len(t)
-    theta_sim = col_any(df, ["theta", "sim_theta"], n)
-    omega_sim = col_any(df, ["omega", "sim_omega"], n)
-    alpha_sim = col_any(df, ["alpha", "sim_alpha"], n)
+    theta_sim = col_any(df, ["theta"], n)
+    omega_sim = col_any(df, ["omega"], n)
+    alpha_sim = col_any(df, ["alpha"], n)
     cmd_u = col_any(df, ["cmd_u_raw", "cmd_u"], n)
     hw_pwm = col_any(df, ["hw_pwm"], n)
     enc = col_any(df, ["hw_enc"], n)
@@ -216,9 +228,11 @@ def plot_simulation(df, csv_path: str, args):
         dt[dt <= 0] = np.median(dt[dt > 0]) if np.any(dt > 0) else 0.01
         alpha_sim = np.gradient(omega_sim, dt)
 
-    theta_real = col_any(df, ["theta_real", "est_theta"], n)
-    omega_real = col_any(df, ["omega_real", "est_omega"], n)
-    alpha_real = col_any(df, ["alpha_real", "est_alpha"], n)
+    theta_real = col_any(df, ["theta_real"], n)
+    omega_real = col_any(df, ["omega_real"], n)
+    alpha_real = col_any(df, ["alpha_real"], n)
+    theta_sim = unwrap_and_zero(theta_sim)
+    theta_real = unwrap_and_zero(theta_real)
     if np.isfinite(theta_real).any():
         theta_real = moving_average(theta_real, args.real_theta_smooth)
     has_real = np.isfinite(theta_real).any() or np.isfinite(omega_real).any() or np.isfinite(alpha_real).any()
@@ -244,41 +258,46 @@ def plot_simulation(df, csv_path: str, args):
         print(f"delay: {meta['estimated_delay_ms_final']:.3f} ms")
 
     fig, axes = plt.subplots(3, 2, figsize=(16, 10), num="Pendulum Unified Dashboard")
-    ax = axes.ravel()
+    ax_cmd = axes[0, 0]
+    ax_theta = axes[0, 1]
+    ax_err = axes[1, 0]
+    ax_omega = axes[1, 1]
+    ax_torque = axes[2, 0]
+    ax_alpha = axes[2, 1]
 
-    ax[0].plot(t_cmd, cmd_u, label="cmd_u")
-    ax[0].plot(t, hw_pwm, label="hw_pwm")
-    ax[0].grid(True)
-    ax[0].legend()
-    ax[0].set_xlabel("time [s]")
-    ax[0].set_title("Command / PWM")
+    ax_cmd.plot(t_cmd, cmd_u, label="cmd_u")
+    ax_cmd.plot(t, hw_pwm, label="hw_pwm")
+    ax_cmd.grid(True)
+    ax_cmd.legend()
+    ax_cmd.set_xlabel("time [s]")
+    ax_cmd.set_title("Command / PWM")
 
-    ax[1].plot(t, theta_sim, label="theta sim")
+    ax_theta.plot(t, theta_sim, label="theta sim")
     if np.isfinite(theta_real).any():
-        ax[1].plot(t, theta_real, label="theta real")
-    ax[1].grid(True)
-    ax[1].legend()
-    ax[1].set_xlabel("time [s]")
-    ax[1].set_ylabel("rad")
-    ax[1].set_title("Theta")
+        ax_theta.plot(t, theta_real, label="theta real")
+    ax_theta.grid(True)
+    ax_theta.legend()
+    ax_theta.set_xlabel("time [s]")
+    ax_theta.set_ylabel("rad")
+    ax_theta.set_title("Theta")
 
-    ax[2].plot(t, omega_sim, label="omega sim")
+    ax_omega.plot(t, omega_sim, label="omega sim")
     if np.isfinite(omega_real).any():
-        ax[2].plot(t, omega_real, label="omega real")
-    ax[2].grid(True)
-    ax[2].legend()
-    ax[2].set_xlabel("time [s]")
-    ax[2].set_ylabel("rad/s")
-    ax[2].set_title("Omega")
+        ax_omega.plot(t, omega_real, label="omega real")
+    ax_omega.grid(True)
+    ax_omega.legend()
+    ax_omega.set_xlabel("time [s]")
+    ax_omega.set_ylabel("rad/s")
+    ax_omega.set_title("Omega")
 
-    ax[3].plot(t, alpha_sim, label="alpha sim")
+    ax_alpha.plot(t, alpha_sim, label="alpha sim")
     if np.isfinite(alpha_real).any():
-        ax[3].plot(t, alpha_real, label="alpha real")
-    ax[3].grid(True)
-    ax[3].legend()
-    ax[3].set_xlabel("time [s]")
-    ax[3].set_ylabel("rad/s^2")
-    ax[3].set_title("Alpha")
+        ax_alpha.plot(t, alpha_real, label="alpha real")
+    ax_alpha.grid(True)
+    ax_alpha.legend()
+    ax_alpha.set_xlabel("time [s]")
+    ax_alpha.set_ylabel("rad/s^2")
+    ax_alpha.set_title("Alpha")
 
     if args.recompute_real_derivatives and np.isfinite(theta_real).any():
         dt = np.diff(t, prepend=t[0])
@@ -301,29 +320,29 @@ def plot_simulation(df, csv_path: str, args):
             thr = np.quantile(np.abs(arr[finite]), args.error_clip_quantile)
             arr[np.abs(arr) > max(thr, 1e-9)] = np.nan
     if np.isfinite(e_theta).any():
-        ax[4].plot(t, np.sqrt(np.maximum(e_theta * e_theta, 0.0)), label="|e_theta|")
+        ax_err.plot(t, np.sqrt(np.maximum(e_theta * e_theta, 0.0)), label="|e_theta|")
     if np.isfinite(e_omega).any():
-        ax[4].plot(t, np.sqrt(np.maximum(e_omega * e_omega, 0.0)), label="|e_omega|")
+        ax_err.plot(t, np.sqrt(np.maximum(e_omega * e_omega, 0.0)), label="|e_omega|")
     if np.isfinite(e_alpha).any():
-        ax[4].plot(t, np.sqrt(np.maximum(e_alpha * e_alpha, 0.0)), label="|e_alpha|")
-    ax[4].grid(True)
-    ax[4].legend()
-    ax[4].set_xlabel("time [s]")
-    ax[4].set_title("Absolute tracking error")
+        ax_err.plot(t, np.sqrt(np.maximum(e_alpha * e_alpha, 0.0)), label="|e_alpha|")
+    ax_err.grid(True)
+    ax_err.legend()
+    ax_err.set_xlabel("time [s]")
+    ax_err.set_title("Absolute tracking error")
 
     if np.isfinite(tau_cmd).any():
-        ax[5].plot(t, tau_cmd, label="tau_cmd(net)")
+        ax_torque.plot(t, tau_cmd, label="tau_cmd(net)")
     if np.isfinite(tau_motor).any():
-        ax[5].plot(t, tau_motor, label="tau_motor")
+        ax_torque.plot(t, tau_motor, label="tau_motor")
     if np.isfinite(tau_visc).any():
-        ax[5].plot(t, tau_visc, label="tau_visc")
+        ax_torque.plot(t, tau_visc, label="tau_visc")
     if np.isfinite(tau_coul).any():
-        ax[5].plot(t, tau_coul, label="tau_coul")
-    ax[5].grid(True)
-    ax[5].legend()
-    ax[5].set_xlabel("time [s]")
-    ax[5].set_ylabel("N·m")
-    ax[5].set_title("Torque analysis")
+        ax_torque.plot(t, tau_coul, label="tau_coul")
+    ax_torque.grid(True)
+    ax_torque.legend()
+    ax_torque.set_xlabel("time [s]")
+    ax_torque.set_ylabel("N·m")
+    ax_torque.set_title("Torque analysis")
 
     fig.tight_layout()
     plt.show()
@@ -354,8 +373,10 @@ def plot_rl_summary(history_csv: str, replay_csv: str):
     axs[0, 1].grid(True, alpha=0.3)
 
     t = r["wall_elapsed"].to_numpy(dtype=float) if "wall_elapsed" in r.columns else r["sim_time"].to_numpy(dtype=float)
-    axs[1, 0].plot(t, r["theta_real"].to_numpy(dtype=float), label="theta_real")
-    axs[1, 0].plot(t, r["theta"].to_numpy(dtype=float), label="theta_sim")
+    theta_real = unwrap_and_zero(r["theta_real"].to_numpy(dtype=float))
+    theta_sim = unwrap_and_zero(r["theta"].to_numpy(dtype=float))
+    axs[1, 0].plot(t, theta_real, label="theta_real")
+    axs[1, 0].plot(t, theta_sim, label="theta_sim")
     axs[1, 0].set_title("Replay Theta Overlay")
     axs[1, 0].set_xlabel("time [s]")
     axs[1, 0].legend(loc="best")
