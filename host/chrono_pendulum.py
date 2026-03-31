@@ -765,22 +765,16 @@ def main():
 
                 wr.writerow([
                     wall_now, wall_now - wall_t0, mode_name,
-                    cmd_u_raw, cmd_u_used, snap["hw_pwm"], 0.0, model_out["tau_net"],
+                    cmd_u_raw, cmd_u_used, snap["hw_pwm"], model_out["tau_net"],
                     theta, omega, alpha,
                     snap["hw_enc"], snap["hw_arduino_ms"],
                     theta_real, omega_real, alpha_real,
-                    0.0,
-                    sim_params["l_com"], sim_params["b_eq"], sim_params["tau_eq"], sim_params["K_u"],
                     model.J_rod, model.J_imu, model.J_total,
                     model_out["tau_motor"], model_out["tau_res"], model_out["tau_visc"], model_out["tau_coul"],
                     inst_cost, inst_cost,
                     q_imu[0], q_imu[1], q_imu[2], q_imu[3],
                     w_imu[0], w_imu[1], w_imu[2],
                     a_imu[0], a_imu[1], a_imu[2],
-                    "",
-                    0,
-                    0,
-                    "",
                 ])
 
                 if cfg.realtime:
