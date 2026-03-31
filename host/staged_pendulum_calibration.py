@@ -22,6 +22,7 @@ from chrono_core.pendulum_rl_env import (
     simulate_trajectory,
     weighted_loss,
 )
+from chrono_core.signal_filter import estimate_filtered_alpha_from_omega
 from chrono_core.pendulum_rl_plots import (
     plot_param_convergence,
     plot_stage1_regression_summary,
@@ -65,7 +66,7 @@ def choose_one_csv(items: list[Path], title: str) -> Path:
     if raw.strip() == "":
         return []
     while True:
-        raw = _input("Select index: ")
+        raw = input("Select index: ").strip()
         try:
             idx = int(raw)
             chosen = items[idx - 1]
@@ -81,7 +82,7 @@ def choose_many_csv(items: list[Path], title: str) -> list[Path]:
     print(title)
     for i, item in enumerate(items, start=1):
         print(f"[{i}] {item.name}")
-    raw = _input("Select indices for Stage4 PPO (comma separated, default: same as Stage3): ", "")
+    raw = _input("Select indices (comma separated, Enter to skip): ", "")
     if raw.strip() == "":
         return []
     while True:
@@ -185,16 +186,18 @@ def _load_regression_data(csv_path: Path):
     theta = pd.to_numeric(df["theta_real"], errors="coerce").to_numpy(dtype=float)
     omega = pd.to_numeric(df["omega_real"], errors="coerce").to_numpy(dtype=float)
 
-    # real_alpha_filtered preferred; fallback to alpha_real only when needed.
+    # Keep regression target as filtered real alpha.
+    # Prefer precomputed real_alpha_filtered; otherwise synthesize from omega_real.
     if "real_alpha_filtered" in df.columns:
         alpha = pd.to_numeric(df["real_alpha_filtered"], errors="coerce").to_numpy(dtype=float)
         alpha_source = "real_alpha_filtered"
-    elif "alpha_real" in df.columns:
-        alpha = pd.to_numeric(df["alpha_real"], errors="coerce").to_numpy(dtype=float)
-        alpha_source = "real_alpha_filtered(fallback:alpha_real)"
-        print("[WARN] real_alpha_filtered not found. Fallback to alpha_real for regression alpha source.")
     else:
-        raise ValueError("Missing alpha source. Need real_alpha_filtered (or alpha_real fallback).")
+        t = None
+        if "wall_elapsed" in df.columns:
+            t = pd.to_numeric(df["wall_elapsed"], errors="coerce").to_numpy(dtype=float)
+        alpha = estimate_filtered_alpha_from_omega(omega, t=t)
+        alpha_source = "real_alpha_filtered(from_omega_real)"
+        print("[INFO] real_alpha_filtered not found. Using filtered derivative from omega_real.")
 
     input_source = "hw_pwm"
     u = pd.to_numeric(df["hw_pwm"], errors="coerce").to_numpy(dtype=float)
