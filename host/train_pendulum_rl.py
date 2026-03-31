@@ -20,6 +20,7 @@ from chrono_core.pendulum_rl_env import (
     PendulumRLEnv,
     build_init_params,
     load_replay_csv,
+    split_replay_trajectory_segments,
     simulate_trajectory,
     split_trajectories,
     weighted_loss,
@@ -48,6 +49,7 @@ def train_with_sb3(env, val_env, args, history, param_hist):
         import gymnasium as gym
         from gymnasium import spaces
         from stable_baselines3 import PPO
+        from stable_baselines3.common.callbacks import BaseCallback
         from stable_baselines3.common.monitor import Monitor
     except Exception as exc:
         raise SystemExit(f"SB3 backend requested but dependencies are missing: {exc}")
@@ -71,25 +73,102 @@ def train_with_sb3(env, val_env, args, history, param_hist):
             obs, rew, done, info = self.wrapped.step(np.asarray(action, dtype=float))
             return np.asarray(obs, dtype=np.float32), float(rew), bool(done), False, info
 
+    class _EpisodeRewardCallback(BaseCallback):
+        def __init__(self):
+            super().__init__()
+            self.episode_rewards = []
+            self._cursor = 0
+
+        def _on_step(self) -> bool:
+            infos = self.locals.get("infos", [])
+            for info in infos:
+                ep = info.get("episode")
+                if isinstance(ep, dict) and "r" in ep:
+                    self.episode_rewards.append(float(ep["r"]))
+            return True
+
+        def pop_new_rewards(self):
+            new = self.episode_rewards[self._cursor:]
+            self._cursor = len(self.episode_rewards)
+            return new
+
+    def _rollout_policy_params(model_obj, eval_env_obj, deterministic_eval: bool):
+        obs, _ = eval_env_obj.reset()
+        done = False
+        last_info = {}
+        while not done:
+            action, _ = model_obj.predict(obs, deterministic=deterministic_eval)
+            obs, _, terminated, truncated, info = eval_env_obj.step(action)
+            done = bool(terminated or truncated)
+            last_info = info
+        params = last_info.get("params", {})
+        return {k: float(v) for k, v in params.items()}
+
+    def _coerce_batch_size(requested: int, n_steps_eff: int):
+        req = int(max(1, requested))
+        # Prefer exact divisor to avoid SB3 truncated minibatch warning.
+        divisors = [d for d in range(1, n_steps_eff + 1) if (n_steps_eff % d) == 0]
+        candidates = [d for d in divisors if d <= req]
+        if candidates:
+            return int(max(candidates))
+        return int(min(divisors)) if divisors else 1
+
     sb3_env = _SB3ReplayEnv(env)
     monitor_path = str(Path(args.outdir) / "sb3_monitor.csv")
     sb3_env = Monitor(sb3_env, filename=monitor_path)
+    eval_policy_env = _SB3ReplayEnv(
+        PendulumRLEnv(
+            trajectories=env.trajectories,
+            cfg=env.cfg,
+            init_params=env.center,
+            learn_delay=env.learn_delay,
+            delay_jitter_ms=0.0,
+            domain_randomization=False,
+            seed=args.seed + 1001,
+            max_refine_steps=env.max_refine_steps,
+            reward_weights=env.reward_weights,
+        )
+    )
     steps_per_episode = max(1, int(env.max_refine_steps))
     tb_dir = args.tensorboard_log if args.tensorboard_log else str(Path(args.outdir) / "tensorboard")
+    n_steps_eff = max(1, int(args.n_steps))
+    batch_size_eff = _coerce_batch_size(args.batch_size, n_steps_eff)
+    if int(batch_size_eff) != int(args.batch_size):
+        print(
+            f"[PPO-CONFIG] adjusted batch_size from {int(args.batch_size)} "
+            f"to {batch_size_eff} so it divides n_steps={n_steps_eff}."
+        )
+    reward_cb = _EpisodeRewardCallback()
     model = PPO(
         "MlpPolicy",
         sb3_env,
         device=args.device,
         seed=args.seed,
-        n_steps=max(env.max_refine_steps * 4, 32),
-        batch_size=min(64, max(16, env.max_refine_steps * 2)),
-        learning_rate=3e-4,
+        n_steps=n_steps_eff,
+        batch_size=batch_size_eff,
+        ent_coef=float(args.ent_coef),
+        learning_rate=float(args.learning_rate),
         gamma=args.gamma,
+        gae_lambda=args.lam,
+        target_kl=args.kl_targ,
         tensorboard_log=tb_dir,
         verbose=0,
     )
+    effective_ppo_config = {
+        "gamma": float(args.gamma),
+        "gae_lambda": float(args.lam),
+        "batch_size": int(batch_size_eff),
+        "target_kl": float(args.kl_targ),
+        "n_steps": int(n_steps_eff),
+        "seed": int(args.seed),
+        "ent_coef": float(args.ent_coef),
+        "learning_rate": float(args.learning_rate),
+    }
     best_val = float("inf")
-    best_params = env.best_params.copy()
+    best_params = {}
+    best_train = float("inf")
+    best_train_params = {}
+    best_val_so_far_params = {}
     t_start = time.time()
     for ep in range(1, int(args.num_episodes) + 1):
         model.learn(
@@ -97,10 +176,14 @@ def train_with_sb3(env, val_env, args, history, param_hist):
             progress_bar=False,
             reset_num_timesteps=False,
             tb_log_name="ppo_pendulum",
+            callback=reward_cb,
         )
-        train_loss, train_rmse = evaluate_dataset(env, env.best_params)
-        val_loss, val_rmse = evaluate_dataset(val_env, env.best_params)
-        history["reward"].append(float(-train_loss))
+        ep_rewards = reward_cb.pop_new_rewards()
+        ep_reward = float(np.mean(ep_rewards)) if ep_rewards else float("nan")
+        current_params = _rollout_policy_params(model, eval_policy_env, deterministic_eval=bool(args.eval_deterministic))
+        train_loss, train_rmse = evaluate_dataset(env, current_params)
+        val_loss, val_rmse = evaluate_dataset(val_env, current_params)
+        history["episode_reward"].append(sanitize_metric(ep_reward))
         history["train_loss"].append(float(train_loss))
         history["val_loss"].append(float(val_loss))
         history["rmse_theta"].append(float(train_rmse["theta"]))
@@ -110,18 +193,30 @@ def train_with_sb3(env, val_env, args, history, param_hist):
         history["val_rmse_omega"].append(float(val_rmse["omega"]))
         history["val_rmse_alpha"].append(float(val_rmse["alpha"]))
         for k in env.param_keys:
-            param_hist[k].append(float(env.best_params[k]))
+            param_hist["current_eval_params_per_episode"][k].append(float(current_params[k]))
+        if train_loss < best_train:
+            best_train = float(train_loss)
+            best_train_params = current_params.copy()
         if val_loss < best_val:
             best_val = float(val_loss)
-            best_params = env.best_params.copy()
+            best_params = current_params.copy()
+            best_val_so_far_params = current_params.copy()
+        for k in env.param_keys:
+            cur_best_train = best_train_params.get(k, current_params[k])
+            cur_best_val = best_val_so_far_params.get(k, current_params[k])
+            param_hist["global_best_train_params_so_far"][k].append(float(cur_best_train))
+            param_hist["global_best_val_params_so_far"][k].append(float(cur_best_val))
+        history["best_train_loss_so_far"].append(float(best_train))
+        history["best_val_loss_so_far"].append(float(best_val))
         if ep == 1 or ep % max(1, int(args.log_every_episodes)) == 0 or ep == int(args.num_episodes):
             elapsed = time.time() - t_start
             print(
                 f"[RL] ep {ep}/{args.num_episodes} | "
+                f"episode_reward={sanitize_metric(ep_reward):.5f} | "
                 f"train_loss={train_loss:.5f} val_loss={val_loss:.5f} | "
                 f"best_val={best_val:.5f} | elapsed={elapsed:.1f}s"
             )
-    return best_val, best_params
+    return best_val, best_params, effective_ppo_config
 
 
 def gather_csv_paths(csv: str | None, csv_dir: str | None):
@@ -194,9 +289,10 @@ def sanitize_dict(metrics: dict[str, float]):
 
 
 def save_history_csv(history: dict, outpath: Path):
-    keys = ["reward", "train_loss", "val_loss", "rmse_theta", "rmse_omega", "rmse_alpha",
+    keys = ["episode_reward", "train_loss", "val_loss", "best_train_loss_so_far", "best_val_loss_so_far",
+            "rmse_theta", "rmse_omega", "rmse_alpha",
             "val_rmse_theta", "val_rmse_omega", "val_rmse_alpha"]
-    n = len(history.get("reward", []))
+    n = len(history.get("episode_reward", []))
     with outpath.open("w", newline="", encoding="utf-8") as f:
         wr = csv.writer(f)
         wr.writerow(["episode", *keys])
@@ -245,7 +341,16 @@ def main():
     ap.add_argument("-l", "--lam", type=float, default=0.98)
     ap.add_argument("-k", "--kl_targ", type=float, default=0.003)
     ap.add_argument("-b", "--batch_size", type=int, default=20)
+    ap.add_argument("--n_steps", type=int, default=32)
+    ap.add_argument("--learning_rate", type=float, default=3e-4)
+    ap.add_argument("--ent_coef", type=float, default=0.0)
     ap.add_argument("--device", type=str, default="cpu")
+    ap.add_argument("--run_mode", choices=["debug", "research"], default="research")
+    ap.add_argument("--allow_small_split", action="store_true", default=False)
+    ap.add_argument("--eval_stochastic", action="store_true", default=False)
+    ap.add_argument("--action_step_frac", type=float, default=0.08)
+    ap.add_argument("--init_noise_frac", type=float, default=0.07)
+    ap.add_argument("--aggressive_search", action="store_true", default=False)
 
     ap.add_argument("--learn_delay", action="store_true", default=False)
     ap.add_argument("--delay_override", type=float, default=None)
@@ -260,9 +365,37 @@ def main():
 
     args = maybe_prompt(ap.parse_args(), ap)
 
+    if args.run_mode == "debug":
+        args.domain_randomization = False
+        args.delay_jitter_ms = 0.0
+    if args.aggressive_search:
+        args.action_step_frac = max(float(args.action_step_frac), 0.20)
+        args.init_noise_frac = max(float(args.init_noise_frac), 0.20)
+        args.ent_coef = max(float(args.ent_coef), 0.02)
+        args.kl_targ = max(float(args.kl_targ), 0.02)
+    args.eval_deterministic = not bool(args.eval_stochastic)
+    print(f"[MODE] run_mode={args.run_mode}")
+    print(
+        f"[MODE] domain_randomization={args.domain_randomization} | "
+        f"delay_jitter_ms={args.delay_jitter_ms:.3f} | "
+        f"eval_deterministic={args.eval_deterministic}"
+    )
+    print(
+        f"[SEARCH] aggressive={args.aggressive_search} | "
+        f"action_step_frac={args.action_step_frac:.3f} | "
+        f"init_noise_frac={args.init_noise_frac:.3f} | "
+        f"ent_coef={args.ent_coef:.4f} | lr={args.learning_rate:.2e}"
+    )
+    if args.domain_randomization:
+        print(
+            "[RANDOMIZATION] Delay jitter enters PendulumRLEnv._rollout_loss() via "
+            "traj.delay_sec_est + U[-delay_jitter_ms, +delay_jitter_ms]."
+        )
+
     csv_paths = gather_csv_paths(args.csv, args.csv_dir)
     if not csv_paths:
         raise SystemExit("No CSV files provided. Use --csv or --csv_dir.")
+    print(f"[DATA] discovered_csv_files={len(csv_paths)}")
 
     cfg = BridgeConfig()
     calib = apply_calibration_json(cfg, args.calibration_json)
@@ -272,11 +405,38 @@ def main():
             param_data = json.load(f)
 
     init_params = build_init_params(cfg, calibration=calib, parameter_json=param_data)
-    tr_paths, va_paths, te_paths = split_trajectories(csv_paths, seed=args.seed)
-
-    train_traj = [load_replay_csv(p, cfg, delay_override=args.delay_override) for p in tr_paths]
-    val_traj = [load_replay_csv(p, cfg, delay_override=args.delay_override) for p in va_paths]
-    test_traj = [load_replay_csv(p, cfg, delay_override=args.delay_override) for p in te_paths]
+    if len(csv_paths) == 1:
+        full_traj = load_replay_csv(csv_paths[0], cfg, delay_override=args.delay_override)
+        train_traj, val_traj, test_traj = split_replay_trajectory_segments(
+            full_traj,
+            seed=args.seed,
+            train_ratio=0.7,
+            val_ratio=0.15,
+            min_segment_len=64,
+        )
+        tr_paths, va_paths, te_paths = [csv_paths[0]], [csv_paths[0]], [csv_paths[0]]
+        print(
+            f"[DATA] single_csv_segment_split rows | "
+            f"train={len(train_traj[0].t)} val={len(val_traj[0].t)} test={len(test_traj[0].t)}"
+        )
+    else:
+        tr_paths, va_paths, te_paths = split_trajectories(
+            csv_paths,
+            seed=args.seed,
+            allow_small_split=(args.allow_small_split or args.run_mode == "debug"),
+        )
+        print(f"[DATA] split counts | train={len(tr_paths)} val={len(va_paths)} test={len(te_paths)}")
+        tr_set = {str(p.resolve()) for p in tr_paths}
+        va_set = {str(p.resolve()) for p in va_paths}
+        overlap = tr_set.intersection(va_set)
+        if overlap:
+            msg = f"Train/val split overlap detected ({len(overlap)} files): {sorted(overlap)}"
+            if args.run_mode != "debug":
+                raise SystemExit(f"[SPLIT-ERROR] {msg}")
+            print(f"[SPLIT-WARN] {msg} (allowed only in debug mode)")
+        train_traj = [load_replay_csv(p, cfg, delay_override=args.delay_override) for p in tr_paths]
+        val_traj = [load_replay_csv(p, cfg, delay_override=args.delay_override) for p in va_paths]
+        test_traj = [load_replay_csv(p, cfg, delay_override=args.delay_override) for p in te_paths]
 
     env = PendulumRLEnv(
         trajectories=train_traj,
@@ -287,6 +447,8 @@ def main():
         domain_randomization=args.domain_randomization,
         seed=args.seed,
         max_refine_steps=args.max_refine_steps,
+        action_step_frac=args.action_step_frac,
+        init_noise_frac=args.init_noise_frac,
     )
     val_env = PendulumRLEnv(
         trajectories=val_traj,
@@ -297,6 +459,8 @@ def main():
         domain_randomization=False,
         seed=args.seed + 1,
         max_refine_steps=args.max_refine_steps,
+        action_step_frac=args.action_step_frac,
+        init_noise_frac=args.init_noise_frac,
     )
 
     outdir = Path(args.outdir)
@@ -304,17 +468,41 @@ def main():
     with open(outdir / "initial_params.json", "w", encoding="utf-8") as f:
         json.dump(init_params, f, indent=2)
 
-    history = {"reward": [], "train_loss": [], "val_loss": [], "rmse_theta": [], "rmse_omega": [], "rmse_alpha": [],
-               "val_rmse_theta": [], "val_rmse_omega": [], "val_rmse_alpha": []}
-    param_hist = {k: [] for k in env.param_keys}
-    best_val, best_params = train_with_sb3(env, val_env, args, history, param_hist)
+    history = {
+        "episode_reward": [],
+        "train_loss": [],
+        "val_loss": [],
+        "best_train_loss_so_far": [],
+        "best_val_loss_so_far": [],
+        "rmse_theta": [],
+        "rmse_omega": [],
+        "rmse_alpha": [],
+        "val_rmse_theta": [],
+        "val_rmse_omega": [],
+        "val_rmse_alpha": [],
+    }
+    param_hist = {
+        "current_eval_params_per_episode": {k: [] for k in env.param_keys},
+        "global_best_train_params_so_far": {k: [] for k in env.param_keys},
+        "global_best_val_params_so_far": {k: [] for k in env.param_keys},
+    }
+    best_val, best_params, effective_ppo_config = train_with_sb3(env, val_env, args, history, param_hist)
     print(f"[SB3] train_loss={history['train_loss'][-1]:.5f} val_loss={history['val_loss'][-1]:.5f}")
 
     if not args.learn_delay:
         best_params.pop("delay_sec", None)
 
     with open(outdir / "final_params_rl.json", "w", encoding="utf-8") as f:
-        json.dump({"model_init": best_params, "best_validation_loss": best_val}, f, indent=2)
+        json.dump(
+            {
+                "model_init": best_params,
+                "best_validation": {"loss": best_val, "params": best_params},
+                "best_train_loss_so_far": history["best_train_loss_so_far"][-1] if history["best_train_loss_so_far"] else None,
+                "final_episode_params": {k: v[-1] for k, v in param_hist["current_eval_params_per_episode"].items()},
+            },
+            f,
+            indent=2,
+        )
 
     delay_map = {t.name: float(t.delay_sec_est) for t in train_traj + val_traj + test_traj}
     metadata = {
@@ -323,11 +511,20 @@ def main():
         "calibration_json": args.calibration_json,
         "cpr": None if not np.isfinite(cfg.cpr) else float(cfg.cpr),
         "dataset_files": [str(p) for p in csv_paths],
+        "dataset_split": {
+            "method": "single_csv_segments" if len(csv_paths) == 1 else "file_level",
+            "train_count": len(train_traj),
+            "val_count": len(val_traj),
+            "test_count": len(test_traj),
+        },
         "reward_weights": env.reward_weights,
         "randomization": {
             "domain_randomization": args.domain_randomization,
             "delay_jitter_ms": args.delay_jitter_ms,
         },
+        "run_mode": args.run_mode,
+        "evaluation": {"deterministic": bool(args.eval_deterministic)},
+        "effective_ppo_config": effective_ppo_config,
         "best_validation_score": best_val,
         "delay_estimates_sec": delay_map,
         "tensorboard_log": args.tensorboard_log if args.tensorboard_log else str(outdir / "tensorboard"),
@@ -337,7 +534,7 @@ def main():
         json.dump(metadata, f, indent=2)
 
     with open(outdir / "history.json", "w", encoding="utf-8") as f:
-        json.dump(history, f, indent=2)
+        json.dump({"metrics": history, "parameter_tracks": param_hist}, f, indent=2)
     save_history_csv(history, outdir / "history.csv")
 
     plot_training_curves(history, outdir)
@@ -352,6 +549,8 @@ def main():
     rep_feat = compute_error_features(rep, sim, align_shift_sec=0.0)
     rep_loss = weighted_loss(rep_feat, env.reward_weights)
     save_best_replay_csv(outdir / "replay_best.csv", rep, sim, best_params, rep_loss, rep_delay, cfg)
+    # Alias with chrono_run-style naming for downstream plotting workflows.
+    save_best_replay_csv(outdir / "chrono_run_best.csv", rep, sim, best_params, rep_loss, rep_delay, cfg)
     plot_overlay(rep.t, rep.theta_real, sim["theta"], "theta [rad]", outdir / "overlay_theta.png")
     plot_overlay(rep.t, rep.omega_real, sim["omega"], "omega [rad/s]", outdir / "overlay_omega.png")
     plot_overlay(rep.t, rep.alpha_real, sim["alpha"], "alpha [rad/s^2]", outdir / "overlay_alpha.png")

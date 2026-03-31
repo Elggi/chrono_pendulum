@@ -15,14 +15,15 @@ def _save(fig, path: Path):
 
 
 def plot_training_curves(history: dict, outdir: Path):
-    ep = np.arange(1, len(history.get("reward", [])) + 1)
+    ep = np.arange(1, len(history.get("episode_reward", [])) + 1)
     if len(ep) == 0:
         return
 
     fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(ep, history["reward"], label="episode reward")
+    ax.plot(ep, history["episode_reward"], label="mean episode reward (SB3 Monitor)")
     ax.set_xlabel("episode")
     ax.set_ylabel("reward")
+    ax.set_title("True Episode Reward")
     ax.grid(True, alpha=0.3)
     _save(fig, outdir / "episode_reward.png")
 
@@ -49,16 +50,23 @@ def plot_training_curves(history: dict, outdir: Path):
     _save(fig, outdir / "rmse_convergence.png")
 
 
-def plot_param_convergence(param_history: dict[str, list[float]], outdir: Path):
+def plot_param_convergence(param_history: dict, outdir: Path):
     if not param_history:
         return
-    keys = list(param_history.keys())
-    fig, axs = plt.subplots(len(keys), 1, figsize=(8, 2.4 * len(keys)), sharex=True)
+    current = param_history.get("current_eval_params_per_episode", {})
+    best_train = param_history.get("global_best_train_params_so_far", {})
+    best_val = param_history.get("global_best_val_params_so_far", {})
+    keys = list(current.keys())
+    if not keys:
+        return
+    fig, axs = plt.subplots(len(keys), 1, figsize=(8, 2.6 * len(keys)), sharex=True)
     if len(keys) == 1:
         axs = [axs]
-    ep = np.arange(1, len(param_history[keys[0]]) + 1)
+    ep = np.arange(1, len(current[keys[0]]) + 1)
     for ax, key in zip(axs, keys):
-        ax.plot(ep, param_history[key], label=key)
+        ax.plot(ep, current.get(key, []), label=f"{key} current-eval")
+        ax.plot(ep, best_train.get(key, []), label=f"{key} best-train-so-far")
+        ax.plot(ep, best_val.get(key, []), label=f"{key} best-val-so-far")
         ax.grid(True, alpha=0.3)
         ax.legend(loc="best")
     axs[-1].set_xlabel("episode")
@@ -97,15 +105,15 @@ def plot_overlay(t, real, sim, ylabel: str, outpath: Path):
     _save(fig, outpath)
 
 
-def plot_rl_dashboard(history: dict, param_history: dict[str, list[float]], outdir: Path):
-    ep = np.arange(1, len(history.get("reward", [])) + 1)
+def plot_rl_dashboard(history: dict, param_history: dict, outdir: Path):
+    ep = np.arange(1, len(history.get("episode_reward", [])) + 1)
     if len(ep) == 0:
         return
     fig, axs = plt.subplots(2, 2, figsize=(13, 8))
 
     ax = axs[0, 0]
-    ax.plot(ep, history.get("reward", []), color="tab:blue")
-    ax.set_title("Episode Reward")
+    ax.plot(ep, history.get("episode_reward", []), color="tab:blue")
+    ax.set_title("Episode Reward (from SB3 Monitor)")
     ax.set_xlabel("episode")
     ax.set_ylabel("reward")
     ax.grid(True, alpha=0.3)
@@ -132,12 +140,17 @@ def plot_rl_dashboard(history: dict, param_history: dict[str, list[float]], outd
     ax.legend(loc="best")
 
     ax = axs[1, 1]
-    keys = list(param_history.keys())[:4]
+    current = param_history.get("current_eval_params_per_episode", {})
+    best_val = param_history.get("global_best_val_params_so_far", {})
+    keys = list(current.keys())[:4]
     for key in keys:
-        vals = param_history.get(key, [])
-        if vals:
-            ax.plot(ep, vals, label=key)
-    ax.set_title("Parameter Trends (Top 4)")
+        vals_cur = current.get(key, [])
+        vals_best = best_val.get(key, [])
+        if vals_cur:
+            ax.plot(ep, vals_cur, label=f"{key} current")
+        if vals_best:
+            ax.plot(ep, vals_best, linestyle="--", label=f"{key} best-val")
+    ax.set_title("Parameter Trends (current vs best-val)")
     ax.set_xlabel("episode")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="best")
