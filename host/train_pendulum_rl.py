@@ -146,7 +146,8 @@ def train_with_sb3(env, val_env, args, history, param_hist):
         seed=args.seed,
         n_steps=n_steps_eff,
         batch_size=batch_size_eff,
-        learning_rate=3e-4,
+        ent_coef=float(args.ent_coef),
+        learning_rate=float(args.learning_rate),
         gamma=args.gamma,
         gae_lambda=args.lam,
         target_kl=args.kl_targ,
@@ -160,6 +161,8 @@ def train_with_sb3(env, val_env, args, history, param_hist):
         "target_kl": float(args.kl_targ),
         "n_steps": int(n_steps_eff),
         "seed": int(args.seed),
+        "ent_coef": float(args.ent_coef),
+        "learning_rate": float(args.learning_rate),
     }
     best_val = float("inf")
     best_params = {}
@@ -339,10 +342,15 @@ def main():
     ap.add_argument("-k", "--kl_targ", type=float, default=0.003)
     ap.add_argument("-b", "--batch_size", type=int, default=20)
     ap.add_argument("--n_steps", type=int, default=32)
+    ap.add_argument("--learning_rate", type=float, default=3e-4)
+    ap.add_argument("--ent_coef", type=float, default=0.0)
     ap.add_argument("--device", type=str, default="cpu")
     ap.add_argument("--run_mode", choices=["debug", "research"], default="research")
     ap.add_argument("--allow_small_split", action="store_true", default=False)
     ap.add_argument("--eval_stochastic", action="store_true", default=False)
+    ap.add_argument("--action_step_frac", type=float, default=0.08)
+    ap.add_argument("--init_noise_frac", type=float, default=0.07)
+    ap.add_argument("--aggressive_search", action="store_true", default=False)
 
     ap.add_argument("--learn_delay", action="store_true", default=False)
     ap.add_argument("--delay_override", type=float, default=None)
@@ -360,12 +368,23 @@ def main():
     if args.run_mode == "debug":
         args.domain_randomization = False
         args.delay_jitter_ms = 0.0
+    if args.aggressive_search:
+        args.action_step_frac = max(float(args.action_step_frac), 0.20)
+        args.init_noise_frac = max(float(args.init_noise_frac), 0.20)
+        args.ent_coef = max(float(args.ent_coef), 0.02)
+        args.kl_targ = max(float(args.kl_targ), 0.02)
     args.eval_deterministic = not bool(args.eval_stochastic)
     print(f"[MODE] run_mode={args.run_mode}")
     print(
         f"[MODE] domain_randomization={args.domain_randomization} | "
         f"delay_jitter_ms={args.delay_jitter_ms:.3f} | "
         f"eval_deterministic={args.eval_deterministic}"
+    )
+    print(
+        f"[SEARCH] aggressive={args.aggressive_search} | "
+        f"action_step_frac={args.action_step_frac:.3f} | "
+        f"init_noise_frac={args.init_noise_frac:.3f} | "
+        f"ent_coef={args.ent_coef:.4f} | lr={args.learning_rate:.2e}"
     )
     if args.domain_randomization:
         print(
@@ -428,6 +447,8 @@ def main():
         domain_randomization=args.domain_randomization,
         seed=args.seed,
         max_refine_steps=args.max_refine_steps,
+        action_step_frac=args.action_step_frac,
+        init_noise_frac=args.init_noise_frac,
     )
     val_env = PendulumRLEnv(
         trajectories=val_traj,
@@ -438,6 +459,8 @@ def main():
         domain_randomization=False,
         seed=args.seed + 1,
         max_refine_steps=args.max_refine_steps,
+        action_step_frac=args.action_step_frac,
+        init_noise_frac=args.init_noise_frac,
     )
 
     outdir = Path(args.outdir)
@@ -526,6 +549,8 @@ def main():
     rep_feat = compute_error_features(rep, sim, align_shift_sec=0.0)
     rep_loss = weighted_loss(rep_feat, env.reward_weights)
     save_best_replay_csv(outdir / "replay_best.csv", rep, sim, best_params, rep_loss, rep_delay, cfg)
+    # Alias with chrono_run-style naming for downstream plotting workflows.
+    save_best_replay_csv(outdir / "chrono_run_best.csv", rep, sim, best_params, rep_loss, rep_delay, cfg)
     plot_overlay(rep.t, rep.theta_real, sim["theta"], "theta [rad]", outdir / "overlay_theta.png")
     plot_overlay(rep.t, rep.omega_real, sim["omega"], "omega [rad/s]", outdir / "overlay_omega.png")
     plot_overlay(rep.t, rep.alpha_real, sim["alpha"], "alpha [rad/s^2]", outdir / "overlay_alpha.png")

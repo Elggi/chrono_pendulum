@@ -54,6 +54,46 @@ select_csv_file() {
     done
 }
 
+select_plot_csv_file() {
+    echo "--------------------------------" >&2
+    echo "[INFO] Plot 가능한 CSV 선택 (chrono/replay 형식만 표시)" >&2
+
+    local search_dirs=("$BASE_DIR/run_logs" "$BASE_DIR/rl_results")
+    local files=()
+    local d
+    for d in "${search_dirs[@]}"; do
+        if [ -d "$d" ]; then
+            while IFS= read -r -d '' f; do
+                local bn
+                bn=$(basename "$f")
+                # Exclude SB3/metrics CSV that do not match chrono_run-style schema.
+                if [[ "$bn" == "sb3_monitor.csv" || "$bn" == "history.csv" ]]; then
+                    continue
+                fi
+                files+=("$f")
+            done < <(find "$d" -type f -name "*.csv" -print0 2>/dev/null)
+        fi
+    done
+
+    if [ "${#files[@]}" -eq 0 ]; then
+        echo "[ERROR] plot 가능한 CSV가 없습니다." >&2
+        return 1
+    fi
+
+    IFS=$'\n' files=($(printf "%s\n" "${files[@]}" | sort))
+    unset IFS
+
+    select file in "${files[@]}"; do
+        if [ -n "$file" ]; then
+            echo "[INFO] Selected: $file" >&2
+            echo "$file"
+            return 0
+        else
+            echo "[ERROR] 잘못된 선택" >&2
+        fi
+    done
+}
+
 select_json_file() {
     local label="${1:-JSON 파일}"
     echo "--------------------------------" >&2
@@ -158,7 +198,7 @@ run_system_identification() {
 }
 
 run_plot() {
-    file=$(select_csv_file)
+    file=$(select_plot_csv_file)
     if [ -z "$file" ]; then return; fi
 
     python3 "$BASE_DIR/plot_pendulum.py" --csv "$file"
@@ -208,6 +248,8 @@ run_rl_fitting() {
 
     read -p "domain_randomization ON? (y/n) [y]: " dr_yn
     dr_yn=${dr_yn:-y}
+    read -p "aggressive_search ON? (y/n) [n]: " aggr_yn
+    aggr_yn=${aggr_yn:-n}
 
     run_id=$(date +"run_%Y%m%d_%H%M%S")
     run_outdir="$BASE_DIR/rl_results/runs/$run_id"
@@ -225,6 +267,9 @@ run_rl_fitting() {
     else
         cmd+=(--domain_randomizationOFF)
     fi
+    if [[ "$aggr_yn" =~ ^[Yy]$ ]]; then
+        cmd+=(--aggressive_search)
+    fi
     echo "[INFO] command: ${cmd[*]}"
     "${cmd[@]}"
 
@@ -238,6 +283,10 @@ run_rl_fitting() {
     if [ -f "$run_outdir/replay_best.csv" ]; then
         echo "[INFO] replay export CSV: $run_outdir/replay_best.csv"
         echo "[INFO] replay plot: python3 $BASE_DIR/plot_pendulum.py --csv $run_outdir/replay_best.csv"
+    fi
+    if [ -f "$run_outdir/chrono_run_best.csv" ]; then
+        echo "[INFO] chrono_run-style export CSV: $run_outdir/chrono_run_best.csv"
+        echo "[INFO] replay plot: python3 $BASE_DIR/plot_pendulum.py --csv $run_outdir/chrono_run_best.csv"
     fi
     if [ -f "$run_outdir/history.csv" ]; then
         echo "[INFO] RL+replay one-window plot: python3 $BASE_DIR/plot_pendulum.py --rl-dir $run_outdir"

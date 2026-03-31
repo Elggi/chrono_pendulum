@@ -396,6 +396,8 @@ class PendulumRLEnv:
         seed: int = 0,
         max_refine_steps: int = 12,
         reward_weights: dict[str, float] | None = None,
+        action_step_frac: float = 0.08,
+        init_noise_frac: float = 0.07,
     ):
         self.trajectories = trajectories
         self.cfg = cfg
@@ -405,6 +407,8 @@ class PendulumRLEnv:
         self.rng = np.random.default_rng(seed)
         self.max_refine_steps = int(max_refine_steps)
         self.reward_weights = reward_weights or {}
+        self.action_step_frac = float(max(1e-4, action_step_frac))
+        self.init_noise_frac = float(max(0.0, init_noise_frac))
 
         self.param_keys = list(PARAM_KEYS)
         if self.learn_delay:
@@ -433,7 +437,7 @@ class PendulumRLEnv:
         action = np.clip(action, -1.0, 1.0)
         for i, k in enumerate(self.param_keys):
             lo, hi = self.bounds[k]
-            step = 0.08 * (hi - lo)
+            step = self.action_step_frac * (hi - lo)
             self.param_vec[i] = np.clip(self.param_vec[i] + step * action[i], lo, hi)
 
     def _rollout_loss(self, params: dict[str, float]):
@@ -478,7 +482,7 @@ class PendulumRLEnv:
             for i, k in enumerate(self.param_keys):
                 lo, hi = self.bounds[k]
                 span = (hi - lo)
-                self.param_vec[i] = np.clip(self.param_vec[i] + self.rng.normal(0.0, 0.07 * span), lo, hi)
+                self.param_vec[i] = np.clip(self.param_vec[i] + self.rng.normal(0.0, self.init_noise_frac * span), lo, hi)
         self.last_loss, self.last_feat = self._rollout_loss(self._pack_params())
         self.best_loss = self.last_loss
         self.best_params = self._pack_params()
