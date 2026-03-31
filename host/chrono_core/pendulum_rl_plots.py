@@ -39,13 +39,17 @@ def plot_training_curves(history: dict, outdir: Path):
 
     fig, axs = plt.subplots(3, 1, figsize=(8, 8), sharex=True)
     for i, key in enumerate(["rmse_theta", "rmse_omega", "rmse_alpha"]):
-        axs[i].plot(ep, history.get(key, []), label=f"train {key}")
+        y_train = history.get(key, [])
+        if len(y_train) == len(ep):
+            axs[i].plot(ep, y_train, label=f"train {key}")
         vk = f"val_{key}"
-        if history.get(vk):
-            axs[i].plot(ep, history[vk], label=f"val {key}")
+        y_val = history.get(vk, [])
+        if len(y_val) == len(ep):
+            axs[i].plot(ep, y_val, label=f"val {key}")
         axs[i].set_ylabel(key)
         axs[i].grid(True, alpha=0.3)
-        axs[i].legend(loc="best")
+        if len(axs[i].lines) > 0:
+            axs[i].legend(loc="best")
     axs[-1].set_xlabel("episode")
     _save(fig, outdir / "rmse_convergence.png")
 
@@ -178,4 +182,50 @@ def plot_stage1_regression_summary(y_true, y_pred, outpath: Path):
     axs[1].set_xlabel("target J*alpha")
     axs[1].set_ylabel("predicted")
     axs[1].grid(True, alpha=0.3)
+    _save(fig, outpath)
+
+
+def plot_stage123_regression_summary(stage_payloads: dict[str, dict], outpath: Path):
+    """Render one consolidated figure for Stage 1~3 regression results."""
+    fig, axs = plt.subplots(3, 1, figsize=(10, 10))
+
+    s1 = stage_payloads.get("stage1", {})
+    s1_id = s1.get("identified_params", {})
+    s1_m = s1.get("metrics", {})
+    axs[0].axis("off")
+    axs[0].set_title("Stage 1 (sin): fit [K_u, l_com]")
+    txt1 = (
+        f"K_u: {s1_id.get('K_u', np.nan):.8f}\n"
+        f"l_com: {s1_id.get('l_com', np.nan):.8f}\n"
+        f"rmse: {s1_m.get('rmse', np.nan):.6f}\n"
+        f"samples: {s1_m.get('sample_count', np.nan)}"
+    )
+    axs[0].text(0.02, 0.55, txt1, fontsize=12, family="monospace")
+
+    s2 = stage_payloads.get("stage2", {})
+    s2_id = s2.get("identified_params", {})
+    s2_m = s2.get("metrics", {})
+    axs[1].axis("off")
+    axs[1].set_title("Stage 2 (square): fit [b_eq]")
+    txt2 = (
+        f"b_eq: {s2_id.get('b_eq', np.nan):.8f}\n"
+        f"rmse: {s2_m.get('rmse', np.nan):.6f}\n"
+        f"omega_deadband: {s2_m.get('omega_deadband', np.nan)}\n"
+        f"used_ratio: {s2_m.get('used_ratio', np.nan):.4f}"
+    )
+    axs[1].text(0.02, 0.55, txt2, fontsize=12, family="monospace")
+
+    s3 = stage_payloads.get("stage3", {})
+    s3_id = s3.get("identified_params", {})
+    s3_m = s3.get("metrics", {})
+    axs[2].axis("off")
+    axs[2].set_title("Stage 3 (burst): fit [tau_eq]")
+    txt3 = (
+        f"tau_eq: {s3_id.get('tau_eq', np.nan):.8f}\n"
+        f"rmse: {s3_m.get('rmse', np.nan):.6f}\n"
+        f"low_speed_ratio: {s3_m.get('low_speed_ratio', np.nan):.4f}\n"
+        f"high_speed_ref: {s3_m.get('high_speed_ref', np.nan)}"
+    )
+    axs[2].text(0.02, 0.55, txt3, fontsize=12, family="monospace")
+
     _save(fig, outpath)

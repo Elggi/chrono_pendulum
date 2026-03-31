@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,7 @@ from chrono_core.pendulum_rl_env import (
 from chrono_core.pendulum_rl_plots import (
     plot_param_convergence,
     plot_stage1_regression_summary,
+    plot_stage123_regression_summary,
     plot_training_curves,
 )
 
@@ -49,12 +51,19 @@ def list_csv_logs(base_dir: Path) -> list[Path]:
     return sorted(base_dir.glob("*.csv"))
 
 
+def list_json_logs(base_dir: Path) -> list[Path]:
+    return sorted([p for p in base_dir.glob("*.json") if p.is_file()])
+
+
 def choose_one_csv(items: list[Path], title: str) -> Path:
     if not items:
         raise ValueError("No CSV files found in run_logs.")
     print(title)
     for i, item in enumerate(items, start=1):
         print(f"[{i}] {item.name}")
+    raw = _input("Select indices for Stage4 PPO (comma separated, default: same as Stage3): ", "")
+    if raw.strip() == "":
+        return []
     while True:
         raw = _input("Select index: ")
         try:
@@ -89,6 +98,46 @@ def choose_many_csv(items: list[Path], title: str) -> list[Path]:
             raw = _input("Invalid selection. Re-enter comma separated indices (or Enter to skip): ", "")
             if raw.strip() == "":
                 return []
+
+
+def choose_optional_json(items: list[Path], title: str) -> Path | None:
+    print(title)
+    options = [None] + items
+    for i, item in enumerate(options, start=1):
+        if item is None:
+            print(f"[{i}] 없음 (JSON 미적용)")
+        else:
+            print(f"[{i}] {item.name}")
+    while True:
+        raw = _input("#? ", "1")
+        try:
+            idx = int(raw)
+            picked = options[idx - 1]
+            print(f"[INFO] Selected JSON: {picked if picked is not None else '없음'}")
+            return picked
+        except (ValueError, IndexError):
+            print("Invalid selection. Please choose a valid index.")
+
+
+def prompt_stage4_hyperparams(default_episodes: int) -> dict:
+    print("Interactive mode (press Enter to keep default):")
+    episodes = int(_input(f"num_episodes [{default_episodes}]: ", str(default_episodes)))
+    gamma = float(_input("gamma [0.995]: ", "0.995"))
+    lam = float(_input("lam [0.98]: ", "0.98"))
+    kl_targ = float(_input("kl_targ [0.003]: ", "0.003"))
+    batch_size = int(_input("batch_size [20]: ", "20"))
+    device = _input("device [cpu/cuda] [cpu]: ", "cpu")
+    dr = _input("domain_randomization (ON/OFF) [OFF]: ", "OFF").strip().upper()
+    domain_randomization = dr in ("ON", "Y", "YES", "TRUE", "1")
+    return {
+        "episodes": episodes,
+        "gamma": gamma,
+        "gae_lambda": lam,
+        "target_kl": kl_targ,
+        "batch_size": batch_size,
+        "device": device,
+        "domain_randomization": domain_randomization,
+    }
 
 
 def load_stage_json(path: Path) -> dict:
@@ -357,7 +406,26 @@ def evaluate_dataset_mode(env: PendulumRLEnv, params: dict[str, float], loss_mod
     return float(np.mean(losses)) if losses else 0.0
 
 
-def _train_rl(env, val_env, episodes: int, seed: int = 7):
+def evaluate_rmse_metrics(env: PendulumRLEnv, params: dict[str, float]) -> dict[str, float]:
+    rmse_theta = []
+    rmse_omega = []
+    rmse_alpha = []
+    for traj in env.trajectories:
+        sim = simulate_trajectory(traj, params, env.cfg, delay_sec=params.get("delay_sec", traj.delay_sec_est))
+        feat = compute_error_features(traj, sim, align_shift_sec=0.0)
+        rmse_theta.append(float(feat["rmse_theta"]))
+        rmse_omega.append(float(feat["rmse_omega"]))
+        rmse_alpha.append(float(feat["rmse_alpha"]))
+    if len(rmse_theta) == 0:
+        return {"rmse_theta": np.nan, "rmse_omega": np.nan, "rmse_alpha": np.nan}
+    return {
+        "rmse_theta": float(np.mean(rmse_theta)),
+        "rmse_omega": float(np.mean(rmse_omega)),
+        "rmse_alpha": float(np.mean(rmse_alpha)),
+    }
+
+
+def _train_rl(env, val_env, episodes: int, seed: int = 7, ppo_cfg: dict | None = None):
     import gymnasium as gym
     from gymnasium import spaces
     from stable_baselines3 import PPO
@@ -380,8 +448,30 @@ def _train_rl(env, val_env, episodes: int, seed: int = 7):
             obs, rew, done, info = self.wrapped.step(np.asarray(action, dtype=float))
             return np.asarray(obs, dtype=np.float32), float(rew), bool(done), False, info
 
-    model = PPO("MlpPolicy", _SB3Env(env), seed=seed, n_steps=32, batch_size=16, verbose=0)
-    history = {"episode_reward": [], "train_loss": [], "val_loss": []}
+    ppo_cfg = ppo_cfg or {}
+    model = PPO(
+        "MlpPolicy",
+        _SB3Env(env),
+        seed=seed,
+        n_steps=32,
+        batch_size=int(ppo_cfg.get("batch_size", 20)),
+        gamma=float(ppo_cfg.get("gamma", 0.995)),
+        gae_lambda=float(ppo_cfg.get("gae_lambda", 0.98)),
+        target_kl=float(ppo_cfg.get("target_kl", 0.003)),
+        device=str(ppo_cfg.get("device", "cpu")),
+        verbose=0,
+    )
+    history = {
+        "episode_reward": [],
+        "train_loss": [],
+        "val_loss": [],
+        "rmse_theta": [],
+        "rmse_omega": [],
+        "rmse_alpha": [],
+        "val_rmse_theta": [],
+        "val_rmse_omega": [],
+        "val_rmse_alpha": [],
+    }
     param_hist = {
         "current_eval_params_per_episode": {k: [] for k in env.param_keys},
         "global_best_train_params_so_far": {k: [] for k in env.param_keys},
@@ -389,6 +479,7 @@ def _train_rl(env, val_env, episodes: int, seed: int = 7):
     }
     best_params = env.center.copy()
     best_val = float("inf")
+    t0 = time.time()
     for ep in range(1, episodes + 1):
         model.learn(total_timesteps=max(1, env.max_refine_steps), progress_bar=False, reset_num_timesteps=False)
         obs, _ = _SB3Env(env).reset()
@@ -403,9 +494,17 @@ def _train_rl(env, val_env, episodes: int, seed: int = 7):
         cur = dict(info.get("params", {}))
         train_loss = evaluate_dataset_mode(env, cur, env.loss_mode)
         val_loss = evaluate_dataset_mode(val_env, cur, val_env.loss_mode)
+        train_rmse = evaluate_rmse_metrics(env, cur)
+        val_rmse = evaluate_rmse_metrics(val_env, cur)
         history["episode_reward"].append(float(total_reward))
         history["train_loss"].append(float(train_loss))
         history["val_loss"].append(float(val_loss))
+        history["rmse_theta"].append(float(train_rmse["rmse_theta"]))
+        history["rmse_omega"].append(float(train_rmse["rmse_omega"]))
+        history["rmse_alpha"].append(float(train_rmse["rmse_alpha"]))
+        history["val_rmse_theta"].append(float(val_rmse["rmse_theta"]))
+        history["val_rmse_omega"].append(float(val_rmse["rmse_omega"]))
+        history["val_rmse_alpha"].append(float(val_rmse["rmse_alpha"]))
         if val_loss < best_val:
             best_val = float(val_loss)
             best_params = cur.copy()
@@ -413,10 +512,26 @@ def _train_rl(env, val_env, episodes: int, seed: int = 7):
             param_hist["current_eval_params_per_episode"][k].append(float(cur[k]))
             param_hist["global_best_train_params_so_far"][k].append(float(cur[k]))
             param_hist["global_best_val_params_so_far"][k].append(float(best_params.get(k, cur[k])))
+        if ep % 10 == 0 or ep == 1 or ep == episodes:
+            elapsed = time.time() - t0
+            print(
+                f"[RL] ep {ep}/{episodes} | train_loss={train_loss:.5f} "
+                f"val_loss={val_loss:.5f} | best_val={best_val:.5f} | elapsed={elapsed:.1f}s"
+            )
     return best_params, best_val, history, param_hist
 
 
-def run_stage4(cfg: BridgeConfig, outdir: Path, stage1_payload: dict, stage2_payload: dict, stage3_payload: dict, stage4_csv: list[Path], episodes: int):
+def run_stage4(
+    cfg: BridgeConfig,
+    outdir: Path,
+    stage1_payload: dict,
+    stage2_payload: dict,
+    stage3_payload: dict,
+    stage4_csv: list[Path],
+    episodes: int,
+    domain_randomization: bool = False,
+    ppo_cfg: dict | None = None,
+):
     print("[INFO] stage4_dataset_policy:")
     print("  - mode: PPO fine-tuning")
     print("  - init_from_regression: True")
@@ -444,12 +559,12 @@ def run_stage4(cfg: BridgeConfig, outdir: Path, stage1_payload: dict, stage2_pay
         bounds[k] = (max(lo, c - r), min(hi, c + r))
 
     env = PendulumRLEnv(trajectories=trajectories, cfg=cfg, init_params=init_params, learn_delay=False,
-                        domain_randomization=False, max_refine_steps=12, action_step_frac=0.05, init_noise_frac=0.0,
+                        domain_randomization=domain_randomization, max_refine_steps=12, action_step_frac=0.05, init_noise_frac=0.0,
                         param_keys_override=["K_u", "l_com", "b_eq", "tau_eq"], bounds_override=bounds, loss_mode="full")
     val_env = PendulumRLEnv(trajectories=trajectories, cfg=cfg, init_params=init_params, learn_delay=False,
                             domain_randomization=False, max_refine_steps=12, action_step_frac=0.05, init_noise_frac=0.0,
                             param_keys_override=["K_u", "l_com", "b_eq", "tau_eq"], bounds_override=bounds, loss_mode="full")
-    best_params, best_val, history, param_hist = _train_rl(env, val_env, episodes=episodes)
+    best_params, best_val, history, param_hist = _train_rl(env, val_env, episodes=episodes, ppo_cfg=ppo_cfg)
 
     payload = {
         "stage": 4,
@@ -477,10 +592,6 @@ def run_stage4(cfg: BridgeConfig, outdir: Path, stage1_payload: dict, stage2_pay
     plot_param_convergence(param_hist, stage_dir)
     return payload
 
-    cfg.K_u_init = 1.0e-5
-    cfg.b_eq_init = 0.0
-    cfg.tau_eq_init = 0.0
-    cfg.l_com_init = 0.5 * float(cfg.link_L)
 
 def parse_args():
     p = argparse.ArgumentParser(description="Sequential staged identification + PPO fine-tuning")
@@ -495,8 +606,6 @@ def parse_args():
     p.add_argument("--ppo_episodes", type=int, default=80)
     return p.parse_args()
 
-    init_params = build_init_params(cfg, calibration=None, parameter_json=None)
-    _print_init_state(init_params, loaded=loaded)
 
 def main():
     args = parse_args()
@@ -507,18 +616,23 @@ def main():
     cfg.tau_eq_init = 0.0
     cfg.l_com_init = 0.5 * float(cfg.link_L)
 
-    loaded = False
-    if args.calibration_json is not None and args.calibration_json.exists():
-        apply_calibration_json(cfg, str(args.calibration_json))
-        loaded = True
-
-    init_params = build_init_params(cfg, calibration=None, parameter_json=None)
-    _print_init_state(init_params, loaded=loaded)
-
     outdir = args.run_logs
     outdir.mkdir(parents=True, exist_ok=True)
 
     csv_files = list_csv_logs(outdir)
+    json_files = list_json_logs(outdir)
+
+    loaded = False
+    calib_json = args.calibration_json
+    if calib_json is None and args.mode == "rl":
+        print("--------------------------------")
+        calib_json = choose_optional_json(json_files, "[INFO] Calibration JSON (optional) 선택")
+    if calib_json is not None and calib_json.exists():
+        apply_calibration_json(cfg, str(calib_json))
+        loaded = True
+
+    init_params = build_init_params(cfg, calibration=None, parameter_json=None)
+    _print_init_state(init_params, loaded=loaded)
 
     stage1 = None
     stage2 = None
@@ -533,9 +647,19 @@ def main():
         stage2 = run_stage2(cfg, stage2_csv, outdir, stage1_payload=stage1, omega_deadband=args.omega_deadband)
         stage3 = run_stage3(cfg, stage3_csv, outdir, stage1_payload=stage1, stage2_payload=stage2,
                             tanh_eps=args.tanh_eps, high_speed_ref=args.high_speed_ref)
+        plot_stage123_regression_summary(
+            {"stage1": stage1, "stage2": stage2, "stage3": stage3},
+            outdir / "stage123_regression_summary.png",
+        )
+        print(f"[INFO] Saved: {outdir / 'stage123_regression_summary.png'}")
 
     if args.mode in ("rl", "all"):
         print("[INFO] Running Stage 4 PPO fine-tuning only.")
+        print("--------------------------------")
+        param_json = choose_optional_json(json_files, "[INFO] Parameter JSON (optional) 선택")
+        if param_json is not None:
+            print("[INFO] Stage4 uses stage1/2/3 regression JSON as initialization source; selected parameter JSON is kept for operator traceability only.")
+        ppo_cfg = prompt_stage4_hyperparams(args.ppo_episodes)
         if stage1 is None:
             stage1_path = outdir / "stage1_params.json"
             stage2_path = outdir / "stage2_params.json"
@@ -549,7 +673,8 @@ def main():
         if not stage4_csv:
             stage4_csv = [choose_one_csv(csv_files, "Select fallback CSV for Stage 4 PPO:")]
         run_stage4(cfg, outdir, stage1_payload=stage1, stage2_payload=stage2, stage3_payload=stage3,
-                   stage4_csv=stage4_csv, episodes=args.ppo_episodes)
+                   stage4_csv=stage4_csv, episodes=ppo_cfg["episodes"],
+                   domain_randomization=ppo_cfg["domain_randomization"], ppo_cfg=ppo_cfg)
 
 
 if __name__ == "__main__":
