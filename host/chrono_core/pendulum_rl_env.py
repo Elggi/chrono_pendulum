@@ -27,62 +27,6 @@ class ReplayTrajectory:
     delay_sec_est: float
 
 
-def slice_replay_trajectory(traj: ReplayTrajectory, start_idx: int, end_idx: int, name_suffix: str):
-    """Return a contiguous replay-trajectory slice with local time reset."""
-    s = int(max(0, start_idx))
-    e = int(min(len(traj.t), end_idx))
-    if e - s < 2:
-        raise ValueError(f"Trajectory slice too short: {e - s} rows")
-    t = np.asarray(traj.t[s:e], dtype=float).copy()
-    t -= t[0]
-    dt = np.diff(t, prepend=t[0])
-    if len(dt) > 1:
-        dt[0] = dt[1]
-    dt = np.maximum(dt, 1e-6)
-    return ReplayTrajectory(
-        name=f"{traj.name}:{name_suffix}",
-        t=t,
-        dt=dt,
-        cmd_u=np.asarray(traj.cmd_u[s:e], dtype=float).copy(),
-        hw_pwm=np.asarray(traj.hw_pwm[s:e], dtype=float).copy(),
-        theta_real=np.asarray(traj.theta_real[s:e], dtype=float).copy(),
-        omega_real=np.asarray(traj.omega_real[s:e], dtype=float).copy(),
-        alpha_real=np.asarray(traj.alpha_real[s:e], dtype=float).copy(),
-        delay_sec_est=float(traj.delay_sec_est),
-    )
-
-
-def split_replay_trajectory_segments(
-    traj: ReplayTrajectory,
-    seed: int = 0,
-    train_ratio: float = 0.7,
-    val_ratio: float = 0.15,
-    min_segment_len: int = 64,
-):
-    """Split one trajectory into non-overlapping train/val/test segments."""
-    n = len(traj.t)
-    if n < 3 * min_segment_len:
-        raise ValueError(
-            f"Single CSV trajectory has only {n} rows; need at least {3 * min_segment_len} "
-            f"rows to form train/val/test segments of >= {min_segment_len} rows."
-        )
-    train_end = int(max(min_segment_len, min(n - 2 * min_segment_len, train_ratio * n)))
-    val_len = int(max(min_segment_len, min(n - train_end - min_segment_len, val_ratio * n)))
-    val_end = train_end + val_len
-    if val_end > n - min_segment_len:
-        val_end = n - min_segment_len
-    # deterministic segment naming and optional flip for seed parity
-    if int(seed) % 2 == 0:
-        tr = slice_replay_trajectory(traj, 0, train_end, "train")
-        va = slice_replay_trajectory(traj, train_end, val_end, "val")
-        te = slice_replay_trajectory(traj, val_end, n, "test")
-    else:
-        te = slice_replay_trajectory(traj, 0, n - val_end, "test")
-        va = slice_replay_trajectory(traj, n - val_end, n - train_end, "val")
-        tr = slice_replay_trajectory(traj, n - train_end, n, "train")
-    return [tr], [va], [te]
-
-
 def _safe_col(df: pd.DataFrame, col: str, fallback: float = 0.0):
     if col not in df.columns:
         return np.full(len(df), float(fallback), dtype=float)
@@ -290,6 +234,15 @@ def weighted_loss(feat: dict[str, float], weights: dict[str, float]):
     )
 
 
+def simplified_loss(feat: dict[str, float], weights: dict[str, float] | None = None):
+    w = weights or {}
+    return float(
+        w.get("alpha", 1.0) * feat["rmse_alpha"]
+        + w.get("omega", 1.0) * feat["rmse_omega"]
+        + w.get("theta", 1.0) * feat["rmse_theta"]
+    )
+
+
 def load_replay_csv(path: str | Path, cfg: BridgeConfig, delay_override: float | None = None):
     p = Path(path)
     df = pd.read_csv(p)
@@ -398,6 +351,9 @@ class PendulumRLEnv:
         reward_weights: dict[str, float] | None = None,
         action_step_frac: float = 0.08,
         init_noise_frac: float = 0.07,
+        param_keys_override: list[str] | None = None,
+        bounds_override: dict[str, tuple[float, float]] | None = None,
+        loss_mode: str = "full",
     ):
         self.trajectories = trajectories
         self.cfg = cfg
@@ -410,7 +366,7 @@ class PendulumRLEnv:
         self.action_step_frac = float(max(1e-4, action_step_frac))
         self.init_noise_frac = float(max(0.0, init_noise_frac))
 
-        self.param_keys = list(PARAM_KEYS)
+        self.param_keys = list(param_keys_override) if param_keys_override else list(PARAM_KEYS)
         if self.learn_delay:
             self.param_keys.append("delay_sec")
         self.center = {k: float(init_params[k]) for k in self.param_keys if k in init_params}
@@ -418,6 +374,11 @@ class PendulumRLEnv:
             self.center["delay_sec"] = float(np.mean([t.delay_sec_est for t in trajectories]))
 
         self.bounds = default_param_bounds(self.center, learn_delay=self.learn_delay)
+        if bounds_override:
+            for k, v in bounds_override.items():
+                if k in self.bounds:
+                    self.bounds[k] = (float(v[0]), float(v[1]))
+        self.loss_mode = str(loss_mode).strip().lower()
         self.state_dim = len(self.param_keys) + 8
         self.action_dim = len(self.param_keys)
         self.reset()
@@ -451,7 +412,10 @@ class PendulumRLEnv:
             # Do not apply an additional alignment shift here.
             f = compute_error_features(traj, sim, delay_quality=1.0, align_shift_sec=0.0)
             feats.append(f)
-            losses.append(weighted_loss(f, self.reward_weights))
+            if self.loss_mode == "simplified":
+                losses.append(simplified_loss(f, self.reward_weights))
+            else:
+                losses.append(weighted_loss(f, self.reward_weights))
         loss = float(np.mean(losses)) if losses else 0.0
         feat_mean = {k: float(np.mean([f[k] for f in feats])) for k in feats[0]} if feats else {
             "rmse_theta": 0.0,
@@ -516,31 +480,29 @@ class PendulumRLEnv:
         return self._state(), float(reward), done, info
 
 
-def split_trajectories(paths: list[Path], seed: int = 0, allow_small_split: bool = False):
+def split_trajectories(paths: list[Path], seed: int = 0):
     rng = np.random.default_rng(seed)
     idx = np.arange(len(paths))
     rng.shuffle(idx)
     n_paths = len(paths)
-    if n_paths < 2:
+    if n_paths < 3:
         raise ValueError(
-            "Need at least 2 CSV trajectories to create distinct train/validation sets. "
-            "Provide more files or run with --run_mode debug --allow_small_split."
+            "Need at least 3 CSV trajectories for strict train/val/test split without overlap."
         )
-    if n_paths < 3 and not allow_small_split:
-        raise ValueError(
-            "Need at least 3 CSV trajectories for train/val/test split without reuse. "
-            "Provide more files, or set --allow_small_split for debug-only overlap on test."
-        )
-    if n_paths == 2:
-        tr = [paths[idx[0]]]
-        va = [paths[idx[1]]]
-        te = [paths[idx[1]]]
-        return tr, va, te
+
     n_train = max(1, int(0.7 * n_paths))
     n_val = max(1, int(0.15 * n_paths))
+    if n_train + n_val > n_paths - 1:
+        n_train = max(1, n_paths - 1 - n_val)
+    if n_train + n_val > n_paths - 1:
+        n_val = max(1, n_paths - 1 - n_train)
+    n_test = n_paths - n_train - n_val
+    if n_test < 1:
+        raise ValueError("Split failed to allocate test set. Provide additional CSV trajectories.")
+
     tr = [paths[i] for i in idx[:n_train]]
-    va = [paths[i] for i in idx[n_train:n_train + n_val]] or tr
-    te = [paths[i] for i in idx[n_train + n_val:]] or va
+    va = [paths[i] for i in idx[n_train:n_train + n_val]]
+    te = [paths[i] for i in idx[n_train + n_val:n_train + n_val + n_test]]
     return tr, va, te
 
 

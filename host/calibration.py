@@ -296,6 +296,8 @@ class CprCollector:
                 "angle_travel_rad": float(self.state.angle_travel),
                 "tip_hist": tip_hist,
                 "tip0": tip0,
+                "acc": self.state.acc.tolist(),
+                "gyro": self.state.gyro.tolist(),
             }
 
     def reset_revolution_window(self) -> None:
@@ -316,7 +318,7 @@ class CprCollector:
             self.state.tip0 = tip_now.copy()
             self.state.tip_hist.append(tip_now.copy())
 
-def _collect_cpr_and_r_from_imu(args) -> tuple[list[dict], float, list[dict], float]:
+def _collect_cpr_and_r_from_imu(args) -> tuple[list[dict], float, list[dict], float, float | None, int]:
     collector = CprCollector(imu_topic=args.imu_topic, enc_topic=args.hw_enc_topic)
     viewer_proc = maybe_launch_imu_viewer(args)
 
@@ -334,9 +336,16 @@ def _collect_cpr_and_r_from_imu(args) -> tuple[list[dict], float, list[dict], fl
         print("[INFO] 키보드 입력으로 모터를 조작하며 calibration 데이터를 수집합니다.")
         ctrl = collector._controller_node
         period = 1.0 / max(ctrl.cfg.loop_hz, 1e-6)
+        gravity_samples = []
         with KeyboardReader() as kb:
             while True:
                 snap = collector.snapshot()
+                acc_vec = np.asarray(snap.get("acc", [np.nan, np.nan, np.nan]), dtype=float)
+                gyro_vec = np.asarray(snap.get("gyro", [np.nan, np.nan, np.nan]), dtype=float)
+                if np.isfinite(acc_vec).all() and np.isfinite(gyro_vec).all():
+                    gyro_norm = float(np.linalg.norm(gyro_vec))
+                    if gyro_norm <= 0.35:
+                        gravity_samples.append(float(np.linalg.norm(acc_vec)))
                 key = kb.read_key_nonblocking(timeout=0.05)
                 changed = ctrl.apply_key(key)
                 if viewer_proc is not None and viewer_proc.poll() is not None:
@@ -386,7 +395,8 @@ def _collect_cpr_and_r_from_imu(args) -> tuple[list[dict], float, list[dict], fl
         print(f"[INFO] 감지된 full rotation 수: {snap['full_rotations']}")
         print(f"[INFO] CPR 샘플 수: {len(cpr_samples)}")
         print(f"[INFO] r 샘플 수: {len(r_trials)}")
-        return cpr_trials, mean_cpr, r_trials, mean_r
+        g_eff = float(np.median(gravity_samples)) if gravity_samples else None
+        return cpr_trials, mean_cpr, r_trials, mean_r, g_eff, len(gravity_samples)
     finally:
         collector.stop()
         if viewer_proc is not None and viewer_proc.poll() is None:
@@ -452,7 +462,7 @@ def _estimate_r_trials_from_snapshot(snapshot: dict) -> tuple[list[dict], float 
 def run_calibration(args) -> None:
     print("=== Manual Rotation Calibration (CPR/r from IMU+orientation) ===")
 
-    cpr_trials, mean_cpr, r_trials, mean_r = _collect_cpr_and_r_from_imu(args)
+    cpr_trials, mean_cpr, r_trials, mean_r, g_eff, gravity_sample_count = _collect_cpr_and_r_from_imu(args)
 
     result = {
         "created_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -460,8 +470,10 @@ def run_calibration(args) -> None:
         "summary": {
             "mean_cpr": mean_cpr,
             "mean_radius_m": mean_r,
+            "g_eff_mps2": g_eff,
             "trial_count_cpr": len(cpr_trials),
             "trial_count_r": len(r_trials),
+            "trial_count_g": gravity_sample_count,
         },
         "cpr_trials": cpr_trials,
         "radius_trials": r_trials,
@@ -477,6 +489,10 @@ def run_calibration(args) -> None:
     print("\n=== Calibration Result ===")
     print(f"mean CPR      : {mean_cpr:.6f}")
     print(f"mean radius r : {mean_r:.6f} m")
+    if g_eff is not None:
+        print(f"mean g_eff    : {g_eff:.6f} m/s^2")
+    else:
+        print("mean g_eff    : n/a (insufficient low-gyro samples)")
     print(f"JSON saved    : {args.output_json}")
 
 

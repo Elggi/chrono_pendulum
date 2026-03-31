@@ -297,6 +297,12 @@ run_rl_fitting() {
     echo "[INFO] TensorBoard: tensorboard --logdir $run_outdir/tensorboard"
 }
 
+run_staged_calibration() {
+    echo "--------------------------------"
+    echo "[INFO] Stage-based Parameter Optimization 실행 (staged_pendulum_calibration.py)"
+    python3 "$BASE_DIR/staged_pendulum_calibration.py"
+}
+
 run_replay_validation() {
     echo "--------------------------------"
     echo "[INFO] Replay Validation (Chrono + IMU dual viewer)"
@@ -354,7 +360,8 @@ while true; do
     echo "4) Chrono Pendulum (Select Host/Jetson mode)"
     echo "5) Plot Data"
     echo "6) Replay Validation (Chrono + IMU Dual Viewer)"
-    echo "7) Exit"
+    echo "7) Parameter Optimization (Stage UI)"
+    echo "8) Exit"
     echo "=========================================="
 
     read -p "Select option: " choice
@@ -385,6 +392,10 @@ while true; do
             pause
             ;;
         7)
+            run_staged_calibration
+            pause
+            ;;
+        8)
             echo "Bye!"
             exit 0
             ;;
