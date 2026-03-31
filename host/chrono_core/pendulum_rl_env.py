@@ -61,6 +61,24 @@ def _sanitize_timeseries(arr: np.ndarray):
     return out
 
 
+def _unwrap_angle_series(theta: np.ndarray):
+    out = np.asarray(theta, dtype=float).copy()
+    if len(out) == 0:
+        return out
+    out = _sanitize_timeseries(out)
+    finite = np.isfinite(out)
+    if not np.any(finite):
+        out[:] = 0.0
+        return out
+    idx = np.where(finite)[0]
+    unwrapped = np.unwrap(out[idx])
+    out[idx] = unwrapped
+    # Keep leading/trailing values stable if finite window does not span all rows.
+    out[: idx[0]] = out[idx[0]]
+    out[idx[-1] + 1 :] = out[idx[-1]]
+    return out
+
+
 def _winsorize_abs(x: np.ndarray, q: float = 99.5):
     y = np.asarray(x, dtype=float).copy()
     if len(y) == 0:
@@ -246,7 +264,7 @@ def load_replay_csv(path: str | Path, cfg: BridgeConfig, delay_override: float |
         omega_real = _safe_col(df, "omega")
     if not np.isfinite(alpha_real).any():
         alpha_real = _safe_col(df, "alpha")
-    theta_real = _sanitize_timeseries(theta_real)
+    theta_real = _unwrap_angle_series(theta_real)
     omega_real = _sanitize_timeseries(omega_real)
     alpha_real = _sanitize_timeseries(alpha_real)
     omega_from_theta = _gradient(theta_real, dt)
@@ -369,7 +387,9 @@ class PendulumRLEnv:
         for traj in self.trajectories:
             d = float(params.get("delay_sec", traj.delay_sec_est + jitter))
             sim = simulate_trajectory(traj, params, self.cfg, delay_sec=max(0.0, d))
-            f = compute_error_features(traj, sim, delay_quality=1.0, align_shift_sec=traj.delay_sec_est)
+            # simulate_trajectory already applies delay via delayed command input.
+            # Do not apply an additional alignment shift here.
+            f = compute_error_features(traj, sim, delay_quality=1.0, align_shift_sec=0.0)
             feats.append(f)
             losses.append(weighted_loss(f, self.reward_weights))
         loss = float(np.mean(losses)) if losses else 0.0
