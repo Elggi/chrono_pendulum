@@ -477,6 +477,10 @@ def run_stage4(cfg: BridgeConfig, outdir: Path, stage1_payload: dict, stage2_pay
     plot_param_convergence(param_hist, stage_dir)
     return payload
 
+    cfg.K_u_init = 1.0e-5
+    cfg.b_eq_init = 0.0
+    cfg.tau_eq_init = 0.0
+    cfg.l_com_init = 0.5 * float(cfg.link_L)
 
 def parse_args():
     p = argparse.ArgumentParser(description="Sequential staged identification + PPO fine-tuning")
@@ -491,6 +495,8 @@ def parse_args():
     p.add_argument("--ppo_episodes", type=int, default=80)
     return p.parse_args()
 
+    init_params = build_init_params(cfg, calibration=None, parameter_json=None)
+    _print_init_state(init_params, loaded=loaded)
 
 def main():
     args = parse_args()
