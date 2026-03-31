@@ -456,14 +456,28 @@ class PendulumRLEnv:
         return self._state(), float(reward), done, info
 
 
-def split_trajectories(paths: list[Path], seed: int = 0):
+def split_trajectories(paths: list[Path], seed: int = 0, allow_small_split: bool = False):
     rng = np.random.default_rng(seed)
     idx = np.arange(len(paths))
     rng.shuffle(idx)
-    if len(paths) <= 1:
-        return paths, paths, paths
-    n_train = max(1, int(0.7 * len(paths)))
-    n_val = max(1, int(0.15 * len(paths)))
+    n_paths = len(paths)
+    if n_paths < 2:
+        raise ValueError(
+            "Need at least 2 CSV trajectories to create distinct train/validation sets. "
+            "Provide more files or run with --run_mode debug --allow_small_split."
+        )
+    if n_paths < 3 and not allow_small_split:
+        raise ValueError(
+            "Need at least 3 CSV trajectories for train/val/test split without reuse. "
+            "Provide more files, or set --allow_small_split for debug-only overlap on test."
+        )
+    if n_paths == 2:
+        tr = [paths[idx[0]]]
+        va = [paths[idx[1]]]
+        te = [paths[idx[1]]]
+        return tr, va, te
+    n_train = max(1, int(0.7 * n_paths))
+    n_val = max(1, int(0.15 * n_paths))
     tr = [paths[i] for i in idx[:n_train]]
     va = [paths[i] for i in idx[n_train:n_train + n_val]] or tr
     te = [paths[i] for i in idx[n_train + n_val:]] or va
