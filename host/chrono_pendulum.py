@@ -494,7 +494,7 @@ def main():
     ap.add_argument("--duration", type=float, default=-1.0,
                     help="Run duration in seconds. <=0 means run until user quits.")
     ap.add_argument("--step", type=float, default=0.001)
-    ap.add_argument("--theta0-deg", type=float, default=-10.0)
+    ap.add_argument("--theta0-deg", type=float, default=0.0)
     ap.add_argument("--omega0", type=float, default=0.0)
     ap.add_argument("--link-mass", type=float, default=0.200)
     ap.add_argument("--link-length", type=float, default=0.285)
