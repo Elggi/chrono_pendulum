@@ -64,3 +64,20 @@ This folder contains host-side runtime, calibration, replay, plotting, and RL op
 
 - `run_logs/`  
   Runtime and calibration outputs (CSV + metadata JSON). Includes the latest calibration snapshots and run logs.
+
+
+## Stage-wise GRU trajectory fitting
+
+- `staged_pendulum_calibration.py`
+  Stage-wise discrete-time trajectory fitting pipeline (Stage 1: sin, Stage 2: square, Stage 3: burst).
+  Uses a **PyTorch GRU black-box dynamics learner** with real-data-only policy:
+  - input source: `hw_pwm`
+  - state source: `theta_real`, `omega_real`
+  - target: `theta_next`, `omega_next`
+  - optional one-step + rollout trajectory loss
+
+  Example:
+
+  ```bash
+  python host/staged_pendulum_calibration.py --mode full     --stage1_csv host/run_logs/sin.csv     --stage2_csv host/run_logs/square.csv     --stage3_csv host/run_logs/burst.csv     --save_checkpoint
+  ```
