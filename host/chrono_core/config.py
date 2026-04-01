@@ -48,7 +48,7 @@ class BridgeConfig:
     imu_size_y: float = 0.0460
     imu_size_z: float = 0.0117
 
-    theta0_deg: float = -10.0
+    theta0_deg: float = 0.0
     omega0: float = 0.0
 
     pwm_limit: float = 255.0
