@@ -338,7 +338,7 @@ def compute_loss(
     }
 
 
-  def run_epoch(model: GRUDynamics, loader: DataLoader, optimizer: torch.optim.Optimizer | None, cfg: TrainConfig, device: torch.device) -> float:
+def run_epoch(model: GRUDynamics, loader: DataLoader, optimizer: torch.optim.Optimizer | None, cfg: TrainConfig, device: torch.device) -> float:
     train_mode = optimizer is not None
     model.train(train_mode)
     losses = []
