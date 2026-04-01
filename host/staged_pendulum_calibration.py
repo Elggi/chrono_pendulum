@@ -408,10 +408,7 @@ def train_on_stage(
                 f"K_u={p['K_u']:.6g}, l_com={p['l_com']:.6g}, b_eq={p['b_eq']:.6g}, tau_eq={p['tau_eq']:.6g}"
             )
 
-    with torch.no_grad():
-        for k, v in best_snapshot.items():
-            params[k].fill_(v)
-
+    final_params = tensors_to_float_dict(params)
     final_loss, theta_sim, omega_sim = evaluate_loss(params, theta, omega, u, dt, cfg, train_cfg)
 
     stage_dir = outdir / f"stage{stage_spec.stage}"
@@ -452,8 +449,9 @@ def train_on_stage(
             "teacher_forcing": False,
         },
         "best_loss": float(best_loss),
+        "best_params": best_snapshot,
         "final_loss": float(final_loss),
-        "params": tensors_to_float_dict(params),
+        "final_params": final_params,
         "plot_paths": {
             "fit_summary": str(fit_plot),
             "overlay": str(overlay_plot),
@@ -463,7 +461,8 @@ def train_on_stage(
     with (stage_dir / f"stage{stage_spec.stage}_metadata.json").open("w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
 
-    print(f"[INFO] Stage {stage_spec.stage} final params: {tensors_to_float_dict(params)}")
+    print(f"[INFO] Stage {stage_spec.stage} best params: {best_snapshot}")
+    print(f"[INFO] Stage {stage_spec.stage} final params: {final_params}")
 
     return StageResult(
         stage=stage_spec.stage,
@@ -471,7 +470,7 @@ def train_on_stage(
         optimize_keys=list(stage_spec.optimize_keys),
         final_loss=float(final_loss),
         best_loss=float(best_loss),
-        params=tensors_to_float_dict(params),
+        params=final_params,
         fit_summary_plot=str(fit_plot),
         overlay_plot=str(overlay_plot),
         loss_curve_plot=str(loss_curve_plot),
