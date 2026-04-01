@@ -81,3 +81,8 @@ This folder contains host-side runtime, calibration, replay, plotting, and RL op
   ```bash
   python host/staged_pendulum_calibration.py --mode full     --stage1_csv host/run_logs/sin.csv     --stage2_csv host/run_logs/square.csv     --stage3_csv host/run_logs/burst.csv     --save_checkpoint
   ```
+
+  Outputs include:
+  - `trajectory_fit_summary.json` (pipeline summary)
+  - `trajectory_model_params.json` (Chrono `--parameter-json` compatible wrapper + GRU checkpoint reference)
+  - `stageN/stageN_loss_history.csv` and `stageN/stageN_loss_convergence.png` (epoch-wise loss logs/plot)

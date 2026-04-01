@@ -199,15 +199,15 @@ def preprocess_real_timeseries(df: pd.DataFrame, cfg: PreprocessConfig) -> dict[
         "theta": theta,
         "omega": omega,
         "u": pwm,
+
+     
     }
-
-
 def gradient_with_unit_dt(x: np.ndarray) -> np.ndarray:
     if len(x) < 2:
         return np.zeros_like(x)
     return np.gradient(x)
 
-
+  
 # -----------------------------
 # Dataset / model
 # -----------------------------
@@ -338,7 +338,7 @@ def compute_loss(
     }
 
 
-def run_epoch(model: GRUDynamics, loader: DataLoader, optimizer: torch.optim.Optimizer | None, cfg: TrainConfig, device: torch.device) -> float:
+  def run_epoch(model: GRUDynamics, loader: DataLoader, optimizer: torch.optim.Optimizer | None, cfg: TrainConfig, device: torch.device) -> float:
     train_mode = optimizer is not None
     model.train(train_mode)
     losses = []
@@ -450,6 +450,24 @@ def save_overlay_plot(out_path: Path, theta_real: np.ndarray, omega_real: np.nda
     plt.close(fig)
 
 
+def save_loss_convergence_plot(out_path: Path, train_loss: list[float], val_loss: list[float]):
+    import matplotlib.pyplot as plt
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    epochs = np.arange(1, len(train_loss) + 1)
+    fig, ax = plt.subplots(1, 1, figsize=(9, 4.5))
+    ax.plot(epochs, train_loss, label="train_loss", lw=1.4)
+    ax.plot(epochs, val_loss, label="val_loss", lw=1.4)
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("loss")
+    ax.set_title("Loss convergence")
+    ax.grid(True, alpha=0.25)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+
+
 # -----------------------------
 # Stage execution
 # -----------------------------
@@ -540,6 +558,14 @@ def train_on_stage(
         pred["omega_pred"],
         pred["alpha_pred"],
     )
+    loss_curve_plot = stage_dir / f"stage{stage_spec.stage}_loss_convergence.png"
+    loss_curve_csv = stage_dir / f"stage{stage_spec.stage}_loss_history.csv"
+    pd.DataFrame({
+        "epoch": np.arange(1, len(hist_train) + 1, dtype=int),
+        "train_loss": hist_train,
+        "val_loss": hist_val,
+    }).to_csv(loss_curve_csv, index=False)
+    save_loss_convergence_plot(loss_curve_plot, hist_train, hist_val)
 
     metadata = {
         "timestamp": utc_now(),
@@ -561,7 +587,17 @@ def train_on_stage(
         "plot_paths": {
             "fit_summary": str(fit_plot),
             "overlay": str(overlay_plot),
+            "loss_convergence": str(loss_curve_plot),
         },
+        "loss_history_csv": str(loss_curve_csv),
+        "epoch_logs": [
+            {
+                "epoch": int(i + 1),
+                "train_loss": float(hist_train[i]),
+                "val_loss": float(hist_val[i]),
+            }
+            for i in range(len(hist_train))
+        ],
         "source_policy": {
             "sim_data_used_for_fitting": False,
             "cmd_u_raw_used_for_fitting": False,
@@ -650,7 +686,7 @@ def run_pipeline(args: argparse.Namespace):
         print(meta_path.read_text(encoding="utf-8"))
         return
 
-    _ = BridgeConfig()  # keep linkage with project config / conventions
+    cfg = BridgeConfig()  # keep linkage with project config / conventions
 
     train_cfg = TrainConfig(
         sequence_length=args.sequence_length,
@@ -718,6 +754,35 @@ def run_pipeline(args: argparse.Namespace):
     with summary_path.open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
+    # Chrono-compatible parameter JSON (can be passed to --parameter-json).
+    # model_init/best_params are included for backward compatibility with existing loaders.
+    chrono_param_json_path = outdir / "trajectory_model_params.json"
+    compatible_params = {
+        "timestamp": utc_now(),
+        "model_type": "pytorch_gru_black_box_dynamics",
+        "model_init": {
+            "K_u": float(cfg.K_u_init),
+            "l_com": float(cfg.l_com_init),
+            "b_eq": float(cfg.b_eq_init),
+            "tau_eq": float(cfg.tau_eq_init),
+        },
+        "best_params": {
+            "K_u": float(cfg.K_u_init),
+            "l_com": float(cfg.l_com_init),
+            "b_eq": float(cfg.b_eq_init),
+            "tau_eq": float(cfg.tau_eq_init),
+        },
+        "nn_dynamics": {
+            "checkpoint_path": results[-1].checkpoint_path if results else None,
+            "sequence_length": int(train_cfg.sequence_length),
+            "input_features": ["theta_real", "omega_real", "hw_pwm"],
+            "target_features": ["theta_next", "omega_next"],
+            "feature_stats": asdict(final_stats) if final_stats is not None else None,
+        },
+    }
+    with chrono_param_json_path.open("w", encoding="utf-8") as f:
+        json.dump(compatible_params, f, indent=2)
+
     if args.save_checkpoint and results:
         final_ckpt = outdir / "final_gru_dynamics.pt"
         torch.save({
@@ -730,6 +795,7 @@ def run_pipeline(args: argparse.Namespace):
 
     print(f"[INFO] pipeline_done: mode={args.mode}")
     print(f"[INFO] summary_json: {summary_path}")
+    print(f"[INFO] chrono_parameter_json: {chrono_param_json_path}")
     for r in results:
         print(f"[INFO] stage={r.stage} checkpoint={r.checkpoint_path}")
         if not args.skip_plots:
