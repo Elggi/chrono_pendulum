@@ -221,6 +221,10 @@ def chrono_rollout(theta0: float, omega0: float, u: np.ndarray, dt: np.ndarray, 
         theta_sim[k + 1] = model.get_theta()
         omega_sim[k + 1] = model.get_omega()
 
+    # PendulumModel.get_theta() is wrapped to [-pi, pi]. For trajectory-level
+    # matching against unwrapped theta_real, unwrap simulation output as well.
+    theta_sim = np.unwrap(theta_sim)
+    theta_sim = theta_sim + (float(theta0) - float(theta_sim[0]))
     return theta_sim, omega_sim
 
 
