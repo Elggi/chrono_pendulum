@@ -289,14 +289,8 @@ run_rl_fitting() {
 
 run_staged_calibration() {
     echo "--------------------------------"
-    echo "[INFO] System Identification (Regression stage 1~3) 실행 (staged_pendulum_calibration.py)"
-    python3 "$BASE_DIR/staged_pendulum_calibration.py" --mode regression
-}
-
-run_stage4_rl_finetuning() {
-    echo "--------------------------------"
-    echo "[INFO] Stage 4 RL fine-tuning 실행 (staged_pendulum_calibration.py --mode rl)"
-    python3 "$BASE_DIR/staged_pendulum_calibration.py" --mode rl
+    echo "[INFO] System Identification (Pytorch GRU) 실행 (staged_pendulum_calibration.py)"
+    python3 "$BASE_DIR/staged_pendulum_calibration.py" --mode interactive
 }
 
 run_replay_validation() {
@@ -352,11 +346,11 @@ while true; do
     echo "=========================================="
     echo "1) IMU Viewer (Standalone Viewer)"
     echo "2) Model Calibration (radius, IMU gravity)"
-    echo "3) Parameter Finetuning (Reinforcement Learning)"
+    echo "3) Parameter Finetuning (SB3 PPO)"
     echo "4) Chrono Pendulum (Select Host/Jetson mode)"
     echo "5) Plot Data (Sim vs Real)"
     echo "6) Replay Runs"
-    echo "7) System Identification (Regression)"
+    echo "7) System Identification (Pytorch GRU)"
     echo "8) Exit"
     echo "=========================================="
 
@@ -372,7 +366,7 @@ while true; do
             pause
             ;;
         3)
-            run_stage4_rl_finetuning
+            run_rl_fitting
             pause
             ;;
         4)
