@@ -1,0 +1,41 @@
+{
+  "timestamp": "2026-04-01T03:29:56.053974+00:00",
+  "model_type": "pytorch_gru_black_box_dynamics",
+  "model_init": {
+    "K_u": 1e-05,
+    "l_com": 0.1425,
+    "b_eq": 0.0,
+    "tau_eq": 0.0
+  },
+  "best_params": {
+    "K_u": 1e-05,
+    "l_com": 0.1425,
+    "b_eq": 0.0,
+    "tau_eq": 0.0
+  },
+  "nn_dynamics": {
+    "checkpoint_path": "/home/kyudev/Documents/chrono_pendulum_final/host/run_logs/stage3/gru_dynamics.pt",
+    "sequence_length": 32,
+    "input_features": [
+      "theta_real",
+      "omega_real",
+      "hw_pwm"
+    ],
+    "target_features": [
+      "theta_next",
+      "omega_next"
+    ],
+    "feature_stats": {
+      "mean": [
+        -1.362564404116744,
+        -0.0031528433603175057,
+        7.13855421686747
+      ],
+      "std": [
+        0.5807833096091157,
+        3.1028873728321242,
+        19.42560930074762
+      ]
+    }
+  }
+}
