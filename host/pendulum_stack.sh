@@ -289,8 +289,32 @@ run_rl_fitting() {
 
 run_staged_calibration() {
     echo "--------------------------------"
-    echo "[INFO] System Identification (Pytorch GRU) 실행 (staged_pendulum_calibration.py)"
-    python3 "$BASE_DIR/staged_pendulum_calibration.py" --mode interactive
+    echo "[INFO] Trajectory-level Physical System Identification 실행"
+    echo "[INFO] (K_u, l_com, b_eq, tau_eq stage-wise calibration)"
+    echo "Select staged calibration mode:"
+    echo "1) stage1  (sin only: optimize K_u, l_com)"
+    echo "2) stage12 (sin+square: + optimize b_eq)"
+    echo "3) full    (sin+square+burst: + optimize tau_eq)"
+    read -p "Enter number [3]: " mode_sel
+    mode_sel=${mode_sel:-3}
+
+    local mode_arg="full"
+    case "$mode_sel" in
+        1) mode_arg="stage1" ;;
+        2) mode_arg="stage12" ;;
+        3) mode_arg="full" ;;
+        *)
+            echo "[WARN] 잘못된 입력이어서 full 모드로 진행합니다."
+            mode_arg="full"
+            ;;
+    esac
+
+    cmd=(python3 "$BASE_DIR/staged_pendulum_calibration.py" --interactive --run-logs "$CSV_DIR" --mode "$mode_arg")
+    echo "[INFO] command: ${cmd[*]}"
+    "${cmd[@]}"
+    echo "[INFO] staged calibration 완료. 결과 확인:"
+    echo "       - $CSV_DIR/trajectory_model_params.json"
+    echo "       - $CSV_DIR/trajectory_fit_summary.json"
 }
 
 run_replay_validation() {
@@ -350,7 +374,7 @@ while true; do
     echo "4) Chrono Pendulum (Select Host/Jetson mode)"
     echo "5) Plot Data (Sim vs Real)"
     echo "6) Replay Runs"
-    echo "7) System Identification (Pytorch GRU)"
+    echo "7) System Identification (Physical Params, Stage-wise)"
     echo "8) Exit"
     echo "=========================================="
 
