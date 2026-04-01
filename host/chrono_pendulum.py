@@ -29,9 +29,11 @@ from std_msgs.msg import Float32, String
 from sensor_msgs.msg import Imu
 from chrono_core.config import BridgeConfig
 from chrono_core.utils import clamp, now_wall, terminal_status_line, sanitize_float, make_numbered_path
-from chrono_core.estimation import DelayCompensator, OnlineParameterEKF, ObservationLPF, FitConvergenceMonitor, RobustSignalFilter
-from chrono_core.dynamics import PendulumModel, compute_model_torque_and_electrics, blend_parameters_for_sim, enc_to_theta
+from chrono_core.dynamics import PendulumModel, compute_model_torque_and_electrics
 from chrono_core.calibration_io import apply_calibration_json, extract_radius_from_json
+from chrono_core.pendulum_rl_env import build_init_params
+from chrono_core.log_schema import PENDULUM_LOG_COLUMNS
+from chrono_core.signal_filter import estimate_filtered_alpha_from_omega
 
 
 # ============================================================
@@ -192,11 +194,11 @@ class HostCommandController:
         elif key == "8":
             self.set_mode("prbs")
         elif key == "[":
-            self.cfg.pwm_step = max(0.5, self.cfg.pwm_step - 0.5)
+            self.cfg.pwm_step = max(1.0, self.cfg.pwm_step - 1.0)
         elif key == "]":
-            self.cfg.pwm_step = min(100.0, self.cfg.pwm_step + 0.5)
+            self.cfg.pwm_step = min(100.0, self.cfg.pwm_step + 1.0)
         elif key == "-":
-            self.cfg.pwm_limit = max(10.0, self.cfg.pwm_limit - 5.0)
+            self.cfg.pwm_limit = max(20.0, self.cfg.pwm_limit - 5.0)
         elif key == "=":
             self.cfg.pwm_limit = min(255.0, self.cfg.pwm_limit + 5.0)
         elif key in ("q", "Q", "ESC"):
@@ -209,14 +211,14 @@ class HostCommandController:
         if self.mode == "manual":
             return self.current_u
         if self.mode == "sin":
-            return self.cfg.pwm_limit * 0.60 * math.sin(2.0 * math.pi * self.cfg.wave_freq * t)
+            return 60.0 * math.sin(2.0 * math.pi * 0.5 * t)
         if self.mode == "square":
-            return self.cfg.pwm_limit * 0.60 * (1.0 if math.sin(2.0 * math.pi * self.cfg.wave_freq * t) >= 0.0 else -1.0)
+            return 60.0 if math.sin(2.0 * math.pi * 0.5 * t) >= 0.0 else -60.0
         if self.mode == "burst":
-            tau = t % self.cfg.burst_period
-            return self.cfg.pwm_limit * 0.75 if tau < self.cfg.burst_on_time else 0.0
+            tau = t % 2.0
+            return 60.0 if tau < 0.30 else 0.0
         if self.mode == "prbs":
-            return self.cfg.pwm_limit * 0.45 * prbs_value(t, self.cfg.prbs_dt, self.cfg.prbs_seed)
+            return 60.0 * prbs_value(t, 0.25, self.cfg.prbs_seed)
         return self.current_u
 
     def poll(self):
@@ -235,12 +237,10 @@ class SharedROSState:
         self.hw_pwm = 0.0
         self.hw_enc = 0.0
         self.hw_arduino_ms = 0.0
-        self.bus_v = float("nan")
-        self.current_ma = float("nan")
-        self.power_mw = float("nan")
-        self.est_theta = float("nan")
-        self.est_omega = float("nan")
-        self.est_alpha = float("nan")
+        self.imu_q = np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+        self.imu_w = np.zeros(3, dtype=float)
+        self.imu_a = np.zeros(3, dtype=float)
+        self.imu_has_data = False
         self.last_cmd_wall = 0.0
         self.last_hw_pwm_wall = 0.0
         self.last_hw_enc_wall = 0.0
@@ -253,12 +253,10 @@ class SharedROSState:
                 "hw_pwm": self.hw_pwm,
                 "hw_enc": self.hw_enc,
                 "hw_arduino_ms": self.hw_arduino_ms,
-                "bus_v": self.bus_v,
-                "current_ma": self.current_ma,
-                "power_mw": self.power_mw,
-                "est_theta": self.est_theta,
-                "est_omega": self.est_omega,
-                "est_alpha": self.est_alpha,
+                "imu_q": self.imu_q.copy(),
+                "imu_w": self.imu_w.copy(),
+                "imu_a": self.imu_a.copy(),
+                "imu_has_data": self.imu_has_data,
                 "last_cmd_wall": self.last_cmd_wall,
                 "last_hw_pwm_wall": self.last_hw_pwm_wall,
                 "last_hw_enc_wall": self.last_hw_enc_wall,
@@ -276,19 +274,13 @@ class PendulumROSNode(Node):
         self.create_subscription(Float32, cfg.topic_hw_pwm, self.cb_hw_pwm, 10)
         self.create_subscription(Float32, cfg.topic_hw_enc, self.cb_hw_enc, 10)
         self.create_subscription(Float32, cfg.topic_hw_arduino_ms, self.cb_hw_ms, 10)
-        self.create_subscription(Float32, cfg.topic_bus_v, self.cb_bus_v, 10)
-        self.create_subscription(Float32, cfg.topic_current_ma, self.cb_current_ma, 10)
-        self.create_subscription(Float32, cfg.topic_power_mw, self.cb_power_mw, 10)
-        self.create_subscription(Float32, cfg.topic_est_theta, self.cb_est_theta, 10)
-        self.create_subscription(Float32, cfg.topic_est_omega, self.cb_est_omega, 10)
-        self.create_subscription(Float32, cfg.topic_est_alpha, self.cb_est_alpha, 10)
+        self.create_subscription(Imu, cfg.topic_hw_imu, self.cb_hw_imu, 10)
 
         self.pub_theta = self.create_publisher(Float32, cfg.topic_sim_theta, 10)
         self.pub_omega = self.create_publisher(Float32, cfg.topic_sim_omega, 10)
         self.pub_alpha = self.create_publisher(Float32, cfg.topic_sim_alpha, 10)
         self.pub_tau = self.create_publisher(Float32, cfg.topic_sim_tau, 10)
         self.pub_cmd_used = self.create_publisher(Float32, cfg.topic_sim_cmd_used, 10)
-        self.pub_delay_ms = self.create_publisher(Float32, cfg.topic_sim_delay_ms, 10)
         self.pub_status = self.create_publisher(String, cfg.topic_sim_status, 10)
         self.pub_imu = self.create_publisher(Imu, cfg.topic_imu, 10)
         self.pub_cmd = self.create_publisher(Float32, cfg.topic_cmd_u, 10) if host_mode else None
@@ -313,32 +305,14 @@ class PendulumROSNode(Node):
         with self.shared.lock:
             self.shared.hw_arduino_ms = float(msg.data)
 
-    def cb_bus_v(self, msg: Float32):
+    def cb_hw_imu(self, msg: Imu):
         with self.shared.lock:
-            self.shared.bus_v = float(msg.data)
+            self.shared.imu_q[:] = [msg.orientation.w, msg.orientation.x, msg.orientation.y, msg.orientation.z]
+            self.shared.imu_w[:] = [msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z]
+            self.shared.imu_a[:] = [msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z]
+            self.shared.imu_has_data = True
+
             self.shared.last_ina_wall = now_wall()
-
-    def cb_current_ma(self, msg: Float32):
-        with self.shared.lock:
-            self.shared.current_ma = float(msg.data)
-            self.shared.last_ina_wall = now_wall()
-
-    def cb_power_mw(self, msg: Float32):
-        with self.shared.lock:
-            self.shared.power_mw = float(msg.data)
-            self.shared.last_ina_wall = now_wall()
-
-    def cb_est_theta(self, msg: Float32):
-        with self.shared.lock:
-            self.shared.est_theta = float(msg.data)
-
-    def cb_est_omega(self, msg: Float32):
-        with self.shared.lock:
-            self.shared.est_omega = float(msg.data)
-
-    def cb_est_alpha(self, msg: Float32):
-        with self.shared.lock:
-            self.shared.est_alpha = float(msg.data)
 
     @staticmethod
     def _pub_float(pub, value):
@@ -355,23 +329,16 @@ class PendulumROSNode(Node):
             s.data = mode_name
             self.pub_debug.publish(s)
 
-    def publish_sim(self, theta, omega, alpha, tau, cmd_used, delay_ms, imu_msg, status_text):
+    def publish_sim(self, theta, omega, alpha, tau, cmd_used, imu_msg, status_text):
         self._pub_float(self.pub_theta, theta)
         self._pub_float(self.pub_omega, omega)
         self._pub_float(self.pub_alpha, alpha)
         self._pub_float(self.pub_tau, tau)
         self._pub_float(self.pub_cmd_used, cmd_used)
-        self._pub_float(self.pub_delay_ms, delay_ms)
         self.pub_imu.publish(imu_msg)
         s = String()
         s.data = status_text
         self.pub_status.publish(s)
-
-
-# ============================================================
-# delay compensator and CPR estimator
-# ============================================================
-
 
 
 class ViewerState:
@@ -466,30 +433,30 @@ def build_imu_msg(sim_t, q_wxyz, omega_xyz, acc_xyz):
     return msg
 
 
+def quat_to_rotmat(w: float, x: float, y: float, z: float):
+    n = math.sqrt(w * w + x * x + y * y + z * z)
+    if n < 1e-12:
+        return np.eye(3, dtype=float)
+    w, x, y, z = w / n, x / n, y / n, z / n
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=float,
+    )
+
+
 def make_status_line(host_mode: bool, cmd_u_raw: float, cmd_u_used: float, hw_pwm: float, mode_name: str,
-                     cfg: BridgeConfig, delay_ms: float, fit_params: dict,
-                     ls_cost: float, fit_state_label: str, rms_vec, delay_locked: bool):
-    ls_label = "n/a" if not math.isfinite(ls_cost) else f"{ls_cost:.3e}"
-    if rms_vec is None:
-        rms_label = "rms[n/a,n/a,n/a]"
-    else:
-        rms_label = f"rms[{rms_vec[0]:.3f},{rms_vec[1]:.3f},{rms_vec[2]:.3f}]"
-    delay_lock_label = "LOCK" if delay_locked else "RUN"
+                     cfg: BridgeConfig):
     if host_mode:
         return (
             f"cmd_u: {cmd_u_raw:6.1f} | used: {cmd_u_used:6.1f} | mode: {mode_name:<6} | "
-            f"step: {cfg.pwm_step:4.1f} | max: {cfg.pwm_limit:5.1f} | "
-            f"delay:{delay_ms:5.1f}ms({delay_lock_label}) | fit:{fit_state_label:<4} | "
-            f"LS:{ls_label} {rms_label} | "
-            f"l:{fit_params['l_com']:.4f} b:{fit_params['b_eq']:.4f} tc:{fit_params['tau_eq']:.4f} "
-            f"kt:{fit_params['k_t']:.3f} i0:{fit_params['i0']:.3f} R:{fit_params['R']:.3f} ke:{fit_params['k_e']:.3f}"
+            f"step: {cfg.pwm_step:4.1f} | max: {cfg.pwm_limit:5.1f}"
         )
     return (
-        f"cmd_u: {cmd_u_used:6.1f} | hw_pwm: {hw_pwm:6.1f} | mode: external | "
-        f"delay:{delay_ms:5.1f}ms({delay_lock_label}) | fit:{fit_state_label:<4} | "
-        f"LS:{ls_label} {rms_label} | "
-        f"l:{fit_params['l_com']:.4f} b:{fit_params['b_eq']:.4f} tc:{fit_params['tau_eq']:.4f} "
-        f"kt:{fit_params['k_t']:.3f} i0:{fit_params['i0']:.3f} R:{fit_params['R']:.3f} ke:{fit_params['k_e']:.3f}"
+        f"cmd_u: {cmd_u_used:6.1f} | hw_pwm: {hw_pwm:6.1f} | mode: external"
     )
 
 
@@ -524,9 +491,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--headless", action="store_true")
     ap.add_argument("--no-imu-viewer", action="store_true")
-    ap.add_argument("--duration", type=float, default=20.0)
+    ap.add_argument("--duration", type=float, default=-1.0,
+                    help="Run duration in seconds. <=0 means run until user quits.")
     ap.add_argument("--step", type=float, default=0.001)
-    ap.add_argument("--theta0-deg", type=float, default=-10.0)
+    ap.add_argument("--theta0-deg", type=float, default=0.0)
     ap.add_argument("--omega0", type=float, default=0.0)
     ap.add_argument("--link-mass", type=float, default=0.200)
     ap.add_argument("--link-length", type=float, default=0.285)
@@ -535,23 +503,21 @@ def main():
     ap.add_argument("--mode", choices=["host", "jetson"], default=None,
                     help="Compatibility option: host enables host-control, jetson uses external ROS input.")
     ap.add_argument("--delay-ms", type=float, default=0.0)
-    ap.add_argument("--disable-auto-delay", action="store_true")
-    ap.add_argument("--enable-online-fit", action="store_true")
-    ap.add_argument("--self-fit", choices=["on", "off"], default=None,
-                    help="on: EKF self-fitting enabled, off: pure simulation (no parameter updates).")
     ap.add_argument("--calibration-json", default="./run_logs/calibration_latest.json")
+    ap.add_argument("--parameter-json", default="", help="RL/exported parameter JSON containing model_init and optional delay_sec")
     ap.add_argument("--radius-json", default="./run_logs/calibration_latest.json",
                     help="JSON file containing measured radius (e.g., calibration_latest.json).")
-    ap.add_argument("--J-cm-base", type=float, default=0.0020)
-    ap.add_argument("--l-com", type=float, default=0.1425)
-    ap.add_argument("--b", type=float, default=0.030)
-    ap.add_argument("--tau-c", type=float, default=0.080)
-    ap.add_argument("--mgl", type=float, default=0.550,
-                    help="Deprecated compatibility argument (ignored).")
-    ap.add_argument("--k-t", type=float, default=0.250)
-    ap.add_argument("--i0", type=float, default=0.050)
-    ap.add_argument("--R", type=float, default=2.0)
-    ap.add_argument("--k-e", type=float, default=0.020)
+    ap.add_argument("--l-com", type=float, default=None, help="default: link_length/2 for fresh runs")
+    ap.add_argument("--b", type=float, default=None, help="default: near-zero fresh initialization")
+    ap.add_argument("--tau-c", type=float, default=None, help="default: near-zero fresh initialization")
+    ap.add_argument("--k-u", type=float, default=None, help="default: near-zero positive fresh initialization")
+    ap.add_argument("--r-imu", type=float, default=0.285, help="IMU radius from pivot [m]")
+    ap.add_argument(
+        "--real-alpha-source",
+        choices=["omega_diff", "tangential_accel", "blend"],
+        default="omega_diff",
+        help="deprecated; real alpha now always uses filtered d(omega)/dt",
+    )
     args = ap.parse_args()
 
     if args.mode == "host":
@@ -566,35 +532,34 @@ def main():
     cfg.theta0_deg = args.theta0_deg
     cfg.omega0 = args.omega0
     # Keep masses fixed for physically consistent COM-based rigid body.
-    cfg.link_mass = 0.200
+    cfg.rod_mass = 0.200
+    cfg.link_mass = cfg.rod_mass
     cfg.imu_mass = 0.020
+    cfg.rod_length = args.link_length
     cfg.link_L = args.link_length
     cfg.radius_m = args.link_length
-    cfg.J_cm_base = args.J_cm_base
-    cfg.l_com_init = args.l_com
-    cfg.b_eq_init = args.b
-    cfg.tau_eq_init = args.tau_c
-    cfg.k_t_init = args.k_t
-    cfg.i0_init = args.i0
-    cfg.R_init = args.R
-    cfg.k_e_init = args.k_e
+    cfg.r_imu = args.r_imu
+    cfg.l_com_init = float(args.l_com) if args.l_com is not None else (0.5 * float(args.link_length))
+    cfg.b_eq_init = float(args.b) if args.b is not None else float(cfg.b_eq_init)
+    cfg.tau_eq_init = float(args.tau_c) if args.tau_c is not None else float(cfg.tau_eq_init)
+    cfg.K_u_init = float(args.k_u) if args.k_u is not None else float(cfg.K_u_init)
     cfg.delay_init_ms = args.delay_ms
-    cfg.auto_delay_comp = not args.disable_auto_delay
-    cfg.online_fit_enable = args.enable_online_fit
-    if args.self_fit is not None:
-        cfg.self_fit_mode = args.self_fit
-        cfg.online_fit_enable = (args.self_fit == "on")
-    else:
-        cfg.self_fit_mode = "on" if cfg.online_fit_enable else "off"
 
     calib = apply_calibration_json(cfg, args.calibration_json)
+    param_data = None
+    if args.parameter_json:
+        with open(args.parameter_json, "r", encoding="utf-8") as pf:
+            param_data = json.load(pf)
+        init_params = build_init_params(cfg, calibration=calib, parameter_json=param_data)
+        if "delay_sec" in init_params:
+            cfg.delay_init_ms = 1000.0 * float(init_params["delay_sec"])
     radius_measured = extract_radius_from_json(args.radius_json)
     if radius_measured is not None:
         cfg.radius_m = float(radius_measured)
+        cfg.r_imu = float(radius_measured)
 
     log_csv = make_numbered_path(cfg.log_dir, cfg.log_prefix, ".csv")
     log_meta = log_csv[:-4] + ".meta.json"
-    log_best_param = log_csv[:-4] + "_best_param.json"
 
     rclpy.init()
     shared = SharedROSState()
@@ -604,13 +569,18 @@ def main():
     ros_thr.start()
 
     model = PendulumModel(cfg)
-    delay_comp = DelayCompensator(cfg)
-    ekf = OnlineParameterEKF(cfg)
-    obs_lpf = ObservationLPF(cfg.obs_lpf_tau_sec)
-    conv_mon = FitConvergenceMonitor(cfg)
-    bus_filter = RobustSignalFilter(cfg.ina_bus_median_window, cfg.ina_bus_hampel_k, cfg.ina_bus_hampel_sigma, cfg.ina_bus_lpf_tau_sec)
-    current_filter = RobustSignalFilter(cfg.ina_current_median_window, cfg.ina_current_hampel_k, cfg.ina_current_hampel_sigma, cfg.ina_current_lpf_tau_sec)
-    best_eval = {"cost": float("inf"), "time": None, "params": ekf.get_params().copy()}
+    print(
+        f"[inertia] J_rod={model.J_rod:.6f} kg·m^2, "
+        f"J_imu={model.J_imu:.6f} kg·m^2, "
+        f"J_total={model.J_total:.6f} kg·m^2"
+    )
+    sim_params = {
+        "l_com": float(cfg.l_com_init),
+        "b_eq": float(cfg.b_eq_init),
+        "tau_eq": float(cfg.tau_eq_init),
+        "K_u": float(cfg.K_u_init),
+    }
+    model.update_identified_structure(sim_params)
     prev_u_eff = 0.0
     prev_du = 0.0
 
@@ -635,32 +605,19 @@ def main():
 
     with open(log_csv, "w", newline="", encoding="utf-8") as f:
         wr = csv.writer(f)
-        wr.writerow([
-            "wall_time", "wall_elapsed", "sim_time", "mode",
-            "cmd_u_raw", "cmd_u_delayed", "hw_pwm", "delay_sec_est", "tau_cmd",
-            "theta", "omega", "alpha",
-            "hw_enc", "hw_arduino_ms",
-            "theta_real", "omega_real", "alpha_real",
-            "delay_ms",
-            "l_com_est", "b_eq_est", "tau_eq_est", "k_t_est", "i0_est", "R_est", "k_e_est",
-            "bus_v_raw", "bus_v_filtered", "current_raw_A", "current_filtered_A", "power_raw_W",
-            "tau_motor", "tau_res", "tau_visc", "tau_coul", "i_pred", "v_applied",
-            "inst_cost", "best_cost_so_far",
-            "imu_qw", "imu_qx", "imu_qy", "imu_qz",
-            "imu_wx", "imu_wy", "imu_wz",
-            "imu_ax", "imu_ay", "imu_az",
-            "ls_cost", "fit_done", "fit_complete", "fit_final_params"
-        ])
+        wr.writerow(PENDULUM_LOG_COLUMNS)
 
         wall_t0 = now_wall()
-        alpha_prev = 0.0
         omega_prev = model.get_omega()
         t_prev = 0.0
         enc_ref = None
-        theta_ref = None
+        enc_prev = None
         theta_real_prev = None
-        omega_real_prev = 0.0
-        t_real_prev = None
+        warmup_sec = 1.0
+        imu_R0 = None
+        real_omega_hist = deque(maxlen=401)
+        real_time_hist = deque(maxlen=401)
+        run_limit_sec = float("inf") if args.duration <= 0.0 else float(args.duration)
 
         if host_controller is not None:
             host_controller.__enter__()
@@ -677,10 +634,16 @@ def main():
             print(f"[INFO] CPR from calibration json: {cfg.cpr:.3f} counts/rev")
         print(f"[INFO] Visual link length (--link-length): {cfg.link_L:.6f} m")
         print(f"[INFO] Computation radius (from radius-json): {cfg.radius_m:.6f} m")
-        print(f"[INFO] online_fit_enable={cfg.online_fit_enable} (self_fit_mode={cfg.self_fit_mode})")
+        if math.isfinite(run_limit_sec):
+            print(f"[INFO] run limit: {run_limit_sec:.1f}s")
+        else:
+            print("[INFO] run limit: none (quit with q/ESC)")
+        if args.real_alpha_source != "omega_diff":
+            print("[INFO] --real-alpha-source is deprecated and ignored; using filtered d(omega)/dt.")
+        print("[INFO] real alpha source: filtered derivative of omega")
 
         try:
-            while model.sys.GetChTime() < args.duration:
+            while (now_wall() - wall_t0) < run_limit_sec:
                 if host_controller is not None:
                     host_controller.poll()
                     if host_controller.quit_requested:
@@ -691,8 +654,9 @@ def main():
                         break
 
                 if vis is not None:
-                    if not vis.Run():
-                        break
+                    # Keep rendering loop alive regardless of vis.Run() return.
+                    # User requested no auto-stop/auto-fallback on render-window state.
+                    vis.Run()
                     vis.BeginScene(); vis.Render(); vis.EndScene()
 
                 if host_controller is not None:
@@ -710,38 +674,34 @@ def main():
 
                 snap = shared.snapshot()
                 wall_now = now_wall()
-                delay_comp.push(wall_now, cmd_u_raw, snap["hw_pwm"])
-                delay_comp.estimate_delay(wall_now)
-                cmd_u_used = delay_comp.get_delayed_cmd(wall_now, cmd_u_raw)
+                sim_t = wall_now - wall_t0
 
-                fit_params = ekf.get_params()
-                sim_params = blend_parameters_for_sim(fit_params, cfg)
-                model.update_identified_structure(sim_params)
+                if sim_t < warmup_sec:
+                    if host_controller is not None:
+                        ros_node.publish_host_cmd(0.0, "warmup")
+                    terminal_status_line(
+                        f"warmup... {sim_t:4.2f}/{warmup_sec:.2f}s | waiting for stable sensor baseline",
+                        width=cfg.terminal_status_width,
+                    )
+                    if np.isfinite(snap["hw_enc"]):
+                        enc_ref = float(snap["hw_enc"])
+                        enc_prev = enc_ref
+                    if cfg.realtime:
+                        time.sleep(min(cfg.step, 0.01))
+                    continue
 
-                bus_v_raw = snap["bus_v"] if np.isfinite(snap["bus_v"]) else float("nan")
-                current_A_raw = snap["current_ma"] / 1000.0 if np.isfinite(snap["current_ma"]) else float("nan")
-                power_W = snap["power_mw"] / 1000.0 if np.isfinite(snap["power_mw"]) else 0.0
-                if cfg.electrical_use_ina_bus_voltage and np.isfinite(bus_v_raw):
-                    bus_v = bus_filter.update(bus_v_raw, cfg.step) if cfg.ina_enable_bus_filter else bus_v_raw
-                else:
-                    bus_v = cfg.nominal_bus_voltage
-                if np.isfinite(current_A_raw):
-                    current_A = current_filter.update(current_A_raw, cfg.step) if cfg.ina_enable_current_filter else current_A_raw
-                else:
-                    current_A = 0.0
+                cmd_u_used = cmd_u_raw
 
                 theta_before = model.get_theta()
-                model_out = compute_model_torque_and_electrics(cmd_u_used, theta_before, model.get_omega(), bus_v, sim_params, cfg)
+                model_out = compute_model_torque_and_electrics(cmd_u_used, theta_before, model.get_omega(), float("nan"), sim_params, cfg)
                 model.apply_torque(model_out["tau_net"])
                 model.step(cfg.step)
 
-                sim_t = model.sys.GetChTime()
+                # wall_elapsed is the canonical timeline for runtime + replay CSVs.
                 theta = model.get_theta()
                 omega = model.get_omega()
                 alpha = (omega - omega_prev) / max(sim_t - t_prev, cfg.step) if sim_t > 0 else 0.0
-                alpha = 0.8 * alpha_prev + 0.2 * alpha
                 alpha = sanitize_float(alpha)
-                alpha_prev = alpha
                 omega_prev = omega
                 t_prev = sim_t
 
@@ -750,33 +710,37 @@ def main():
 
                 if enc_ref is None and np.isfinite(snap["hw_enc"]):
                     enc_ref = float(snap["hw_enc"])
-                    theta_ref = float(theta)
-                theta_from_enc = enc_to_theta(snap["hw_enc"], enc_ref, theta_ref, cfg.cpr) if enc_ref is not None else None
-                theta_real = snap["est_theta"] if np.isfinite(snap["est_theta"]) else (theta_from_enc if theta_from_enc is not None else theta)
-                if np.isfinite(snap["est_omega"]):
-                    omega_real = float(snap["est_omega"])
-                elif theta_real_prev is not None and t_real_prev is not None:
-                    omega_real = (theta_real - theta_real_prev) / max(sim_t - t_real_prev, cfg.step)
-                else:
-                    omega_real = omega
-                if np.isfinite(snap["est_alpha"]):
-                    alpha_real = float(snap["est_alpha"])
-                elif t_real_prev is not None:
-                    alpha_real = (omega_real - omega_real_prev) / max(sim_t - t_real_prev, cfg.step)
-                else:
-                    alpha_real = alpha
+                    enc_prev = enc_ref
+
+                theta_real = theta
+                omega_real = omega
+                alpha_real = alpha
+                if snap.get("imu_has_data", False):
+                    q = snap["imu_q"]
+                    w_imu_raw = snap["imu_w"]
+                    R_abs = quat_to_rotmat(float(q[0]), float(q[1]), float(q[2]), float(q[3]))
+                    if imu_R0 is None:
+                        imu_R0 = R_abs.copy()
+                    R_rel = imu_R0.T @ R_abs
+                    tip_vec = R_rel @ np.array([0.0, -cfg.radius_m, 0.0], dtype=float)
+                    # Physical/logging convention: CCW positive on world XY.
+                    # (Viewer-only mirror transforms are handled in imu_viewer, not in logged data.)
+                    theta_real = float(math.atan2(float(tip_vec[1]), float(tip_vec[0])))
+                    omega_real = float(w_imu_raw[2])
+
+                real_omega_hist.append(float(omega_real))
+                real_time_hist.append(float(sim_t))
+                alpha_real = float(
+                    estimate_filtered_alpha_from_omega(
+                        np.asarray(real_omega_hist, dtype=float),
+                        t=np.asarray(real_time_hist, dtype=float),
+                    )[-1]
+                )
+
                 theta_real_prev = theta_real
-                omega_real_prev = omega_real
-                t_real_prev = sim_t
-                theta_obs = obs_lpf.update("theta", theta_real, cfg.step)
-                omega_obs = obs_lpf.update("omega", omega_real, cfg.step)
-                alpha_obs = obs_lpf.update("alpha", alpha_real, cfg.step)
                 e_theta = theta - theta_real
                 e_omega = omega - omega_real
                 e_alpha = alpha - alpha_real
-                e_v = model_out["v_applied"] - bus_v
-                e_i = model_out["i_pred"] - current_A
-                e_p = model_out["p_pred"] - power_W
                 du = cmd_u_used - prev_u_eff
                 d2u = du - prev_du
                 prev_u_eff = cmd_u_used
@@ -788,33 +752,6 @@ def main():
                     cfg.w_du * (du ** 2) +
                     cfg.w_d2u * (d2u ** 2)
                 )
-                if cfg.fit_use_electrical_cost:
-                    inst_cost += (
-                        cfg.w_v * (e_v ** 2) +
-                        cfg.w_i * (e_i ** 2) +
-                        cfg.w_p * (e_p ** 2)
-                    )
-                rms_vec = conv_mon.update(wall_now, e_theta, e_omega, e_alpha)
-                ls_cost = float("nan")
-                if rms_vec is not None:
-                    ls_cost = float(cfg.w_theta * rms_vec[0] ** 2 + cfg.w_omega * rms_vec[1] ** 2 + cfg.w_alpha * rms_vec[2] ** 2)
-                if conv_mon.fit_done and conv_mon.fit_final_params is None:
-                    conv_mon.fit_final_params = ekf.get_params().copy()
-
-                if cfg.online_fit_enable and (not conv_mon.fit_done) and abs(cmd_u_used) >= cfg.ekf_enable_min_pwm:
-                    # EKF update uses delay-compensated command (u_cmd(t - Δt_d)).
-                    ekf.update(theta_obs, omega_obs, cmd_u_used, cfg.step, inst_cost=inst_cost)
-
-                if inst_cost < best_eval["cost"]:
-                    best_eval["cost"] = float(inst_cost)
-                    best_eval["time"] = float(sim_t)
-                    best_eval["params"] = ekf.get_params().copy()
-
-                fit_params = ekf.get_params()
-                if cfg.self_fit_mode == "off":
-                    fit_state_label = "OFF"
-                else:
-                    fit_state_label = "LOCK" if conv_mon.fit_done else "RUN"
                 status = make_status_line(
                     host_mode=(host_controller is not None),
                     cmd_u_raw=cmd_u_raw,
@@ -822,34 +759,22 @@ def main():
                     hw_pwm=snap["hw_pwm"],
                     mode_name=mode_name,
                     cfg=cfg,
-                    delay_ms=1000.0 * delay_comp.delay_sec,
-                    fit_params=fit_params,
-                    ls_cost=ls_cost,
-                    fit_state_label=fit_state_label,
-                    rms_vec=rms_vec,
-                    delay_locked=delay_comp.delay_locked,
                 )
                 terminal_status_line(status, width=cfg.terminal_status_width)
-                ros_node.publish_sim(theta, omega, alpha, model_out["tau_net"], cmd_u_used, 1000.0 * delay_comp.delay_sec, imu_msg, status)
+                ros_node.publish_sim(theta, omega, alpha, model_out["tau_net"], cmd_u_used, imu_msg, status)
 
                 wr.writerow([
-                    wall_now, wall_now - wall_t0, sim_t, mode_name,
-                    cmd_u_raw, cmd_u_used, snap["hw_pwm"], delay_comp.delay_sec, model_out["tau_net"],
+                    wall_now, wall_now - wall_t0, mode_name,
+                    cmd_u_raw, cmd_u_used, snap["hw_pwm"], model_out["tau_net"],
                     theta, omega, alpha,
                     snap["hw_enc"], snap["hw_arduino_ms"],
                     theta_real, omega_real, alpha_real,
-                    1000.0 * delay_comp.delay_sec,
-                    fit_params["l_com"], fit_params["b_eq"], fit_params["tau_eq"], fit_params["k_t"], fit_params["i0"], fit_params["R"], fit_params["k_e"],
-                    bus_v_raw, bus_v, current_A_raw, current_A, power_W,
-                    model_out["tau_motor"], model_out["tau_res"], model_out["tau_visc"], model_out["tau_coul"], model_out["i_pred"], model_out["v_applied"],
-                    inst_cost, best_eval["cost"],
+                    model.J_rod, model.J_imu, model.J_total,
+                    model_out["tau_motor"], model_out["tau_res"], model_out["tau_visc"], model_out["tau_coul"],
+                    inst_cost, inst_cost,
                     q_imu[0], q_imu[1], q_imu[2], q_imu[3],
                     w_imu[0], w_imu[1], w_imu[2],
                     a_imu[0], a_imu[1], a_imu[2],
-                    ls_cost if math.isfinite(ls_cost) else "",
-                    int(conv_mon.fit_done),
-                    int(conv_mon.fit_complete),
-                    json.dumps(conv_mon.fit_final_params, ensure_ascii=False) if conv_mon.fit_final_params is not None else "",
                 ])
 
                 if cfg.realtime:
@@ -863,58 +788,34 @@ def main():
             elif quit_watcher is not None:
                 quit_watcher.__exit__(None, None, None)
 
-    print()
-    print("=== best online calibration point ===")
-    print(f"time      : {best_eval['time']}")
-    print(f"best cost : {best_eval['cost']:.6e}")
-    best_params_print = dict(best_eval["params"]) if isinstance(best_eval["params"], dict) else {}
-    best_params_print.pop("mgl", None)
-    print(json.dumps(best_params_print, indent=2))
-
     meta = {
         "log_csv": log_csv,
         "config": asdict(cfg),
+        "inertia": {
+            "J_rod": float(model.J_rod),
+            "J_imu": float(model.J_imu),
+            "J_total": float(model.J_total),
+            "rod_mass": float(cfg.rod_mass),
+            "rod_length": float(cfg.rod_length),
+            "imu_mass": float(cfg.imu_mass),
+            "r_imu": float(cfg.r_imu),
+        },
         "calibration_json": cfg.calibration_json if calib is not None else None,
         "radius_json": args.radius_json,
-        "estimated_delay_ms_final": 1000.0 * delay_comp.delay_sec,
+        "estimated_delay_ms_final": 0.0,
         "cpr_fixed": None if not np.isfinite(cfg.cpr) else float(cfg.cpr),
-        "delay_locked": bool(delay_comp.delay_locked),
-        "best_eval": {
-            "cost": best_eval["cost"],
-            "time": best_eval["time"],
-            "params": best_params_print,
-        },
-        "ls_cost": None if not conv_mon.samples else float(cfg.w_theta * np.mean(np.square([s[1] for s in conv_mon.samples])) +
-                                                          cfg.w_omega * np.mean(np.square([s[2] for s in conv_mon.samples])) +
-                                                          cfg.w_alpha * np.mean(np.square([s[3] for s in conv_mon.samples]))),
-        "fit_done": bool(conv_mon.fit_done),
-        "fit_complete": bool(conv_mon.fit_complete),
-        "fit_complete_wall": conv_mon.fit_complete_wall,
-        "fit_final_params": conv_mon.fit_final_params,
+        "delay_locked": False,
+        "best_eval": None,
+        "ls_cost": None,
+        "fit_done": False,
+        "fit_complete": False,
+        "fit_complete_wall": None,
+        "fit_final_params": None,
     }
     with open(log_meta, "w", encoding="utf-8") as mf:
         json.dump(meta, mf, indent=2, ensure_ascii=False)
-    best_param_json = {
-        "log_csv": log_csv,
-        "model_init": best_params_print,
-        "delay": {
-            "effective_control_delay_ms": 1000.0 * delay_comp.delay_sec,
-            "locked": bool(delay_comp.delay_locked),
-        },
-        "fit": {
-            "self_fit_mode": cfg.self_fit_mode,
-            "fit_done": bool(conv_mon.fit_done),
-            "fit_complete": bool(conv_mon.fit_complete),
-            "best_cost": best_eval["cost"],
-            "best_time": best_eval["time"],
-        },
-    }
-    with open(log_best_param, "w", encoding="utf-8") as bf:
-        json.dump(best_param_json, bf, indent=2, ensure_ascii=False)
     print(f"saved csv  : {log_csv}")
     print(f"saved meta : {log_meta}")
-    print(f"saved best : {log_best_param}")
-    print(f"compensated delay: {1000.0 * delay_comp.delay_sec:.1f} ms (locked={delay_comp.delay_locked})")
 
     if viewer_proc is not None:
         try:

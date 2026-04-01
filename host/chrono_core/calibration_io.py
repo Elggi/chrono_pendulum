@@ -5,7 +5,7 @@ import os
 from .config import BridgeConfig
 
 
-def apply_calibration_json(cfg: BridgeConfig, json_path: str | None):
+def apply_calibration_json(cfg: BridgeConfig, json_path: str | None, apply_model_init: bool = False):
     if not json_path or not os.path.exists(json_path):
         return None
 
@@ -27,15 +27,23 @@ def apply_calibration_json(cfg: BridgeConfig, json_path: str | None):
         model_init = dict(calib["fit_final_params"])
     delay = calib.get("delay", {})
     summary = calib.get("summary", {}) if isinstance(calib.get("summary", {}), dict) else {}
+    if not isinstance(calib.get("summary"), dict):
+        calib["summary"] = summary
 
-    cfg.J_cm_base = float(model_init.get("J_cm_base", model_init.get("J", cfg.J_cm_base)))
-    cfg.l_com_init = float(model_init.get("l_com", cfg.l_com_init))
-    cfg.b_eq_init = float(model_init.get("b_eq", model_init.get("b", cfg.b_eq_init)))
-    cfg.tau_eq_init = float(model_init.get("tau_eq", model_init.get("tau_c", cfg.tau_eq_init)))
-    cfg.k_t_init = float(model_init.get("k_t", cfg.k_t_init))
-    cfg.i0_init = float(model_init.get("i0", cfg.i0_init))
-    cfg.R_init = float(model_init.get("R", cfg.R_init))
-    cfg.k_e_init = float(model_init.get("k_e", cfg.k_e_init))
+    # Keep fresh surrogate init values unless explicitly requested otherwise.
+    # This prevents calibration JSON model fields from silently overriding
+    # initialization before staged regression / RL finds new parameters.
+    if apply_model_init:
+        cfg.l_com_init = float(model_init.get("l_com", cfg.l_com_init))
+        cfg.b_eq_init = float(model_init.get("b_eq", model_init.get("b", cfg.b_eq_init)))
+        cfg.tau_eq_init = float(model_init.get("tau_eq", model_init.get("tau_c", cfg.tau_eq_init)))
+        cfg.K_u_init = float(model_init.get("K_u", model_init.get("k_u", cfg.K_u_init)))
+    cfg.r_imu = float(
+        model_init.get(
+            "r_imu",
+            summary.get("mean_radius_m", calib.get("mean_radius_m", cfg.r_imu)),
+        )
+    )
     cfg.delay_init_ms = float(delay.get("effective_control_delay_ms", cfg.delay_init_ms))
     cpr_candidates = [
         summary.get("mean_cpr"),
@@ -51,6 +59,19 @@ def apply_calibration_json(cfg: BridgeConfig, json_path: str | None):
         if math.isfinite(cpr) and cpr > 1.0:
             cfg.cpr = cpr
             break
+
+    # Extend/normalize summary for staged calibration workflows.
+    summary.setdefault("mean_radius_m", float(cfg.r_imu))
+    if math.isfinite(float(cfg.cpr)):
+        summary.setdefault("mean_cpr", float(cfg.cpr))
+    if "g_eff_mps2" in summary:
+        try:
+            g_eff = float(summary["g_eff_mps2"])
+        except (TypeError, ValueError):
+            g_eff = None
+        if g_eff is not None and math.isfinite(g_eff) and g_eff > 0.0:
+            cfg.gravity = g_eff
+    calib["summary"] = summary
 
     cfg.calibration_json = json_path
     return calib

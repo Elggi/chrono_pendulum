@@ -1,120 +1,88 @@
-# Host Layer (`host/`)
+# Host folder guide
 
-This layer runs the host-side digital twin, online identification, logging, and visualization for the Chrono pendulum.
+This folder contains host-side runtime, calibration, replay, plotting, and RL optimization tools for the Chrono pendulum workflow.
 
-## Main runtime: `chrono_pendulum.py`
+## Top-level scripts
 
-### What it does
-- Builds the 1-DOF PyChrono pendulum model.
-- Subscribes to hardware topics (`/cmd/u`, `/hw/*`, `/ina219/*`).
-- Publishes simulated states (`/sim/*`).
-- Runs delay estimation/compensation and online EKF-style identification.
-- Saves CSV + meta JSON logs.
+- `chrono_pendulum.py`  
+  Main real-time Chrono runtime. Runs sim, reads ROS sensor streams, estimates real states (`theta_real`, `omega_real`, `alpha_real`), publishes sim topics, and writes synchronized logs.
 
-### Physical model (updated)
+- `pendulum_stack.sh`  
+  Interactive launcher menu for common workflows (viewer, calibration, RL fitting, runtime, plotting, replay validation).
 
-#### 1) Gravity representation
-Gravity is **not** identified via surrogate `mgl` anymore.
+- `imu_viewer.py`  
+  Live IMU orientation + tip trajectory viewer (with encoder counters/CPR helper display).
 
-Gravity is represented using COM physics with:
-- total mass `m_total = link_mass + imu_mass = 0.220 kg`
-- COM offset from pivot `l_com`
-- system gravity `g`
+- `calibration.py`  
+  Calibration utility for encoder CPR and geometry/radius measurements; writes calibration JSON artifacts used by runtime and training.
 
-#### 2) COM/inertia coupling
-A single effective COM parameter is used:
-- identified parameter: `l_com`
-- configured base COM inertia: `J_cm_base`
+- `plot_pendulum.py`  
+  Unified plotting dashboard for simulation/real trajectory comparison and error visualization.
 
-Pivot inertia follows:
+- `train_pendulum_rl.py`  
+  Offline replay-based PPO optimization for surrogate model parameters.
 
-\[
-J_{pivot} = J_{cm\_base} + m_{total} l_{com}^2
-\]
+- `replay_pendulum_cli.py`  
+  CLI replay runner that re-simulates logged command streams with chosen parameter/calibration JSON.
 
-Pivot-space dynamics:
-- `J_pivot = J_cm_base + m_total*l_com^2` set directly on the rigid body inertia
-- explicit gravity torque term `tau_gravity = m_total*g*l_com*sin(theta)` in motor-side torque composition
+- `replay_pendulum_viewer.py`  
+  Visualization-oriented replay script for inspecting playback behavior.
 
-Visual geometry still uses `link_L`, while dynamic modeling uses `l_com` and fixed masses.
+- `replay_pendulum_export.py`  
+  Export helper for replay outputs/artifacts used by downstream analysis.
 
-#### 3) Unified resistance block
-A single resistance model is used consistently in simulation and identified model equations:
+## `chrono_core/` modules
 
-\[
-\tau_{res}(\omega) = b_{eq}\,\omega + \tau_{eq}\,\tanh(\omega/\epsilon)
-\]
+- `config.py`  
+  Central configuration dataclass (`BridgeConfig`) and defaults for runtime/training parameters.
 
-With decomposition logged as:
-- `tau_visc = b_eq * omega`
-- `tau_coul = tau_eq * tanh(omega/eps)`
-- `tau_res = tau_visc + tau_coul`
+- `dynamics.py`  
+  Core pendulum dynamics and torque decomposition used by runtime/replay.
 
-#### 4) Electrical model
-Used model:
-- `duty = clamp(u_eff / pwm_limit, -1, 1)`
-- `v_applied = duty * v_bus_filtered`
-- `i_raw = (v_applied - k_e * omega) / R`
-- `i_eff = sign(i_raw) * max(|i_raw| - i0, 0)`
-- `tau_motor = k_t * i_eff`
+- `pendulum_rl_env.py`  
+  RL environment logic (state/action/reward, replay integration, parameter bounds) for PPO training.
 
-Net torque:
+- `pendulum_rl_plots.py`  
+  Plot/report utilities for RL results and training history visualization.
 
-\[
-\tau_{net} = \tau_{motor} - \tau_{res}
-\]
+- `signal_filter.py`  
+  Signal preprocessing/filter helpers used by estimation and analysis paths.
 
-Optional current clipping is configurable (`current_clip_enable`, `current_clip_A`).
+- `calibration_io.py`  
+  Calibration JSON loading/application helpers (e.g., CPR/radius extraction).
 
-#### 5) Delay compensation
-Delay is estimated from `/cmd/u` and `/hw/pwm_applied`, then applied as:
+- `log_schema.py`  
+  CSV log column schema constants to keep runtime and analysis aligned.
 
-\[
-u_{sim}(t) = u_{cmd}(t-\Delta t_d)
-\]
+- `utils.py`  
+  Shared utility functions (time helpers, clamping, terminal status formatting, numeric sanitizers, path helpers).
 
-The implementation conceptually delays the faster command side to match hardware-applied PWM timing. The delayed command is used for:
-- simulation input
-- sim-real comparison basis
-- EKF update input
+- `__init__.py`  
+  Package initializer for `chrono_core`.
 
-## INA219 handling (robust/noise-aware)
+## Data/output directories
 
-INA219 is treated as an auxiliary/noisy source:
-- bus voltage: robust filter (median/Hampel + LPF) then used by electrical model
-- current/power: filtered/logged mainly for diagnostics, not required for estimator stability
-- fallback nominal bus voltage is used when INA data is invalid or disabled
+- `run_logs/`  
+  Runtime and calibration outputs (CSV + metadata JSON). Includes the latest calibration snapshots and run logs.
 
-Config switches include:
-- `electrical_use_ina_bus_voltage`
-- `nominal_bus_voltage`
-- `ina_*` robust filter window/threshold parameters
 
-## Online identification (`chrono_core/estimation.py`)
+## Stage-wise GRU trajectory fitting
 
-Current EKF augmented state:
-- `[theta, omega, l_com, b_eq, tau_eq, delay_sec]`
+- `staged_pendulum_calibration.py`
+  Stage-wise discrete-time trajectory fitting pipeline (Stage 1: sin, Stage 2: square, Stage 3: burst).
+  Uses a **PyTorch GRU black-box dynamics learner** with real-data-only policy:
+  - input source: `hw_pwm`
+  - state source: `theta_real`, `omega_real`
+  - target: `theta_next`, `omega_next`
+  - optional one-step + rollout trajectory loss
 
-Removed from active identification flow:
-- `mgl`
+  Example:
 
-`blend_parameters_for_sim()` forwards the current identified parameters (`l_com`, `b_eq`, `tau_eq`, delay, electrical params) into simulation torque/electrical computation.
+  ```bash
+  python host/staged_pendulum_calibration.py --mode full     --stage1_csv host/run_logs/sin.csv     --stage2_csv host/run_logs/square.csv     --stage3_csv host/run_logs/burst.csv     --save_checkpoint
+  ```
 
-## Logging additions
-
-CSV/meta logs now include (when available):
-- `cmd_u_raw`, `cmd_u_delayed`, `hw_pwm`, `delay_sec_est`
-- `bus_v_raw`, `bus_v_filtered`
-- `current_raw_A`, `current_filtered_A`, `power_raw_W`
-- `tau_motor`, `tau_res`, `tau_visc`, `tau_coul`
-- `i_pred`, `v_applied`
-- identified parameter snapshots (`l_com_est`, `b_eq_est`, `tau_eq_est`, ...)
-
-## Modules
-- `chrono_core/config.py`: runtime/config defaults
-- `chrono_core/dynamics.py`: Chrono pendulum model + unified torque/electrical model
-- `chrono_core/estimation.py`: delay estimator, robust filters, EKF, convergence monitor
-- `chrono_core/calibration_io.py`: calibration/radius JSON loading
-- `plot_pendulum.py`: log plotting
-- `RL_fitting.py`: offline parameter optimization
-- `imu_viewer.py`: IMU visualization
+  Outputs include:
+  - `trajectory_fit_summary.json` (pipeline summary)
+  - `trajectory_model_params.json` (Chrono `--parameter-json` compatible wrapper + GRU checkpoint reference)
+  - `stageN/stageN_loss_history.csv` and `stageN/stageN_loss_convergence.png` (epoch-wise loss logs/plot)

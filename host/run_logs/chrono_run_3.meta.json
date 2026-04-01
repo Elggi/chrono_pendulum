@@ -1,5 +1,5 @@
 {
-  "log_csv": "./run_logs/chrono_run_1.csv",
+  "log_csv": "./run_logs/chrono_run_3.csv",
   "config": {
     "step": 0.001,
     "gravity": 9.797604406435664,

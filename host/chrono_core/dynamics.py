@@ -58,7 +58,7 @@ class PendulumModel:
         self.sys.Add(self.link)
         self.link.SetAngVelLocal(ch.ChVector3d(0.0, 0.0, cfg.omega0))
 
-        self._apply_dynamic_properties(cfg.l_com_init)
+        self._apply_dynamic_properties()
 
         vis_link = ch.ChVisualShapeBox(cfg.link_W, cfg.link_L, cfg.link_T)
         vis_link.SetColor(ch.ChColor(0.93, 0.93, 0.93))
@@ -93,20 +93,28 @@ class PendulumModel:
 
     @property
     def m_total(self):
-        return float(self.cfg.link_mass + self.cfg.imu_mass)
+        return float(self.cfg.rod_mass + self.cfg.imu_mass)
 
-    def _apply_dynamic_properties(self, l_com: float):
-        """Apply COM-based rigid-body properties.
+    @property
+    def J_rod(self):
+        return float((1.0 / 3.0) * self.cfg.rod_mass * (self.cfg.rod_length ** 2))
 
-        Pivot inertia is J_pivot = J_cm_base + m_total * l_com^2.
-        """
-        l_com = max(float(l_com), 1e-4)
+    @property
+    def J_imu(self):
+        return float(self.cfg.imu_mass * (self.cfg.r_imu ** 2))
+
+    @property
+    def J_total(self):
+        return float(self.J_rod + self.J_imu)
+
+    def _apply_dynamic_properties(self):
+        """Apply geometry-based rigid-body properties with fixed inertia."""
         self.link.SetMass(max(self.m_total, 1e-6))
-        j_pivot = float(self.cfg.J_cm_base + self.m_total * (l_com ** 2))
-        self.link.SetInertiaXX(ch.ChVector3d(1e-5, 1e-5, max(j_pivot, 1e-8)))
+        self.link.SetInertiaXX(ch.ChVector3d(1e-5, 1e-5, max(self.J_total, 1e-8)))
 
     def update_identified_structure(self, params: dict):
-        self._apply_dynamic_properties(params["l_com"])
+        # l_cg is identified only in gravity torque; inertia remains fixed by geometry.
+        self._apply_dynamic_properties()
 
     def get_theta(self):
         d = self.link.TransformDirectionLocalToParent(ch.ChVector3d(0.0, -1.0, 0.0))
@@ -139,28 +147,15 @@ class PendulumModel:
 
 
 def compute_model_torque_and_electrics(cmd_u, theta, omega, bus_v, p, cfg: BridgeConfig):
-    duty = clamp(cmd_u / max(cfg.pwm_limit, 1e-9), -1.0, 1.0)
-    v_applied = duty * float(bus_v)
-    i_raw = (v_applied - p["k_e"] * omega) / max(p["R"], 1e-6)
-
-    # i0 is treated as no-load / deadzone current threshold.
-    i_eff = math.copysign(max(abs(i_raw) - max(p["i0"], 0.0), 0.0), i_raw)
-    if cfg.current_clip_enable:
-        i_eff = clamp(i_eff, -abs(cfg.current_clip_A), abs(cfg.current_clip_A))
-
-    tau_motor = p["k_t"] * i_eff
+    _ = bus_v
+    tau_motor = p["K_u"] * cmd_u
     tau_visc = p["b_eq"] * omega
     tau_coul = p["tau_eq"] * math.tanh(omega / max(cfg.tanh_eps, 1e-9))
     tau_res = tau_visc + tau_coul
-    tau_gravity = (cfg.link_mass + cfg.imu_mass) * cfg.gravity * p["l_com"] * math.sin(theta)
+    tau_gravity = (cfg.rod_mass + cfg.imu_mass) * cfg.gravity * p["l_com"] * math.sin(theta)
     tau_net = tau_motor - tau_res - tau_gravity
-    p_pred = v_applied * i_eff
     return {
-        "duty": duty,
-        "v_applied": v_applied,
-        "i_raw": i_raw,
-        "i_pred": i_eff,
-        "p_pred": p_pred,
+        "duty": clamp(cmd_u / max(cfg.pwm_limit, 1e-9), -1.0, 1.0),
         "tau_motor": tau_motor,
         "tau_visc": tau_visc,
         "tau_coul": tau_coul,
@@ -177,14 +172,10 @@ def blend_parameters_for_sim(ekf_params: dict, cfg: BridgeConfig):
         "theta": float(ekf_params["theta"]),
         "omega": float(ekf_params["omega"]),
         "l_com": float(ekf_params.get("l_com", cfg.l_com_init)),
-        "J_cm_base": float(cfg.J_cm_base),
         "b_eq": b_eq,
         "tau_eq": tau_eq,
-        "k_t": float(ekf_params.get("k_t", cfg.k_t_init)),
-        "i0": float(ekf_params.get("i0", cfg.i0_init)),
+        "K_u": float(ekf_params.get("K_u", ekf_params.get("k_u", cfg.K_u_init))),
         "delay_sec": float(ekf_params["delay_sec"]),
-        "R": float(ekf_params.get("R", cfg.R_init)),
-        "k_e": float(ekf_params.get("k_e", cfg.k_e_init)),
     }
 
 

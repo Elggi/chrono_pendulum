@@ -40,6 +40,13 @@ def rotmat_to_euler_zyx(R):
     return yaw, pitch, roll
 
 
+def mirror_behind_view(tip_xyz: np.ndarray):
+    """Mirror X axis to show the pendulum from behind view."""
+    mirrored = np.asarray(tip_xyz, dtype=float).copy()
+    mirrored[0] *= -1.0
+    return mirrored
+
+
 class SharedState:
     def __init__(self, link_length=0.25, history_len=4000):
         self.lock = threading.Lock()
@@ -106,7 +113,8 @@ class SharedState:
             self.last_tip = tip.copy()
             self.tip_hist.append(tip.copy())
 
-            angle = math.atan2(tip[1], tip[0])
+            tip_view = mirror_behind_view(tip)
+            angle = math.atan2(tip_view[1], tip_view[0])
             if self.prev_angle is None:
                 self.prev_angle = angle
 
@@ -340,13 +348,17 @@ def main():
         ax2d.axvline(0.0, linewidth=1)
 
         # initial position -> 아래 방향 (0, -1)
-        ax2d.plot([0, tip0[0]], [0, tip0[1]], linestyle="--", linewidth=2, label="Initial link")
-        ax2d.scatter([tip0[0]], [tip0[1]], marker="*", s=180, label="Initial tip")
+        tip0_view = mirror_behind_view(tip0)
+        ax2d.plot([0, tip0_view[0]], [0, tip0_view[1]], linestyle="--", linewidth=2, label="Initial link")
+        ax2d.scatter([tip0_view[0]], [tip0_view[1]], marker="*", s=180, label="Initial tip")
 
         if len(tip_hist) > 1:
-            ax2d.plot(tip_hist[:, 0], tip_hist[:, 1], linewidth=2, label="Tip trajectory")
-            ax2d.plot([0, tip_hist[-1, 0]], [0, tip_hist[-1, 1]], linewidth=3, label="Current link")
-            ax2d.scatter([tip_hist[-1, 0]], [tip_hist[-1, 1]], s=60, label="Current tip")
+            tail = tip_hist[-min(len(tip_hist), 100):].copy()
+            tail[:, 0] *= -1.0
+            ax2d.plot(tail[:, 0], tail[:, 1], linewidth=2, alpha=0.55, label="Tip trajectory (recent)")
+            tip_now = mirror_behind_view(tip_hist[-1])
+            ax2d.plot([0, tip_now[0]], [0, tip_now[1]], linewidth=3, label="Current link")
+            ax2d.scatter([tip_now[0]], [tip_now[1]], s=60, label="Current tip")
 
         mean_cpr = float(np.mean(cpr_samples)) if len(cpr_samples) > 0 else None
         angle_deg = math.degrees(angle_unwrapped)
