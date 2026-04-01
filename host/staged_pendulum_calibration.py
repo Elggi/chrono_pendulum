@@ -199,15 +199,15 @@ def preprocess_real_timeseries(df: pd.DataFrame, cfg: PreprocessConfig) -> dict[
         "theta": theta,
         "omega": omega,
         "u": pwm,
+
+     
     }
-
-
 def gradient_with_unit_dt(x: np.ndarray) -> np.ndarray:
     if len(x) < 2:
         return np.zeros_like(x)
     return np.gradient(x)
 
-
+  
 # -----------------------------
 # Dataset / model
 # -----------------------------
@@ -338,7 +338,7 @@ def compute_loss(
     }
 
 
-def run_epoch(model: GRUDynamics, loader: DataLoader, optimizer: torch.optim.Optimizer | None, cfg: TrainConfig, device: torch.device) -> float:
+  def run_epoch(model: GRUDynamics, loader: DataLoader, optimizer: torch.optim.Optimizer | None, cfg: TrainConfig, device: torch.device) -> float:
     train_mode = optimizer is not None
     model.train(train_mode)
     losses = []
