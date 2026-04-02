@@ -32,7 +32,6 @@ import torch
 
 from chrono_core.config import BridgeConfig
 from chrono_core.dynamics import PendulumModel, compute_model_torque_and_electrics
-from chrono_core.process_launcher import run_chrono_pendulum_process
 
 
 @dataclass
@@ -380,6 +379,7 @@ def train_on_stage(
     print(f"  - excitation_type: {stage_spec.excitation_type}")
     print(f"  - optimize_keys: {list(stage_spec.optimize_keys)}")
     print("  - source_policy: theta=theta_real, omega=omega_real, input=hw_pwm")
+    print("  - simulation_backend: in-process PendulumModel (chrono_core.dynamics), no external chrono_pendulum.py process during fitting")
 
     df = pd.read_csv(stage_spec.csv_path)
     proc = preprocess_real_timeseries(df, pre_cfg)
@@ -513,8 +513,6 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--omega-smooth-window", type=int, default=5)
     ap.add_argument("--omega-outlier-sigma", type=float, default=4.0)
     ap.add_argument("--pwm-clip", type=float, default=255.0)
-    ap.add_argument("--launch-chrono-after", action="store_true", help="Run chrono_pendulum.py process after fitting.")
-    ap.add_argument("--chrono-duration", type=float, default=8.0, help="Duration for --launch-chrono-after.")
     ap.add_argument("--interactive", action="store_true")
     return ap.parse_args()
 
@@ -605,15 +603,6 @@ def run_pipeline(args: argparse.Namespace):
     print(f"[INFO] summary_json: {summary_path}")
     print(f"[INFO] trajectory_model_params: {final_param_path}")
     print(f"[INFO] final_params: {tensors_to_float_dict(params)}")
-    if args.launch_chrono_after:
-        run_chrono_pendulum_process(
-            host_dir=Path(__file__).resolve().parent,
-            calibration_json=str(run_logs / "calibration_latest.json") if (run_logs / "calibration_latest.json").exists() else "",
-            parameter_json=str(final_param_path),
-            duration_sec=float(args.chrono_duration),
-            headless=True,
-            mode="host",
-        )
 
 
 if __name__ == "__main__":

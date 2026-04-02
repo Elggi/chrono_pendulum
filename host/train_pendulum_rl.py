@@ -384,6 +384,10 @@ def main():
         f"init_noise_frac={args.init_noise_frac:.3f} | "
         f"ent_coef={args.ent_coef:.4f} | lr={args.learning_rate:.2e}"
     )
+    print(
+        "[BACKEND] RL rollout backend is chrono_core.pendulum_rl_env.simulate_trajectory "
+        "(in-process surrogate), not external chrono_pendulum.py process."
+    )
     if args.domain_randomization:
         print(
             "[RANDOMIZATION] Delay jitter enters PendulumRLEnv._rollout_loss() via "
@@ -534,16 +538,5 @@ def main():
     print(f"[INFO] SB3 Monitor CSV: {outdir / 'sb3_monitor.csv'}")
     print(f"[INFO] TensorBoard logdir: {args.tensorboard_log if args.tensorboard_log else str(outdir / 'tensorboard')}")
     print(f"[INFO] TensorBoard run: tensorboard --logdir \"{args.tensorboard_log if args.tensorboard_log else str(outdir / 'tensorboard')}\"")
-    if args.launch_chrono_after:
-        run_chrono_pendulum_process(
-            host_dir=Path(__file__).resolve().parent,
-            calibration_json=args.calibration_json,
-            parameter_json=str(outdir / "final_params_rl.json"),
-            duration_sec=float(args.chrono_duration),
-            headless=True,
-            mode="host",
-        )
-
-
 if __name__ == "__main__":
     main()
