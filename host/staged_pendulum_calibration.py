@@ -52,6 +52,7 @@ class TrainConfig:
     fd_eps_ratio: float = 2.0e-4
     w_theta: float = 1.0
     w_omega: float = 0.3
+    w_u: float = 2.0
 
 
 @dataclass
@@ -246,10 +247,19 @@ def chrono_rollout(
     return theta_sim, omega_sim
 
 
-def trajectory_loss(theta_real: np.ndarray, omega_real: np.ndarray, theta_sim: np.ndarray, omega_sim: np.ndarray, cfg: TrainConfig) -> float:
+def trajectory_loss(
+    theta_real: np.ndarray,
+    omega_real: np.ndarray,
+    theta_sim: np.ndarray,
+    omega_sim: np.ndarray,
+    u: np.ndarray,
+    cfg: TrainConfig,
+) -> float:
     e_th = theta_sim - theta_real
     e_om = omega_sim - omega_real
-    return float(np.mean(cfg.w_theta * (e_th ** 2) + cfg.w_omega * (e_om ** 2)))
+    u_norm = np.abs(u) / 255.0
+    w = 1.0 + cfg.w_u * np.clip(u_norm, 0.0, 1.0)
+    return float(np.mean(w * (cfg.w_theta * (e_th ** 2) + cfg.w_omega * (e_om ** 2))))
 
 
 def evaluate_loss(params: dict[str, torch.nn.Parameter], theta: np.ndarray, omega: np.ndarray, u: np.ndarray, dt: np.ndarray, cfg: BridgeConfig, train_cfg: TrainConfig):
@@ -262,7 +272,7 @@ def evaluate_loss(params: dict[str, torch.nn.Parameter], theta: np.ndarray, omeg
         cfg,
         p,
     )
-    loss = trajectory_loss(theta, omega, theta_sim, omega_sim, train_cfg)
+    loss = trajectory_loss(theta, omega, theta_sim, omega_sim, u, train_cfg)
     return loss, theta_sim, omega_sim
 
 
@@ -331,24 +341,28 @@ def save_fit_summary_plot(out_path: Path, theta_real: np.ndarray, omega_real: np
     plt.close(fig)
 
 
-def save_overlay_plot(out_path: Path, theta_real: np.ndarray, omega_real: np.ndarray, theta_sim: np.ndarray, omega_sim: np.ndarray):
+def save_overlay_plot(out_path: Path, pwm: np.ndarray, theta_real: np.ndarray, omega_real: np.ndarray, theta_sim: np.ndarray, omega_sim: np.ndarray):
     import matplotlib.pyplot as plt
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
 
-    axes[0].plot(theta_real, label="theta_real", lw=1.2)
-    axes[0].plot(theta_sim, label="theta_sim", lw=1.2)
-    axes[0].set_ylabel("theta")
+    axes[0].plot(pwm, label="hw_pwm(input)", lw=1.1, color="tab:green")
+    axes[0].set_ylabel("pwm")
     axes[0].legend(loc="upper right")
 
-    axes[1].plot(omega_real, label="omega_real", lw=1.2)
-    axes[1].plot(omega_sim, label="omega_sim", lw=1.2)
-    axes[1].set_xlabel("step")
-    axes[1].set_ylabel("omega")
+    axes[1].plot(theta_real, label="theta_real", lw=1.2)
+    axes[1].plot(theta_sim, label="theta_sim", lw=1.2)
+    axes[1].set_ylabel("theta")
     axes[1].legend(loc="upper right")
 
-    fig.suptitle("Theta/Omega overlay (real vs Chrono sim)")
+    axes[2].plot(omega_real, label="omega_real", lw=1.2)
+    axes[2].plot(omega_sim, label="omega_sim", lw=1.2)
+    axes[2].set_xlabel("step")
+    axes[2].set_ylabel("omega")
+    axes[2].legend(loc="upper right")
+
+    fig.suptitle("PWM/Theta/Omega overlay (real vs Chrono sim)")
     fig.tight_layout()
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
@@ -450,7 +464,7 @@ def train_on_stage(
     stage_param_json = stage_dir / "trajectory_model_params.json"
 
     save_fit_summary_plot(fit_plot, theta, omega, theta_sim, omega_sim)
-    save_overlay_plot(overlay_plot, theta, omega, theta_sim, omega_sim)
+    save_overlay_plot(overlay_plot, u, theta, omega, theta_sim, omega_sim)
     save_loss_convergence_plot(loss_curve_plot, history)
     pd.DataFrame({"epoch": np.arange(1, len(history) + 1), "trajectory_loss": history}).to_csv(loss_curve_csv, index=False)
     save_params_json(stage_param_json, params)
@@ -467,6 +481,7 @@ def train_on_stage(
             "type": "trajectory_mse",
             "w_theta": train_cfg.w_theta,
             "w_omega": train_cfg.w_omega,
+            "w_u": train_cfg.w_u,
         },
         "source_policy": {
             "real_data_only": True,
@@ -519,6 +534,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--fd-eps-ratio", type=float, default=2.0e-4)
     ap.add_argument("--w-theta", type=float, default=1.0)
     ap.add_argument("--w-omega", type=float, default=0.3)
+    ap.add_argument("--w-u", type=float, default=2.0, help="Input-magnitude loss weighting multiplier (helps K_u observability).")
     ap.add_argument("--theta-sign", type=float, default=1.0)
     ap.add_argument("--theta-offset", type=float, default=0.0)
     ap.add_argument("--warmup-sec", type=float, default=1.0, help="Drop initial warmup duration from fitting data.")
@@ -575,6 +591,7 @@ def run_pipeline(args: argparse.Namespace):
         fd_eps_ratio=args.fd_eps_ratio,
         w_theta=args.w_theta,
         w_omega=args.w_omega,
+        w_u=args.w_u,
     )
 
     cfg = BridgeConfig()
