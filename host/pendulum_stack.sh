@@ -260,6 +260,13 @@ run_rl_fitting() {
     if [[ "$aggr_yn" =~ ^[Yy]$ ]]; then
         cmd+=(--aggressive_search)
     fi
+    read -p "학습 후 chrono_pendulum.py 프로세스 실행? (y/n) [n]: " launch_chrono_yn
+    launch_chrono_yn=${launch_chrono_yn:-n}
+    if [[ "$launch_chrono_yn" =~ ^[Yy]$ ]]; then
+        read -p "chrono duration sec [8.0]: " chrono_dur
+        chrono_dur=${chrono_dur:-8.0}
+        cmd+=(--launch-chrono-after --chrono-duration "$chrono_dur")
+    fi
     echo "[INFO] command: ${cmd[*]}"
     "${cmd[@]}"
 
@@ -285,6 +292,26 @@ run_rl_fitting() {
         echo "[INFO] SB3 monitor plot (rl_zoo3): python -m rl_zoo3.plots.plot_train --algo ppo --env PendulumReplayEnv-v0 -f $run_outdir"
     fi
     echo "[INFO] TensorBoard: tensorboard --logdir $run_outdir/tensorboard"
+
+    read -p "학습 결과로 Replay 3D + IMU Viewer 실행? (y/n) [y]: " replay_after_yn
+    replay_after_yn=${replay_after_yn:-y}
+    if [[ "$replay_after_yn" =~ ^[Yy]$ ]]; then
+        replay_csv="$run_outdir/chrono_run_best.csv"
+        if [ ! -f "$replay_csv" ]; then
+            replay_csv="$run_outdir/replay_best.csv"
+        fi
+        if [ ! -f "$replay_csv" ]; then
+            echo "[WARN] replay csv를 찾지 못해 수동 선택으로 진행합니다."
+            replay_csv=$(select_csv_file)
+        fi
+        if [ -n "$replay_csv" ]; then
+            replay_cmd=(python3 "$BASE_DIR/replay_pendulum_cli.py" --csv "$replay_csv" --speed 1.0)
+            [ -f "$BASE_DIR/run_logs/calibration_latest.json" ] && replay_cmd+=(--calibration_json "$BASE_DIR/run_logs/calibration_latest.json")
+            [ -f "$run_outdir/final_params_rl.json" ] && replay_cmd+=(--parameter_json "$run_outdir/final_params_rl.json")
+            echo "[INFO] replay command: ${replay_cmd[*]}"
+            "${replay_cmd[@]}"
+        fi
+    fi
 }
 
 run_staged_calibration() {
@@ -315,6 +342,19 @@ run_staged_calibration() {
     echo "[INFO] staged calibration 완료. 결과 확인:"
     echo "       - $CSV_DIR/trajectory_model_params.json"
     echo "       - $CSV_DIR/trajectory_fit_summary.json"
+
+    read -p "보정 결과로 Replay 3D + IMU Viewer 실행? (y/n) [y]: " replay_after_yn
+    replay_after_yn=${replay_after_yn:-y}
+    if [[ "$replay_after_yn" =~ ^[Yy]$ ]]; then
+        replay_csv=$(select_csv_file)
+        if [ -n "$replay_csv" ]; then
+            replay_cmd=(python3 "$BASE_DIR/replay_pendulum_cli.py" --csv "$replay_csv" --speed 1.0)
+            [ -f "$BASE_DIR/run_logs/calibration_latest.json" ] && replay_cmd+=(--calibration_json "$BASE_DIR/run_logs/calibration_latest.json")
+            [ -f "$CSV_DIR/trajectory_model_params.json" ] && replay_cmd+=(--parameter_json "$CSV_DIR/trajectory_model_params.json")
+            echo "[INFO] replay command: ${replay_cmd[*]}"
+            "${replay_cmd[@]}"
+        fi
+    fi
 }
 
 run_replay_validation() {

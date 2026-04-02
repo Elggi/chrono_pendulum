@@ -502,9 +502,8 @@ def main():
                     help="Enable host-side manual command publishing.")
     ap.add_argument("--mode", choices=["host", "jetson"], default=None,
                     help="Compatibility option: host enables host-control, jetson uses external ROS input.")
-    ap.add_argument("--delay-ms", type=float, default=0.0)
     ap.add_argument("--calibration-json", default="./run_logs/calibration_latest.json")
-    ap.add_argument("--parameter-json", default="", help="RL/exported parameter JSON containing model_init and optional delay_sec")
+    ap.add_argument("--parameter-json", default="", help="Exported parameter JSON containing model_init/best_params")
     ap.add_argument("--radius-json", default="./run_logs/calibration_latest.json",
                     help="JSON file containing measured radius (e.g., calibration_latest.json).")
     ap.add_argument("--l-com", type=float, default=None, help="default: link_length/2 for fresh runs")
@@ -543,7 +542,6 @@ def main():
     cfg.b_eq_init = float(args.b) if args.b is not None else float(cfg.b_eq_init)
     cfg.tau_eq_init = float(args.tau_c) if args.tau_c is not None else float(cfg.tau_eq_init)
     cfg.K_u_init = float(args.k_u) if args.k_u is not None else float(cfg.K_u_init)
-    cfg.delay_init_ms = args.delay_ms
 
     calib = apply_calibration_json(cfg, args.calibration_json)
     param_data = None
@@ -551,8 +549,6 @@ def main():
         with open(args.parameter_json, "r", encoding="utf-8") as pf:
             param_data = json.load(pf)
         init_params = build_init_params(cfg, calibration=calib, parameter_json=param_data)
-        if "delay_sec" in init_params:
-            cfg.delay_init_ms = 1000.0 * float(init_params["delay_sec"])
     radius_measured = extract_radius_from_json(args.radius_json)
     if radius_measured is not None:
         cfg.radius_m = float(radius_measured)

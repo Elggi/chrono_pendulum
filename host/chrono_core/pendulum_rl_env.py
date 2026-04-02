@@ -288,13 +288,13 @@ def load_replay_csv(path: str | Path, cfg: BridgeConfig, delay_override: float |
     if delay_override is not None:
         delay_sec = float(delay_override)
     elif "delay_sec_est" in df.columns:
-        delay_arr = _safe_col(df, "delay_sec_est", cfg.delay_init_ms / 1000.0)
-        delay_sec = float(np.median(delay_arr)) if len(delay_arr) > 0 else (cfg.delay_init_ms / 1000.0)
+        delay_arr = _safe_col(df, "delay_sec_est", 0.0)
+        delay_sec = float(np.median(delay_arr)) if len(delay_arr) > 0 else 0.0
     elif "delay_ms" in df.columns:
-        delay_ms_arr = _safe_col(df, "delay_ms", cfg.delay_init_ms)
-        delay_sec = 1e-3 * float(np.median(delay_ms_arr)) if len(delay_ms_arr) > 0 else (cfg.delay_init_ms / 1000.0)
+        delay_ms_arr = _safe_col(df, "delay_ms", 0.0)
+        delay_sec = 1e-3 * float(np.median(delay_ms_arr)) if len(delay_ms_arr) > 0 else 0.0
     else:
-        delay_sec = cfg.delay_init_ms / 1000.0
+        delay_sec = 0.0
 
     return ReplayTrajectory(
         name=p.name,
@@ -510,7 +510,7 @@ def build_init_params(cfg: BridgeConfig, calibration: dict[str, Any] | None = No
         "l_com": float(cfg.l_com_init),
         "b_eq": float(cfg.b_eq_init),
         "tau_eq": float(cfg.tau_eq_init),
-        "delay_sec": float(cfg.delay_init_ms) / 1000.0,
+        "delay_sec": 0.0,
     }
 
     def _merge(src):

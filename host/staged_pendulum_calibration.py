@@ -152,12 +152,11 @@ def preprocess_real_timeseries(df: pd.DataFrame, cfg: PreprocessConfig) -> dict[
 
     theta = finite_interp(theta)
     omega = finite_interp(omega)
-    pwm = finite_interp(pwm)
-
     theta = np.unwrap(theta)
     theta = cfg.theta_sign * theta + cfg.theta_offset
     omega = robust_clip_sigma(omega, sigma=cfg.omega_outlier_sigma)
     omega = smooth_moving_average(omega, window=cfg.omega_smooth_window)
+    # Keep measured/applied hw_pwm as-is except physical clipping.
     pwm = np.clip(pwm, -abs(cfg.pwm_clip), abs(cfg.pwm_clip))
 
     mask = np.isfinite(theta) & np.isfinite(omega) & np.isfinite(pwm)
@@ -200,7 +199,14 @@ def clamp_in_place(params: dict[str, torch.nn.Parameter], bounds: dict[str, tupl
             p.data.clamp_(min=float(lo), max=float(hi))
 
 
-def chrono_rollout(theta0: float, omega0: float, u: np.ndarray, dt: np.ndarray, cfg: BridgeConfig, p: dict[str, float]):
+def chrono_rollout(
+    theta0: float,
+    omega0: float,
+    u: np.ndarray,
+    dt: np.ndarray,
+    cfg: BridgeConfig,
+    p: dict[str, float],
+):
     cfg_local = copy.deepcopy(cfg)
     cfg_local.theta0_deg = float(math.degrees(theta0))
     cfg_local.omega0 = float(omega0)
@@ -236,7 +242,14 @@ def trajectory_loss(theta_real: np.ndarray, omega_real: np.ndarray, theta_sim: n
 
 def evaluate_loss(params: dict[str, torch.nn.Parameter], theta: np.ndarray, omega: np.ndarray, u: np.ndarray, dt: np.ndarray, cfg: BridgeConfig, train_cfg: TrainConfig):
     p = tensors_to_float_dict(params)
-    theta_sim, omega_sim = chrono_rollout(theta[0], omega[0], u, dt, cfg, p)
+    theta_sim, omega_sim = chrono_rollout(
+        theta[0],
+        omega[0],
+        u,
+        dt,
+        cfg,
+        p,
+    )
     loss = trajectory_loss(theta, omega, theta_sim, omega_sim, train_cfg)
     return loss, theta_sim, omega_sim
 
@@ -366,6 +379,7 @@ def train_on_stage(
     print(f"  - excitation_type: {stage_spec.excitation_type}")
     print(f"  - optimize_keys: {list(stage_spec.optimize_keys)}")
     print("  - source_policy: theta=theta_real, omega=omega_real, input=hw_pwm")
+    print("  - simulation_backend: in-process PendulumModel (chrono_core.dynamics), no external chrono_pendulum.py process during fitting")
 
     df = pd.read_csv(stage_spec.csv_path)
     proc = preprocess_real_timeseries(df, pre_cfg)
