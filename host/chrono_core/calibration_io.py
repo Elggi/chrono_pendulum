@@ -25,7 +25,6 @@ def apply_calibration_json(cfg: BridgeConfig, json_path: str | None, apply_model
             model_init = dict(best_eval["params"])
     if not model_init and isinstance(calib.get("fit_final_params"), dict):
         model_init = dict(calib["fit_final_params"])
-    delay = calib.get("delay", {})
     summary = calib.get("summary", {}) if isinstance(calib.get("summary", {}), dict) else {}
     if not isinstance(calib.get("summary"), dict):
         calib["summary"] = summary
@@ -44,7 +43,6 @@ def apply_calibration_json(cfg: BridgeConfig, json_path: str | None, apply_model
             summary.get("mean_radius_m", calib.get("mean_radius_m", cfg.r_imu)),
         )
     )
-    cfg.delay_init_ms = float(delay.get("effective_control_delay_ms", cfg.delay_init_ms))
     cpr_candidates = [
         summary.get("mean_cpr"),
         calib.get("mean_cpr"),
