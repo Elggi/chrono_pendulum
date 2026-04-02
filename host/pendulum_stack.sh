@@ -260,6 +260,13 @@ run_rl_fitting() {
     if [[ "$aggr_yn" =~ ^[Yy]$ ]]; then
         cmd+=(--aggressive_search)
     fi
+    read -p "학습 후 chrono_pendulum.py 프로세스 실행? (y/n) [n]: " launch_chrono_yn
+    launch_chrono_yn=${launch_chrono_yn:-n}
+    if [[ "$launch_chrono_yn" =~ ^[Yy]$ ]]; then
+        read -p "chrono duration sec [8.0]: " chrono_dur
+        chrono_dur=${chrono_dur:-8.0}
+        cmd+=(--launch-chrono-after --chrono-duration "$chrono_dur")
+    fi
     echo "[INFO] command: ${cmd[*]}"
     "${cmd[@]}"
 
@@ -310,6 +317,13 @@ run_staged_calibration() {
     esac
 
     cmd=(python3 "$BASE_DIR/staged_pendulum_calibration.py" --interactive --run-logs "$CSV_DIR" --mode "$mode_arg")
+    read -p "보정 후 chrono_pendulum.py 프로세스 실행? (y/n) [n]: " launch_chrono_yn
+    launch_chrono_yn=${launch_chrono_yn:-n}
+    if [[ "$launch_chrono_yn" =~ ^[Yy]$ ]]; then
+        read -p "chrono duration sec [8.0]: " chrono_dur
+        chrono_dur=${chrono_dur:-8.0}
+        cmd+=(--launch-chrono-after --chrono-duration "$chrono_dur")
+    fi
     echo "[INFO] command: ${cmd[*]}"
     "${cmd[@]}"
     echo "[INFO] staged calibration 완료. 결과 확인:"

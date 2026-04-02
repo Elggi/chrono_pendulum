@@ -59,28 +59,6 @@ class BridgeConfig:
     tau_eq_init: float = 0.0
     tanh_eps: float = 0.05
 
-    # fixed control delay (set from CLI/calibration/parameter JSON)
-    delay_init_ms: float = 0.0
-    delay_max_ms: float = 120.0
-
-    # online EKF-like fitting
-    online_fit_enable: bool = True
-    self_fit_mode: str = "on"
-    q_theta: float = 1e-5
-    q_omega: float = 1e-3
-    q_l_com: float = 1e-7
-    q_b_eq: float = 1e-7
-    q_tau_eq: float = 1e-7
-    r_theta: float = 2e-4
-    r_omega: float = 2e-3
-    ekf_enable_min_pwm: float = 5.0
-    obs_lpf_tau_sec: float = 0.030
-    fit_conv_window_sec: float = 1.5
-    fit_conv_hold_sec: float = 2.0
-    fit_conv_rms_theta: float = 0.060
-    fit_conv_rms_omega: float = 0.450
-    fit_conv_rms_alpha: float = 1.600
-
     l_com_min: float = 0.03
     l_com_max: float = 0.45
     b_eq_max: float = 5.0

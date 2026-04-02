@@ -32,6 +32,7 @@ import torch
 
 from chrono_core.config import BridgeConfig
 from chrono_core.dynamics import PendulumModel, compute_model_torque_and_electrics
+from chrono_core.process_launcher import run_chrono_pendulum_process
 
 
 @dataclass
@@ -152,12 +153,11 @@ def preprocess_real_timeseries(df: pd.DataFrame, cfg: PreprocessConfig) -> dict[
 
     theta = finite_interp(theta)
     omega = finite_interp(omega)
-    pwm = finite_interp(pwm)
-
     theta = np.unwrap(theta)
     theta = cfg.theta_sign * theta + cfg.theta_offset
     omega = robust_clip_sigma(omega, sigma=cfg.omega_outlier_sigma)
     omega = smooth_moving_average(omega, window=cfg.omega_smooth_window)
+    # Keep measured/applied hw_pwm as-is except physical clipping.
     pwm = np.clip(pwm, -abs(cfg.pwm_clip), abs(cfg.pwm_clip))
 
     mask = np.isfinite(theta) & np.isfinite(omega) & np.isfinite(pwm)
@@ -200,7 +200,14 @@ def clamp_in_place(params: dict[str, torch.nn.Parameter], bounds: dict[str, tupl
             p.data.clamp_(min=float(lo), max=float(hi))
 
 
-def chrono_rollout(theta0: float, omega0: float, u: np.ndarray, dt: np.ndarray, cfg: BridgeConfig, p: dict[str, float]):
+def chrono_rollout(
+    theta0: float,
+    omega0: float,
+    u: np.ndarray,
+    dt: np.ndarray,
+    cfg: BridgeConfig,
+    p: dict[str, float],
+):
     cfg_local = copy.deepcopy(cfg)
     cfg_local.theta0_deg = float(math.degrees(theta0))
     cfg_local.omega0 = float(omega0)
@@ -236,7 +243,14 @@ def trajectory_loss(theta_real: np.ndarray, omega_real: np.ndarray, theta_sim: n
 
 def evaluate_loss(params: dict[str, torch.nn.Parameter], theta: np.ndarray, omega: np.ndarray, u: np.ndarray, dt: np.ndarray, cfg: BridgeConfig, train_cfg: TrainConfig):
     p = tensors_to_float_dict(params)
-    theta_sim, omega_sim = chrono_rollout(theta[0], omega[0], u, dt, cfg, p)
+    theta_sim, omega_sim = chrono_rollout(
+        theta[0],
+        omega[0],
+        u,
+        dt,
+        cfg,
+        p,
+    )
     loss = trajectory_loss(theta, omega, theta_sim, omega_sim, train_cfg)
     return loss, theta_sim, omega_sim
 
@@ -499,6 +513,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--omega-smooth-window", type=int, default=5)
     ap.add_argument("--omega-outlier-sigma", type=float, default=4.0)
     ap.add_argument("--pwm-clip", type=float, default=255.0)
+    ap.add_argument("--launch-chrono-after", action="store_true", help="Run chrono_pendulum.py process after fitting.")
+    ap.add_argument("--chrono-duration", type=float, default=8.0, help="Duration for --launch-chrono-after.")
     ap.add_argument("--interactive", action="store_true")
     return ap.parse_args()
 
@@ -589,6 +605,15 @@ def run_pipeline(args: argparse.Namespace):
     print(f"[INFO] summary_json: {summary_path}")
     print(f"[INFO] trajectory_model_params: {final_param_path}")
     print(f"[INFO] final_params: {tensors_to_float_dict(params)}")
+    if args.launch_chrono_after:
+        run_chrono_pendulum_process(
+            host_dir=Path(__file__).resolve().parent,
+            calibration_json=str(run_logs / "calibration_latest.json") if (run_logs / "calibration_latest.json").exists() else "",
+            parameter_json=str(final_param_path),
+            duration_sec=float(args.chrono_duration),
+            headless=True,
+            mode="host",
+        )
 
 
 if __name__ == "__main__":
