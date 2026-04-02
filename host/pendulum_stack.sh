@@ -337,6 +337,9 @@ run_staged_calibration() {
     esac
 
     cmd=(python3 "$BASE_DIR/staged_pendulum_calibration.py" --interactive --run-logs "$CSV_DIR" --mode "$mode_arg")
+    read -p "warmup sec [1.0]: " warmup_sec
+    warmup_sec=${warmup_sec:-1.0}
+    cmd+=(--warmup-sec "$warmup_sec")
     echo "[INFO] command: ${cmd[*]}"
     "${cmd[@]}"
     echo "[INFO] staged calibration 완료. 결과 확인:"

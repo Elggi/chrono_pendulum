@@ -38,6 +38,7 @@ from chrono_core.dynamics import PendulumModel, compute_model_torque_and_electri
 class PreprocessConfig:
     theta_sign: float = 1.0
     theta_offset: float = 0.0
+    warmup_sec: float = 1.0
     omega_smooth_window: int = 5
     omega_outlier_sigma: float = 4.0
     pwm_clip: float = 255.0
@@ -149,9 +150,14 @@ def preprocess_real_timeseries(df: pd.DataFrame, cfg: PreprocessConfig) -> dict[
     theta = pd.to_numeric(df["theta_real"], errors="coerce").to_numpy(dtype=float)
     omega = pd.to_numeric(df["omega_real"], errors="coerce").to_numpy(dtype=float)
     pwm = pd.to_numeric(df["hw_pwm"], errors="coerce").to_numpy(dtype=float)
+    t = None
+    if "wall_elapsed" in df.columns:
+        t = pd.to_numeric(df["wall_elapsed"], errors="coerce").to_numpy(dtype=float)
 
     theta = finite_interp(theta)
     omega = finite_interp(omega)
+    if t is not None:
+        t = finite_interp(t)
     theta = np.unwrap(theta)
     theta = cfg.theta_sign * theta + cfg.theta_offset
     omega = robust_clip_sigma(omega, sigma=cfg.omega_outlier_sigma)
@@ -160,14 +166,20 @@ def preprocess_real_timeseries(df: pd.DataFrame, cfg: PreprocessConfig) -> dict[
     pwm = np.clip(pwm, -abs(cfg.pwm_clip), abs(cfg.pwm_clip))
 
     mask = np.isfinite(theta) & np.isfinite(omega) & np.isfinite(pwm)
+    if t is not None:
+        t0 = float(t[0])
+        mask = mask & ((t - t0) >= float(max(0.0, cfg.warmup_sec)))
     if int(mask.sum()) < 64:
         raise ValueError("Not enough valid samples after preprocessing.")
 
-    return {
+    out = {
         "theta": theta[mask],
         "omega": omega[mask],
         "u": pwm[mask],
     }
+    if t is not None:
+        out["t"] = t[mask]
+    return out
 
 
 def parameter_bounds(cfg: BridgeConfig) -> dict[str, tuple[float, float]]:
@@ -379,21 +391,20 @@ def train_on_stage(
     print(f"  - excitation_type: {stage_spec.excitation_type}")
     print(f"  - optimize_keys: {list(stage_spec.optimize_keys)}")
     print("  - source_policy: theta=theta_real, omega=omega_real, input=hw_pwm")
-    print("  - simulation_backend: in-process PendulumModel (chrono_core.dynamics), no external chrono_pendulum.py process during fitting")
+    print("  - simulation_backend: in-process PendulumModel (same dynamics core), not a separate chrono_pendulum.py subprocess")
+    print(f"  - warmup_sec: {pre_cfg.warmup_sec:.3f}")
 
     df = pd.read_csv(stage_spec.csv_path)
     proc = preprocess_real_timeseries(df, pre_cfg)
     theta, omega, u = proc["theta"], proc["omega"], proc["u"]
 
     dt = np.full(len(theta), float(cfg.step), dtype=float)
-    if "wall_elapsed" in df.columns:
-        t_raw = pd.to_numeric(df["wall_elapsed"], errors="coerce").to_numpy(dtype=float)
-        t_raw = finite_interp(t_raw)
-        if len(t_raw) == len(theta):
-            dt = np.diff(t_raw, prepend=t_raw[0])
-            if len(dt) > 1:
-                dt[0] = dt[1]
-            dt = np.clip(dt, 1e-6, 0.2)
+    t_proc = proc.get("t")
+    if isinstance(t_proc, np.ndarray) and len(t_proc) == len(theta):
+        dt = np.diff(t_proc, prepend=t_proc[0])
+        if len(dt) > 1:
+            dt[0] = dt[1]
+        dt = np.clip(dt, 1e-6, 0.2)
 
     optimizer = torch.optim.AdamW([params[k] for k in stage_spec.optimize_keys], lr=train_cfg.lr, weight_decay=train_cfg.weight_decay)
 
@@ -510,6 +521,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--w-omega", type=float, default=0.3)
     ap.add_argument("--theta-sign", type=float, default=1.0)
     ap.add_argument("--theta-offset", type=float, default=0.0)
+    ap.add_argument("--warmup-sec", type=float, default=1.0, help="Drop initial warmup duration from fitting data.")
     ap.add_argument("--omega-smooth-window", type=int, default=5)
     ap.add_argument("--omega-outlier-sigma", type=float, default=4.0)
     ap.add_argument("--pwm-clip", type=float, default=255.0)
@@ -551,6 +563,7 @@ def run_pipeline(args: argparse.Namespace):
     pre_cfg = PreprocessConfig(
         theta_sign=args.theta_sign,
         theta_offset=args.theta_offset,
+        warmup_sec=args.warmup_sec,
         omega_smooth_window=args.omega_smooth_window,
         omega_outlier_sigma=args.omega_outlier_sigma,
         pwm_clip=args.pwm_clip,
