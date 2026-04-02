@@ -345,7 +345,7 @@ def save_overlay_plot(out_path: Path, pwm: np.ndarray, theta_real: np.ndarray, o
     import matplotlib.pyplot as plt
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
+    fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
 
     axes[0].plot(pwm, label="hw_pwm(input)", lw=1.1, color="tab:green")
     axes[0].set_ylabel("pwm")
