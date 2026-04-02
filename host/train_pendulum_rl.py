@@ -25,6 +25,7 @@ from chrono_core.pendulum_rl_env import (
     weighted_loss,
     compute_error_features,
 )
+from chrono_core.process_launcher import run_chrono_pendulum_process
 from chrono_core.pendulum_rl_plots import (
     plot_delay_diagnostics,
     plot_overlay,
@@ -357,6 +358,8 @@ def main():
     ap.add_argument("--max_refine_steps", type=int, default=12)
     ap.add_argument("--log_every_episodes", type=int, default=10)
     ap.add_argument("--tensorboard_log", type=str, default="")
+    ap.add_argument("--launch-chrono-after", action="store_true", help="Run chrono_pendulum.py process after RL finetuning.")
+    ap.add_argument("--chrono-duration", type=float, default=8.0, help="Duration for --launch-chrono-after.")
 
     args = maybe_prompt(ap.parse_args(), ap)
 
@@ -531,6 +534,15 @@ def main():
     print(f"[INFO] SB3 Monitor CSV: {outdir / 'sb3_monitor.csv'}")
     print(f"[INFO] TensorBoard logdir: {args.tensorboard_log if args.tensorboard_log else str(outdir / 'tensorboard')}")
     print(f"[INFO] TensorBoard run: tensorboard --logdir \"{args.tensorboard_log if args.tensorboard_log else str(outdir / 'tensorboard')}\"")
+    if args.launch_chrono_after:
+        run_chrono_pendulum_process(
+            host_dir=Path(__file__).resolve().parent,
+            calibration_json=args.calibration_json,
+            parameter_json=str(outdir / "final_params_rl.json"),
+            duration_sec=float(args.chrono_duration),
+            headless=True,
+            mode="host",
+        )
 
 
 if __name__ == "__main__":
