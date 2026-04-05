@@ -235,6 +235,9 @@ class SharedROSState:
         self.lock = threading.Lock()
         self.cmd_u = 0.0
         self.hw_pwm = 0.0
+        self.current_mA = 0.0
+        self.ina_bus_voltage_v = 0.0
+        self.ina_power_mw = 0.0
         self.hw_enc = 0.0
         self.hw_arduino_ms = 0.0
         self.imu_q = np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
@@ -251,6 +254,9 @@ class SharedROSState:
             return {
                 "cmd_u": self.cmd_u,
                 "hw_pwm": self.hw_pwm,
+                "current_mA": self.current_mA,
+                "ina_bus_voltage_v": self.ina_bus_voltage_v,
+                "ina_power_mw": self.ina_power_mw,
                 "hw_enc": self.hw_enc,
                 "hw_arduino_ms": self.hw_arduino_ms,
                 "imu_q": self.imu_q.copy(),
@@ -272,6 +278,9 @@ class PendulumROSNode(Node):
 
         self.create_subscription(Float32, cfg.topic_cmd_u, self.cb_cmd_u, 10)
         self.create_subscription(Float32, cfg.topic_hw_pwm, self.cb_hw_pwm, 10)
+        self.create_subscription(Float32, cfg.topic_hw_current_ma, self.cb_hw_current_ma, 10)
+        self.create_subscription(Float32, cfg.topic_hw_bus_voltage_v, self.cb_hw_bus_voltage_v, 10)
+        self.create_subscription(Float32, cfg.topic_hw_power_mw, self.cb_hw_power_mw, 10)
         self.create_subscription(Float32, cfg.topic_hw_enc, self.cb_hw_enc, 10)
         self.create_subscription(Float32, cfg.topic_hw_arduino_ms, self.cb_hw_ms, 10)
         self.create_subscription(Imu, cfg.topic_hw_imu, self.cb_hw_imu, 10)
@@ -300,6 +309,19 @@ class PendulumROSNode(Node):
         with self.shared.lock:
             self.shared.hw_enc = float(msg.data)
             self.shared.last_hw_enc_wall = now_wall()
+
+    def cb_hw_current_ma(self, msg: Float32):
+        with self.shared.lock:
+            self.shared.current_mA = float(msg.data)
+            self.shared.last_ina_wall = now_wall()
+
+    def cb_hw_bus_voltage_v(self, msg: Float32):
+        with self.shared.lock:
+            self.shared.ina_bus_voltage_v = float(msg.data)
+
+    def cb_hw_power_mw(self, msg: Float32):
+        with self.shared.lock:
+            self.shared.ina_power_mw = float(msg.data)
 
     def cb_hw_ms(self, msg: Float32):
         with self.shared.lock:
@@ -448,7 +470,7 @@ def quat_to_rotmat(w: float, x: float, y: float, z: float):
     )
 
 
-def make_status_line(host_mode: bool, cmd_u_raw: float, cmd_u_used: float, hw_pwm: float, mode_name: str,
+def make_status_line(host_mode: bool, cmd_u_raw: float, cmd_u_used: float, hw_pwm: float, current_mA: float, mode_name: str,
                      cfg: BridgeConfig):
     if host_mode:
         return (
@@ -456,7 +478,7 @@ def make_status_line(host_mode: bool, cmd_u_raw: float, cmd_u_used: float, hw_pw
             f"step: {cfg.pwm_step:4.1f} | max: {cfg.pwm_limit:5.1f}"
         )
     return (
-        f"cmd_u: {cmd_u_used:6.1f} | hw_pwm: {hw_pwm:6.1f} | mode: external"
+        f"cmd_u: {cmd_u_used:6.1f} | hw_pwm: {hw_pwm:6.1f} | I[mA]: {current_mA:7.1f} | mode: external"
     )
 
 
@@ -549,6 +571,16 @@ def main():
         with open(args.parameter_json, "r", encoding="utf-8") as pf:
             param_data = json.load(pf)
         init_params = build_init_params(cfg, calibration=calib, parameter_json=param_data)
+    current_offset_mA = 0.0
+    if isinstance(calib, dict):
+        sm = calib.get("summary", {}) if isinstance(calib.get("summary"), dict) else {}
+        for key in ("ina_current_offset_mA", "current_offset_mA"):
+            if key in sm:
+                try:
+                    current_offset_mA = float(sm[key])
+                except (TypeError, ValueError):
+                    current_offset_mA = 0.0
+                break
     radius_measured = extract_radius_from_json(args.radius_json)
     if radius_measured is not None:
         cfg.radius_m = float(radius_measured)
@@ -609,10 +641,27 @@ def main():
         enc_ref = None
         enc_prev = None
         theta_real_prev = None
+        theta_imu_prev = None
+        theta_encoder_prev = None
+        omega_imu_prev = 0.0
+        omega_encoder_prev = 0.0
         warmup_sec = 1.0
         imu_R0 = None
         real_omega_hist = deque(maxlen=401)
         real_time_hist = deque(maxlen=401)
+        dt_history = []
+        prev_wall_elapsed = None
+        online_alpha = 0.18
+        online_state = {
+            "theta_imu": 0.0,
+            "theta_encoder": 0.0,
+            "omega_imu": 0.0,
+            "omega_encoder": 0.0,
+            "alpha_imu": 0.0,
+            "alpha_linear": 0.0,
+            "alpha_encoder": 0.0,
+            "ina_current_signed_mA": 0.0,
+        }
         run_limit_sec = float("inf") if args.duration <= 0.0 else float(args.duration)
 
         if host_controller is not None:
@@ -733,6 +782,59 @@ def main():
                     )[-1]
                 )
 
+                dt_local = max(float(cfg.step), 1e-6)
+                if prev_wall_elapsed is not None:
+                    dt_history.append(float(max((wall_now - wall_t0) - prev_wall_elapsed, 1e-6)))
+                prev_wall_elapsed = float(wall_now - wall_t0)
+                pwm_hw = float(snap["hw_pwm"])
+                ina_current_raw_mA = float(snap["current_mA"])
+                ina_bus_voltage_v = float(snap["ina_bus_voltage_v"])
+                ina_power_mw = float(snap["ina_power_mw"])
+                ina_current_corr_mA = float(ina_current_raw_mA - current_offset_mA)
+                sign_pwm = 1.0 if pwm_hw > 0.0 else (-1.0 if pwm_hw < 0.0 else 0.0)
+                ina_current_signed_mA = float(sign_pwm * ina_current_corr_mA)
+
+                theta_imu = float(theta_real)
+                omega_imu = float(omega_real)
+                alpha_imu = float((omega_imu - omega_imu_prev) / dt_local)
+                omega_imu_prev = omega_imu
+
+                theta_encoder = float(theta_imu if not np.isfinite(snap["hw_enc"]) else 0.0)
+                omega_encoder = float(omega_imu if not np.isfinite(snap["hw_enc"]) else 0.0)
+                alpha_encoder = float(alpha_imu if not np.isfinite(snap["hw_enc"]) else 0.0)
+                if np.isfinite(snap["hw_enc"]) and np.isfinite(cfg.cpr) and cfg.cpr > 1.0:
+                    if enc_ref is None:
+                        enc_ref = float(snap["hw_enc"])
+                    theta_encoder = float((2.0 * math.pi / float(cfg.cpr)) * (float(snap["hw_enc"]) - float(enc_ref)))
+                    if theta_encoder_prev is not None:
+                        omega_encoder = float((theta_encoder - theta_encoder_prev) / dt_local)
+                    if theta_encoder_prev is not None:
+                        alpha_encoder = float((omega_encoder - omega_encoder_prev) / dt_local)
+                    theta_encoder_prev = theta_encoder
+                    omega_encoder_prev = omega_encoder
+
+                # alpha from linear acceleration (tangential component / radius)
+                alpha_linear = float(alpha_imu)
+                if np.isfinite(cfg.radius_m) and cfg.radius_m > 1e-6 and snap.get("imu_has_data", False):
+                    acc = np.asarray(snap["imu_a"], dtype=float)
+                    theta_ref = theta_imu
+                    tangent = np.array([math.cos(theta_ref), math.sin(theta_ref), 0.0], dtype=float)
+                    a_t = float(np.dot(acc, tangent))
+                    alpha_linear = float(a_t / float(cfg.radius_m))
+
+                # online low-pass filter (explicit online path)
+                for k, v in {
+                    "theta_imu": theta_imu,
+                    "theta_encoder": theta_encoder,
+                    "omega_imu": omega_imu,
+                    "omega_encoder": omega_encoder,
+                    "alpha_imu": alpha_imu,
+                    "alpha_linear": alpha_linear,
+                    "alpha_encoder": alpha_encoder,
+                    "ina_current_signed_mA": ina_current_signed_mA,
+                }.items():
+                    online_state[k] = (1.0 - online_alpha) * float(online_state[k]) + online_alpha * float(v)
+
                 theta_real_prev = theta_real
                 e_theta = theta - theta_real
                 e_omega = omega - omega_real
@@ -753,6 +855,7 @@ def main():
                     cmd_u_raw=cmd_u_raw,
                     cmd_u_used=cmd_u_used,
                     hw_pwm=snap["hw_pwm"],
+                    current_mA=snap["current_mA"],
                     mode_name=mode_name,
                     cfg=cfg,
                 )
@@ -761,7 +864,17 @@ def main():
 
                 wr.writerow([
                     wall_now, wall_now - wall_t0, mode_name,
-                    cmd_u_raw, cmd_u_used, snap["hw_pwm"], model_out["tau_net"],
+                    cmd_u_raw, cmd_u_used, pwm_hw, model_out["tau_net"],
+                    ina_current_raw_mA, ina_bus_voltage_v, ina_power_mw,
+                    current_offset_mA, ina_current_corr_mA, ina_current_signed_mA,
+                    pwm_hw,
+                    theta_imu, theta_encoder,
+                    omega_imu, omega_encoder,
+                    alpha_imu, alpha_linear, alpha_encoder,
+                    online_state["theta_imu"], online_state["theta_encoder"],
+                    online_state["omega_imu"], online_state["omega_encoder"],
+                    online_state["alpha_imu"], online_state["alpha_linear"], online_state["alpha_encoder"],
+                    online_state["ina_current_signed_mA"],
                     theta, omega, alpha,
                     snap["hw_enc"], snap["hw_arduino_ms"],
                     theta_real, omega_real, alpha_real,
@@ -783,6 +896,19 @@ def main():
                 host_controller.__exit__(None, None, None)
             elif quit_watcher is not None:
                 quit_watcher.__exit__(None, None, None)
+
+    if dt_history:
+        dt_arr = np.asarray(dt_history, dtype=float)
+        sampling_diag = {
+            "dt_mean_sec": float(np.mean(dt_arr)),
+            "dt_std_sec": float(np.std(dt_arr)),
+            "dt_min_sec": float(np.min(dt_arr)),
+            "dt_max_sec": float(np.max(dt_arr)),
+            "freq_mean_hz": float(1.0 / max(np.mean(dt_arr), 1e-9)),
+            "sample_count": int(len(dt_arr)),
+        }
+    else:
+        sampling_diag = {}
 
     meta = {
         "log_csv": log_csv,
@@ -807,6 +933,7 @@ def main():
         "fit_complete": False,
         "fit_complete_wall": None,
         "fit_final_params": None,
+        "sampling_diagnostics": sampling_diag,
     }
     with open(log_meta, "w", encoding="utf-8") as mf:
         json.dump(meta, mf, indent=2, ensure_ascii=False)

@@ -67,6 +67,20 @@ def moving_average(x: np.ndarray, win: int):
     return y[: len(x)]
 
 
+def offline_smooth(x: np.ndarray, win: int):
+    w = max(5, int(win))
+    if w % 2 == 0:
+        w += 1
+    try:
+        from scipy.signal import savgol_filter  # type: ignore
+
+        if len(x) >= w:
+            return savgol_filter(x, window_length=w, polyorder=3, mode="interp")
+    except Exception:
+        pass
+    return moving_average(x, max(3, w))
+
+
 def safe_gradient(x: np.ndarray, t: np.ndarray):
     x = np.asarray(x, dtype=float)
     t = np.asarray(t, dtype=float)
@@ -218,6 +232,7 @@ def plot_simulation(df, csv_path: str, args):
     alpha_sim = col_any(df, ["alpha"], n)
     cmd_u = col_any(df, ["cmd_u_raw", "cmd_u"], n)
     hw_pwm = col_any(df, ["hw_pwm"], n)
+    current_ma = col_any(df, ["current_mA", "ina219_current_ma", "ina_current_ma"], n)
     enc = col_any(df, ["hw_enc"], n)
     tau_cmd = col_any(df, ["tau_cmd"], n)
     tau_motor = col_any(df, ["tau_motor"], n)
@@ -237,9 +252,9 @@ def plot_simulation(df, csv_path: str, args):
     if np.isfinite(omega_sim).any():
         alpha_sim = estimate_filtered_alpha_from_omega(omega_sim, t=t)
 
-    theta_real = col_any(df, ["theta_real"], n)
-    omega_real = col_any(df, ["omega_real"], n)
-    alpha_real = col_any(df, ["alpha_real"], n)
+    theta_real = col_any(df, ["theta_real", "theta_imu"], n)
+    omega_real = col_any(df, ["omega_real", "omega_imu"], n)
+    alpha_real = col_any(df, ["alpha_real", "alpha_imu"], n)
     theta_sim = unwrap_and_zero(theta_sim)
     theta_real = unwrap_and_zero(theta_real)
     if np.isfinite(theta_real).any():
@@ -254,6 +269,20 @@ def plot_simulation(df, csv_path: str, args):
     if np.isfinite(omega_real).any():
         alpha_real = estimate_filtered_alpha_from_omega(omega_real, t=t)
 
+    # Explicit raw/online/offline separation for analysis overlays.
+    theta_raw = col_any(df, ["theta_imu"], n)
+    theta_online = col_any(df, ["theta_imu_online"], n)
+    theta_offline = offline_smooth(theta_raw, win=max(11, args.real_theta_smooth * 5))
+    omega_raw = col_any(df, ["omega_imu"], n)
+    omega_online = col_any(df, ["omega_imu_online"], n)
+    omega_offline = offline_smooth(omega_raw, win=max(11, args.alpha_smooth * 5))
+    alpha_raw = col_any(df, ["alpha_imu"], n)
+    alpha_online = col_any(df, ["alpha_imu_online"], n)
+    alpha_offline = offline_smooth(alpha_raw, win=max(11, args.alpha_smooth * 5))
+    current_raw = col_any(df, ["ina_current_raw_mA", "current_mA"], n)
+    current_online = col_any(df, ["ina_current_signed_online_mA"], n)
+    current_offline = offline_smooth(col_any(df, ["ina_current_signed_mA"], n), win=max(11, args.alpha_smooth * 5))
+
     t_cmd = t.copy()
     if args.apply_cmd_delay_from_meta and meta is not None and meta.get("estimated_delay_ms_final") is not None:
         t_cmd = t + 0.001 * float(meta["estimated_delay_ms_final"])
@@ -261,6 +290,16 @@ def plot_simulation(df, csv_path: str, args):
     print(f"csv  : {csv_path}")
     print("mode : simulation")
     print(f"CPR  : {cpr if cpr is not None else 'None'}")
+    if len(t) > 1:
+        dt_diag = np.diff(t)
+        dt_diag = dt_diag[np.isfinite(dt_diag) & (dt_diag > 0.0)]
+        if len(dt_diag) > 0:
+            print(
+                "sampling: "
+                f"mean_dt={np.mean(dt_diag):.6f}s, std_dt={np.std(dt_diag):.6f}s, "
+                f"min_dt={np.min(dt_diag):.6f}s, max_dt={np.max(dt_diag):.6f}s, "
+                f"mean_f={1.0/max(np.mean(dt_diag), 1e-9):.2f}Hz"
+            )
     if meta is not None and meta.get("estimated_delay_ms_final") is not None:
         print(f"delay: {meta['estimated_delay_ms_final']:.3f} ms")
 
@@ -273,13 +312,26 @@ def plot_simulation(df, csv_path: str, args):
     ax_alpha = axes[2, 1]
 
     ax_cmd.plot(t_cmd, cmd_u, label="cmd_u")
-    ax_cmd.plot(t, hw_pwm, label="hw_pwm")
+    ax_cmd.plot(t, hw_pwm, label="pwm_hw")
+    ax_cmd2 = ax_cmd.twinx()
+    ax_cmd2.plot(t, current_raw, label="I_raw_mA", color="tab:red", alpha=0.4)
+    ax_cmd2.plot(t, current_online, label="I_online_mA", color="tab:orange", alpha=0.9)
+    ax_cmd2.plot(t, current_offline, label="I_offline_mA", color="tab:brown", alpha=0.9)
     ax_cmd.grid(True)
-    ax_cmd.legend()
+    lines1, labels1 = ax_cmd.get_legend_handles_labels()
+    lines2, labels2 = ax_cmd2.get_legend_handles_labels()
+    ax_cmd.legend(lines1 + lines2, labels1 + labels2, loc="upper right")
     ax_cmd.set_xlabel("time [s]")
-    ax_cmd.set_title("Command / PWM")
+    ax_cmd.set_title("Command / PWM / Current")
+    ax_cmd2.set_ylabel("current [mA]")
 
     ax_theta.plot(t, theta_sim, label="theta sim")
+    if np.isfinite(theta_raw).any():
+        ax_theta.plot(t, theta_raw, label="theta_raw", alpha=0.35)
+    if np.isfinite(theta_online).any():
+        ax_theta.plot(t, theta_online, label="theta_online", alpha=0.9)
+    if np.isfinite(theta_offline).any():
+        ax_theta.plot(t, theta_offline, label="theta_offline", alpha=0.9)
     if np.isfinite(theta_real).any():
         ax_theta.plot(t, theta_real, label="theta real")
     ax_theta.grid(True)
@@ -289,6 +341,12 @@ def plot_simulation(df, csv_path: str, args):
     ax_theta.set_title("Theta")
 
     ax_omega.plot(t, omega_sim, label="omega sim")
+    if np.isfinite(omega_raw).any():
+        ax_omega.plot(t, omega_raw, label="omega_raw", alpha=0.35)
+    if np.isfinite(omega_online).any():
+        ax_omega.plot(t, omega_online, label="omega_online", alpha=0.9)
+    if np.isfinite(omega_offline).any():
+        ax_omega.plot(t, omega_offline, label="omega_offline", alpha=0.9)
     if np.isfinite(omega_real).any():
         ax_omega.plot(t, omega_real, label="omega real")
     ax_omega.grid(True)
@@ -298,6 +356,12 @@ def plot_simulation(df, csv_path: str, args):
     ax_omega.set_title("Omega")
 
     ax_alpha.plot(t, alpha_sim, label="alpha sim")
+    if np.isfinite(alpha_raw).any():
+        ax_alpha.plot(t, alpha_raw, label="alpha_raw", alpha=0.35)
+    if np.isfinite(alpha_online).any():
+        ax_alpha.plot(t, alpha_online, label="alpha_online", alpha=0.9)
+    if np.isfinite(alpha_offline).any():
+        ax_alpha.plot(t, alpha_offline, label="alpha_offline", alpha=0.9)
     if np.isfinite(alpha_real).any():
         ax_alpha.plot(t, alpha_real, label="alpha real")
     ax_alpha.grid(True)
