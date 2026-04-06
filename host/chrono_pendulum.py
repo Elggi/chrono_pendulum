@@ -582,6 +582,7 @@ def main():
         args.host_control = False
 
     cfg = BridgeConfig()
+    imu_sign = -1.0  # fixed CW/CCW convention alignment against encoder
     cfg.enable_render = not args.headless
     cfg.enable_imu_viewer = not args.no_imu_viewer
     cfg.step = args.step
@@ -781,8 +782,8 @@ def main():
                             imu_R0 = R_abs.copy()
                         R_rel = imu_R0.T @ R_abs
                         tip_vec = R_rel @ np.array([0.0, -cfg.radius_m, 0.0], dtype=float)
-                        theta_warm = float(math.atan2(float(tip_vec[1]), float(tip_vec[0])))
-                        omega_warm = float(snap["imu_w"][2])
+                        theta_warm = float(imu_sign * math.atan2(float(tip_vec[1]), float(tip_vec[0])))
+                        omega_warm = float(imu_sign * snap["imu_w"][2])
                     warmup_theta_samples.append(theta_warm)
                     warmup_omega_samples.append(omega_warm)
                     warmup_current_samples.append(float(snap["current_mA"]))
@@ -821,6 +822,20 @@ def main():
                         theta_imu_unwrapped_acc = 0.0
                         theta_encoder_prev_wrapped = None
                         theta_encoder_unwrapped_acc = 0.0
+                        # Explicit post-warmup filter-state reset to avoid pre-actuation drift.
+                        online_state = {
+                            "theta_imu": 0.0,
+                            "theta_encoder": 0.0,
+                            "omega_imu": 0.0,
+                            "omega_encoder": 0.0,
+                            "alpha_imu": 0.0,
+                            "alpha_linear": 0.0,
+                            "alpha_encoder": 0.0,
+                            "ina_current_signed_mA": 0.0,
+                        }
+                        omega_imu_prev = 0.0
+                        omega_encoder_prev = 0.0
+                        theta_encoder_prev = None
                         if np.isfinite(snap["hw_enc"]):
                             enc_ref = float(snap["hw_enc"])
                             enc_prev = enc_ref
@@ -865,8 +880,8 @@ def main():
                     tip_vec = R_rel @ np.array([0.0, -cfg.radius_m, 0.0], dtype=float)
                     # Physical/logging convention: CCW positive on world XY.
                     # (Viewer-only mirror transforms are handled in imu_viewer, not in logged data.)
-                    theta_meas_wrapped = float(math.atan2(float(tip_vec[1]), float(tip_vec[0])))
-                    omega_meas = float(w_imu_raw[2])
+                    theta_meas_wrapped = float(imu_sign * math.atan2(float(tip_vec[1]), float(tip_vec[0])))
+                    omega_meas = float(imu_sign * w_imu_raw[2])
 
                 if theta_imu_prev_wrapped is None:
                     theta_imu_prev_wrapped = float(theta_meas_wrapped)
@@ -1054,6 +1069,7 @@ def main():
             "duration_sec": warmup_sec,
             "theta_offset_rad": float(theta_offset_rad),
             "current_offset_mA": float(current_offset_used_mA),
+            "imu_sign_applied": float(imu_sign),
             "warmup_theta_sample_count": int(len(warmup_theta_samples)),
             "warmup_current_sample_count": int(len(warmup_current_samples)),
         },

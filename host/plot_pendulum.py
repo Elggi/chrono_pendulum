@@ -279,8 +279,21 @@ def evaluate_candidate_set(candidates: dict[str, np.ndarray], t: np.ndarray, qua
     return rows, winner
 
 
+def resolve_export_base(csv_path: str) -> tuple[str, bool]:
+    """Return (raw_base_without_ext, is_processed_mode)."""
+    path_no_ext, ext = os.path.splitext(csv_path)
+    if ext.lower() != ".csv":
+        return path_no_ext, False
+    suffixes = [".offline_id", ".with_winners"]
+    for s in suffixes:
+        if path_no_ext.endswith(s):
+            return path_no_ext[: -len(s)], True
+    return path_no_ext, False
+
+
 def plot_simulation(df, csv_path: str, args):
     meta = load_meta_if_exists(csv_path)
+    export_base, processed_mode = resolve_export_base(csv_path)
 
     cpr = args.counts_per_revolution
     if cpr is None and meta is not None and meta.get("cpr_mean") is not None:
@@ -392,6 +405,23 @@ def plot_simulation(df, csv_path: str, args):
         "theta_encoder_online_unwrapped": theta_encoder_online,
         "theta_encoder_offline_unwrapped": theta_encoder_offline,
     }
+    # IMU sign convention is expected to be fixed at logging time (chrono_pendulum.py).
+    imu_sign = 1.0
+    imu_sign_diag = {"mode": "from_logged_data"}
+    theta_imu_online = imu_sign * theta_imu_online
+    theta_imu_offline = imu_sign * theta_imu_offline
+    theta_candidates["theta_imu_raw_unwrapped"] = theta_imu_raw
+    theta_candidates["theta_imu_online_unwrapped"] = theta_imu_online
+    theta_candidates["theta_imu_offline_unwrapped"] = theta_imu_offline
+    omega_imu_direct = imu_sign * omega_imu_direct
+    omega_imu_online = imu_sign * omega_imu_online
+    omega_imu_offline = imu_sign * omega_imu_offline
+    omega_from_theta_imu_diff = safe_gradient(theta_imu_raw, t)
+    alpha_from_imu_gyro_diff = imu_sign * alpha_from_imu_gyro_diff
+    alpha_from_omega_imu_diff = safe_gradient(omega_imu_direct, t)
+    alpha_imu_online = imu_sign * alpha_imu_online
+    alpha_imu_offline = imu_sign * alpha_imu_offline
+
     theta_rows, theta_winner = evaluate_candidate_set(theta_candidates, t, "theta", rest_mask, theta_sim if np.isfinite(theta_sim).any() else None)
     omega_candidates = {
         "omega_imu_direct": omega_imu_direct,
@@ -423,26 +453,12 @@ def plot_simulation(df, csv_path: str, args):
     omega_eval = omega_candidates.get(omega_winner, omega_imu_direct)
     alpha_eval = alpha_candidates.get(alpha_winner, alpha_from_imu_gyro_diff)
 
-    # Explicit raw/online/offline separation for analysis overlays.
-    theta_raw = col_any(df, ["theta_imu"], n)
-    theta_online = col_any(df, ["theta_imu_online"], n)
-    theta_offline = offline_smooth(theta_raw, win=max(11, args.real_theta_smooth * 5))
-    omega_raw = col_any(df, ["omega_imu"], n)
-    omega_online = col_any(df, ["omega_imu_online"], n)
-    omega_offline = offline_smooth(omega_raw, win=max(11, args.alpha_smooth * 5))
-    alpha_raw = col_any(df, ["alpha_imu"], n)
-    alpha_online = col_any(df, ["alpha_imu_online"], n)
-    alpha_offline = offline_smooth(alpha_raw, win=max(11, args.alpha_smooth * 5))
-    current_raw = col_any(df, ["ina_current_raw_mA", "current_mA"], n)
-    current_online = col_any(df, ["ina_current_signed_online_mA"], n)
-    current_offline = offline_smooth(col_any(df, ["ina_current_signed_mA"], n), win=max(11, args.alpha_smooth * 5))
-
     t_cmd = t.copy()
     if args.apply_cmd_delay_from_meta and meta is not None and meta.get("estimated_delay_ms_final") is not None:
         t_cmd = t + 0.001 * float(meta["estimated_delay_ms_final"])
 
     print(f"csv  : {csv_path}")
-    print("mode : simulation")
+    print(f"mode : {'processed_offline' if processed_mode else 'raw_log'}")
     print(f"CPR  : {cpr if cpr is not None else 'None'}")
     if len(t) > 1:
         dt_diag = np.diff(t)
@@ -599,40 +615,57 @@ def plot_simulation(df, csv_path: str, args):
     sign_diag["classification"] = mismatch_state
 
     # Save candidate/evaluation artifacts
-    out_base = os.path.splitext(csv_path)[0]
+    out_base = export_base
     metrics_rows = theta_rows + omega_rows + alpha_rows
-    if pd is not None and metrics_rows:
+    if (not processed_mode) and pd is not None and metrics_rows:
         pd.DataFrame(metrics_rows).to_csv(out_base + ".signal_candidate_metrics.csv", index=False)
     summary = {
         "theta_winner": theta_winner,
         "omega_winner": omega_winner,
         "alpha_winner": alpha_winner,
+        "imu_theta_sign_alignment": {
+            "selected_sign": float(imu_sign),
+            **imu_sign_diag,
+        },
         "current_offset_applied_mA": float(np.nanmedian(i_offset[np.isfinite(i_offset)])) if np.isfinite(i_offset).any() else 0.0,
         "current_sign_diagnostics": sign_diag,
     }
-    with open(out_base + ".signal_winner_summary.json", "w", encoding="utf-8") as fsum:
-        json.dump(summary, fsum, indent=2)
-    if pd is not None:
-        df_aug = df.copy()
-        df_aug["theta_winner"] = theta_eval
-        df_aug["omega_winner"] = omega_eval
-        df_aug["alpha_winner"] = alpha_eval
-        df_aug["ina_current_signed_eval_mA"] = i_online
-        df_aug.to_csv(out_base + ".with_winners.csv", index=False)
+    if not processed_mode:
+        with open(out_base + ".signal_winner_summary.json", "w", encoding="utf-8") as fsum:
+            json.dump(summary, fsum, indent=2)
+    # Idempotent clean offline export: only for raw logs (never nested re-exports).
+    if (not processed_mode) and pd is not None:
+        df_offline = pd.DataFrame(
+            {
+                "wall_elapsed": t,
+                "hw_pwm": pwm_hw,
+                "ina_current_raw_mA": i_raw,
+                "ina_current_offset_mA": i_offset,
+                "current_offline_filtered": i_offline,
+                "theta_winner": theta_eval,
+                "omega_winner": omega_eval,
+                "alpha_winner": alpha_eval,
+                "theta_sim": theta_sim,
+                "omega_sim": omega_sim,
+                "alpha_sim": alpha_sim,
+            }
+        )
+        df_offline.to_csv(out_base + ".offline_id.csv", index=False)
 
     # Quantity-specific candidate plots
-    for qname, qcand in [("theta", theta_candidates), ("omega", omega_candidates), ("alpha", alpha_candidates)]:
-        fig_q, ax_q = plt.subplots(1, 1, figsize=(12, 4))
-        for cname, sig in qcand.items():
-            if np.isfinite(sig).any():
-                ax_q.plot(t, sig, label=cname, alpha=0.8 if cname == summary.get(f"{qname}_winner") else 0.35)
-        ax_q.set_title(f"{qname.capitalize()} candidates")
-        ax_q.set_xlabel("time [s]")
-        ax_q.grid(True, alpha=0.3)
-        ax_q.legend(loc="upper right", fontsize=8, ncol=2)
-        fig_q.tight_layout()
-        fig_q.savefig(out_base + f".{qname}_candidates.png", dpi=130)
-        plt.close(fig_q)
+    if not processed_mode:
+        for qname, qcand in [("theta", theta_candidates), ("omega", omega_candidates), ("alpha", alpha_candidates)]:
+            fig_q, ax_q = plt.subplots(1, 1, figsize=(12, 4))
+            for cname, sig in qcand.items():
+                if np.isfinite(sig).any():
+                    ax_q.plot(t, sig, label=cname, alpha=0.8 if cname == summary.get(f"{qname}_winner") else 0.35)
+            ax_q.set_title(f"{qname.capitalize()} candidates")
+            ax_q.set_xlabel("time [s]")
+            ax_q.grid(True, alpha=0.3)
+            ax_q.legend(loc="upper right", fontsize=8, ncol=2)
+            fig_q.tight_layout()
+            fig_q.savefig(out_base + f".{qname}_candidates.png", dpi=130)
+            plt.close(fig_q)
 
     fig_cur, ax_cur = plt.subplots(2, 1, figsize=(13, 6), sharex=True)
     ax_cur[0].plot(t, pwm_hw, label="pwm_hw")
@@ -648,7 +681,8 @@ def plot_simulation(df, csv_path: str, args):
     ax_cur[1].grid(True, alpha=0.3)
     ax_cur[1].set_xlabel("time [s]")
     fig_cur.tight_layout()
-    fig_cur.savefig(out_base + ".current_audit.png", dpi=130)
+    if not processed_mode:
+        fig_cur.savefig(out_base + ".current_audit.png", dpi=130)
     plt.close(fig_cur)
 
     print(f"winner(theta): {theta_winner}")
