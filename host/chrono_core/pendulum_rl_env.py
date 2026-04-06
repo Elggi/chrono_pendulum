@@ -260,8 +260,16 @@ def load_replay_csv(path: str | Path, cfg: BridgeConfig, delay_override: float |
         dt[0] = dt[1]
     dt = np.maximum(dt, 1e-6)
 
-    cmd_u = _safe_col(df, "cmd_u_raw")
-    hw_pwm = _safe_col(df, "hw_pwm")
+    cmd_u = _safe_col(df, "cmd_u_raw", np.nan)
+    if not np.isfinite(cmd_u).any():
+        cmd_u = _safe_col(df, "cmd_u_delayed", np.nan)
+    if not np.isfinite(cmd_u).any():
+        cmd_u = np.zeros(len(df), dtype=float)
+    hw_pwm = _safe_col(df, "hw_pwm", np.nan)
+    if not np.isfinite(hw_pwm).any():
+        hw_pwm = _safe_col(df, "pwm_hw", np.nan)
+    if not np.isfinite(hw_pwm).any():
+        hw_pwm = np.zeros(len(df), dtype=float)
     theta_real = _safe_col(df, "theta_real", np.nan)
     omega_real = _safe_col(df, "omega_real", np.nan)
     alpha_real_raw = _safe_col(df, "alpha_real", np.nan)
@@ -269,10 +277,28 @@ def load_replay_csv(path: str | Path, cfg: BridgeConfig, delay_override: float |
     # fallback to sim columns when real estimates are absent in old logs
     if not np.isfinite(theta_real).any():
         theta_real = _safe_col(df, "theta")
+    if not np.isfinite(theta_real).any():
+        theta_real = _safe_col(df, "theta_imu_filtered_unwrapped")
+    if not np.isfinite(theta_real).any():
+        theta_real = _safe_col(df, "theta_imu_online")
+    if not np.isfinite(theta_real).any():
+        theta_real = _safe_col(df, "theta_imu")
     if not np.isfinite(omega_real).any():
         omega_real = _safe_col(df, "omega")
+    if not np.isfinite(omega_real).any():
+        omega_real = _safe_col(df, "omega_imu_filtered")
+    if not np.isfinite(omega_real).any():
+        omega_real = _safe_col(df, "omega_imu_online")
+    if not np.isfinite(omega_real).any():
+        omega_real = _safe_col(df, "omega_imu")
     if not np.isfinite(alpha_real_raw).any():
-        raise ValueError(f"{p}: required column 'alpha_real' has no valid numeric samples.")
+        alpha_real_raw = _safe_col(df, "alpha_from_linear_accel_filtered", np.nan)
+    if not np.isfinite(alpha_real_raw).any():
+        alpha_real_raw = _safe_col(df, "alpha_linear_online", np.nan)
+    if not np.isfinite(alpha_real_raw).any():
+        alpha_real_raw = _safe_col(df, "alpha_linear", np.nan)
+    if not np.isfinite(alpha_real_raw).any():
+        raise ValueError(f"{p}: required alpha column not found (tried alpha_real/alpha_linear variants).")
     theta_real = _unwrap_angle_series(theta_real)
     omega_real = _sanitize_timeseries(omega_real)
     alpha_real_raw = _sanitize_timeseries(alpha_real_raw)

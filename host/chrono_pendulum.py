@@ -43,7 +43,6 @@ from chrono_core.signal_filter import estimate_filtered_alpha_from_omega, Causal
 
 
 class RunState(str, Enum):
-    STATE_INIT = "STATE_INIT"
     STATE_WARMUP = "STATE_WARMUP"
     STATE_RUN = "STATE_RUN"
 
@@ -505,6 +504,20 @@ def quat_to_rotmat(w: float, x: float, y: float, z: float):
     )
 
 
+def compute_theta_wrapped_from_imu_snapshot(snap: dict, imu_R0: np.ndarray | None, radius_m: float, imu_sign: float):
+    """Return wrapped theta [rad], body->world0 rotation, and imu_R0."""
+    if not snap.get("imu_has_data", False):
+        return None, None, imu_R0
+    q = snap["imu_q"]
+    R_abs = quat_to_rotmat(float(q[0]), float(q[1]), float(q[2]), float(q[3]))
+    if imu_R0 is None:
+        imu_R0 = R_abs.copy()
+    R_rel = imu_R0.T @ R_abs
+    tip_vec = R_rel @ np.array([0.0, -radius_m, 0.0], dtype=float)
+    theta_wrapped = float(imu_sign * math.atan2(float(tip_vec[1]), float(tip_vec[0])))
+    return theta_wrapped, R_rel, imu_R0
+
+
 def make_status_line(host_mode: bool, cmd_u_raw: float, cmd_u_used: float, hw_pwm: float, current_mA: float, mode_name: str,
                      cfg: BridgeConfig):
     if host_mode:
@@ -569,10 +582,9 @@ def main():
     ap.add_argument("--k-u", type=float, default=None, help="default: near-zero positive fresh initialization")
     ap.add_argument("--r-imu", type=float, default=0.285, help="IMU radius from pivot [m]")
     ap.add_argument(
-        "--real-alpha-source",
-        choices=["omega_diff", "tangential_accel", "blend"],
-        default="omega_diff",
-        help="deprecated; real alpha now always uses filtered d(omega)/dt",
+        "--imu-linear-accel-no-gravity-comp",
+        action="store_true",
+        help="Disable gravity compensation for IMU linear-accel alpha path.",
     )
     args = ap.parse_args()
 
@@ -590,7 +602,6 @@ def main():
     cfg.omega0 = args.omega0
     # Keep masses fixed for physically consistent COM-based rigid body.
     cfg.rod_mass = 0.200
-    cfg.link_mass = cfg.rod_mass
     cfg.imu_mass = 0.020
     cfg.rod_length = args.link_length
     cfg.link_L = args.link_length
@@ -623,6 +634,7 @@ def main():
         cfg.r_imu = float(radius_measured)
 
     log_csv = make_numbered_path(cfg.log_dir, cfg.log_prefix, ".csv")
+    log_finalized_csv = log_csv[:-4] + ".finalized.csv"
     log_meta = log_csv[:-4] + ".meta.json"
 
     rclpy.init()
@@ -667,23 +679,28 @@ def main():
     host_controller = HostCommandController(cfg) if args.host_control else None
     quit_watcher = None if args.host_control else QuitWatcher()
 
-    with open(log_csv, "w", newline="", encoding="utf-8") as f:
+    with open(log_csv, "w", newline="", encoding="utf-8") as f, open(log_finalized_csv, "w", newline="", encoding="utf-8") as ff:
         wr = csv.writer(f)
         wr.writerow(PENDULUM_LOG_COLUMNS)
+        wr_final = csv.writer(ff)
+        wr_final.writerow([
+            "wall_elapsed",
+            "I_filtered_mA",
+            "theta_imu_filtered_unwrapped",
+            "omega_imu_filtered",
+            "alpha_from_linear_accel_filtered",
+        ])
 
         wall_t0 = now_wall()
         wall_run_t0 = None
         omega_prev = model.get_omega()
         t_prev = 0.0
         enc_ref = None
-        enc_prev = None
-        theta_real_prev = None
-        theta_imu_prev = None
         theta_encoder_prev = None
         omega_imu_prev = 0.0
         omega_encoder_prev = 0.0
         warmup_sec = 1.0
-        run_state = RunState.STATE_INIT
+        run_state = RunState.STATE_WARMUP
         imu_R0 = None
         real_omega_hist = deque(maxlen=401)
         real_time_hist = deque(maxlen=401)
@@ -704,7 +721,9 @@ def main():
         warmup_omega_samples = []
         warmup_current_samples = []
         warmup_pwm_samples = []
+        warmup_alpha_linear_samples = []
         theta_offset_rad = 0.0
+        alpha_linear_offset = 0.0
         current_offset_used_mA = float(current_offset_mA)
         theta_imu_prev_wrapped = None
         theta_imu_unwrapped_acc = 0.0
@@ -731,11 +750,15 @@ def main():
             print(f"[INFO] run limit: {run_limit_sec:.1f}s")
         else:
             print("[INFO] run limit: none (quit with q/ESC)")
-        if args.real_alpha_source != "omega_diff":
-            print("[INFO] --real-alpha-source is deprecated and ignored; using filtered d(omega)/dt.")
-        print("[INFO] real alpha source: filtered derivative of omega")
+        print("[INFO] alpha_real (legacy/export) source: filtered derivative of omega")
+        print("[INFO] finalized training alpha source: tangential linear acceleration / radius")
+        gravity_comp_enabled = not bool(args.imu_linear_accel_no_gravity_comp)
+        print(
+            "[INFO] alpha from linear accel: source_frame=imu_body, projection_frame=world0_xy, "
+            f"radius_m={cfg.radius_m:.6f}, gravity_mps2={cfg.gravity:.6f}, "
+            f"gravity_compensation={'on' if gravity_comp_enabled else 'off'}"
+        )
 
-        run_state = RunState.STATE_WARMUP
         try:
             while (now_wall() - wall_t0) < run_limit_sec:
                 if host_controller is not None:
@@ -776,14 +799,23 @@ def main():
                     theta_warm = float(model.get_theta())
                     omega_warm = float(model.get_omega())
                     if snap.get("imu_has_data", False):
-                        q = snap["imu_q"]
-                        R_abs = quat_to_rotmat(float(q[0]), float(q[1]), float(q[2]), float(q[3]))
-                        if imu_R0 is None:
-                            imu_R0 = R_abs.copy()
-                        R_rel = imu_R0.T @ R_abs
-                        tip_vec = R_rel @ np.array([0.0, -cfg.radius_m, 0.0], dtype=float)
-                        theta_warm = float(imu_sign * math.atan2(float(tip_vec[1]), float(tip_vec[0])))
+                        theta_wrapped_imu, R_rel, imu_R0 = compute_theta_wrapped_from_imu_snapshot(
+                            snap=snap,
+                            imu_R0=imu_R0,
+                            radius_m=cfg.radius_m,
+                            imu_sign=imu_sign,
+                        )
+                        if theta_wrapped_imu is not None:
+                            theta_warm = float(theta_wrapped_imu)
                         omega_warm = float(imu_sign * snap["imu_w"][2])
+                        acc_body = np.asarray(snap["imu_a"], dtype=float)
+                        acc_world0 = R_rel @ acc_body if R_rel is not None else acc_body
+                        if gravity_comp_enabled:
+                            acc_world0 = acc_world0 - np.array([0.0, -cfg.gravity, 0.0], dtype=float)
+                        tangent_warm = np.array([math.cos(theta_warm), math.sin(theta_warm), 0.0], dtype=float)
+                        a_t_warm = float(np.dot(acc_world0, tangent_warm))
+                        if np.isfinite(cfg.radius_m) and cfg.radius_m > 1e-6:
+                            warmup_alpha_linear_samples.append(float(a_t_warm / float(cfg.radius_m)))
                     warmup_theta_samples.append(theta_warm)
                     warmup_omega_samples.append(omega_warm)
                     warmup_current_samples.append(float(snap["current_mA"]))
@@ -794,6 +826,8 @@ def main():
                     )
                     if sim_t >= warmup_sec:
                         theta_offset_rad = compute_theta_offset(np.asarray(warmup_theta_samples, dtype=float))
+                        if len(warmup_alpha_linear_samples) >= 4:
+                            alpha_linear_offset = float(np.nanmedian(np.asarray(warmup_alpha_linear_samples, dtype=float)))
                         current_offset_used_mA, valid_cur_n = compute_current_offset(
                             np.asarray(warmup_current_samples, dtype=float),
                             np.asarray(warmup_pwm_samples, dtype=float),
@@ -810,6 +844,7 @@ def main():
                         print(
                             "[WARMUP DONE] "
                             f"warmup_duration={warmup_sec:.2f}s, theta_offset_rad={theta_offset_rad:.6f}, "
+                            f"alpha_linear_offset={alpha_linear_offset:.6f}, "
                             f"current_offset_mA={current_offset_used_mA:.6f}, number_of_valid_current_samples={valid_cur_n}"
                         )
                         run_state = RunState.STATE_RUN
@@ -818,20 +853,26 @@ def main():
                         prev_wall_elapsed = None
                         real_omega_hist.clear()
                         real_time_hist.clear()
-                        theta_imu_prev_wrapped = None
-                        theta_imu_unwrapped_acc = 0.0
+                        theta_imu_prev_wrapped, _, imu_R0 = compute_theta_wrapped_from_imu_snapshot(
+                            snap=snap,
+                            imu_R0=imu_R0,
+                            radius_m=cfg.radius_m,
+                            imu_sign=imu_sign,
+                        )
+                        theta_imu_unwrapped_acc = float(theta_offset_rad)
                         theta_encoder_prev_wrapped = None
-                        theta_encoder_unwrapped_acc = 0.0
-                        # Explicit post-warmup filter-state reset to avoid pre-actuation drift.
+                        theta_encoder_unwrapped_acc = float(theta_offset_rad)
+                        # Reset filter state to "unseeded": first run sample becomes the seed.
                         online_state = {k: 0.0 for k in online_filter_bank.keys()}
                         for k, flt in online_filter_bank.items():
-                            flt.reset(0.0)
+                            flt.reset(None)
                         omega_imu_prev = 0.0
                         omega_encoder_prev = 0.0
                         theta_encoder_prev = None
                         if np.isfinite(snap["hw_enc"]):
                             enc_ref = float(snap["hw_enc"])
-                            enc_prev = enc_ref
+                            if np.isfinite(cfg.cpr) and cfg.cpr > 1.0:
+                                theta_encoder_prev_wrapped = 0.0
                     if cfg.realtime:
                         time.sleep(min(cfg.step, 0.01))
                     continue
@@ -858,22 +899,21 @@ def main():
 
                 if enc_ref is None and np.isfinite(snap["hw_enc"]):
                     enc_ref = float(snap["hw_enc"])
-                    enc_prev = enc_ref
 
                 theta_meas_wrapped = theta
                 omega_meas = omega
                 alpha_meas = alpha
+                R_rel = None
                 if snap.get("imu_has_data", False):
-                    q = snap["imu_q"]
                     w_imu_raw = snap["imu_w"]
-                    R_abs = quat_to_rotmat(float(q[0]), float(q[1]), float(q[2]), float(q[3]))
-                    if imu_R0 is None:
-                        imu_R0 = R_abs.copy()
-                    R_rel = imu_R0.T @ R_abs
-                    tip_vec = R_rel @ np.array([0.0, -cfg.radius_m, 0.0], dtype=float)
-                    # Physical/logging convention: CCW positive on world XY.
-                    # (Viewer-only mirror transforms are handled in imu_viewer, not in logged data.)
-                    theta_meas_wrapped = float(imu_sign * math.atan2(float(tip_vec[1]), float(tip_vec[0])))
+                    theta_wrapped_imu, R_rel, imu_R0 = compute_theta_wrapped_from_imu_snapshot(
+                        snap=snap,
+                        imu_R0=imu_R0,
+                        radius_m=cfg.radius_m,
+                        imu_sign=imu_sign,
+                    )
+                    if theta_wrapped_imu is not None:
+                        theta_meas_wrapped = float(theta_wrapped_imu)
                     omega_meas = float(imu_sign * w_imu_raw[2])
 
                 if theta_imu_prev_wrapped is None:
@@ -940,11 +980,15 @@ def main():
                 # alpha from linear acceleration (tangential component / radius)
                 alpha_linear = float(alpha_imu)
                 if np.isfinite(cfg.radius_m) and cfg.radius_m > 1e-6 and snap.get("imu_has_data", False):
-                    acc = np.asarray(snap["imu_a"], dtype=float)
+                    acc_body = np.asarray(snap["imu_a"], dtype=float)
+                    acc_world0 = (R_rel @ acc_body) if R_rel is not None else acc_body
+                    if gravity_comp_enabled:
+                        acc_world0 = acc_world0 - np.array([0.0, -cfg.gravity, 0.0], dtype=float)
                     theta_ref = theta_imu
                     tangent = np.array([math.cos(theta_ref), math.sin(theta_ref), 0.0], dtype=float)
-                    a_t = float(np.dot(acc, tangent))
+                    a_t = float(np.dot(acc_world0, tangent))
                     alpha_linear = float(a_t / float(cfg.radius_m))
+                alpha_linear = float(alpha_linear - alpha_linear_offset)
 
                 # online low-pass filter (explicit online path)
                 for k, v in {
@@ -959,7 +1003,6 @@ def main():
                 }.items():
                     online_state[k] = online_filter_bank[k].update(float(v))
 
-                theta_real_prev = theta_meas
                 e_theta = theta - theta_meas
                 e_omega = omega - omega_meas
                 e_alpha = alpha - alpha_meas
@@ -1009,6 +1052,13 @@ def main():
                     w_imu[0], w_imu[1], w_imu[2],
                     a_imu[0], a_imu[1], a_imu[2],
                 ])
+                wr_final.writerow([
+                    sim_t,
+                    online_state["ina_current_signed_mA"],
+                    online_state["theta_imu"],
+                    online_state["omega_imu"],
+                    online_state["alpha_linear"],
+                ])
 
                 if cfg.realtime:
                     target_wall = wall_t0 + sim_t
@@ -1036,6 +1086,7 @@ def main():
 
     meta = {
         "log_csv": log_csv,
+        "log_finalized_csv": log_finalized_csv,
         "config": asdict(cfg),
         "inertia": {
             "J_rod": float(model.J_rod),
@@ -1061,15 +1112,25 @@ def main():
         "warmup": {
             "duration_sec": warmup_sec,
             "theta_offset_rad": float(theta_offset_rad),
+            "alpha_linear_offset_radps2": float(alpha_linear_offset),
             "current_offset_mA": float(current_offset_used_mA),
             "imu_sign_applied": float(imu_sign),
             "warmup_theta_sample_count": int(len(warmup_theta_samples)),
             "warmup_current_sample_count": int(len(warmup_current_samples)),
         },
+        "signal_policy": {
+            "alpha_real_source": "filtered_domega_dt",
+            "alpha_linear_source": "imu_linear_accel_tangential_projection_finalized",
+            "alpha_linear_frame": "imu_body_to_world0_xy",
+            "alpha_linear_gravity_compensated": bool(gravity_comp_enabled),
+            "gravity_mps2_used": float(cfg.gravity),
+            "radius_m_used": float(cfg.radius_m),
+        },
     }
     with open(log_meta, "w", encoding="utf-8") as mf:
         json.dump(meta, mf, indent=2, ensure_ascii=False)
     print(f"saved csv  : {log_csv}")
+    print(f"saved csv(finalized) : {log_finalized_csv}")
     print(f"saved meta : {log_meta}")
 
     if viewer_proc is not None:

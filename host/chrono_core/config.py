@@ -37,9 +37,6 @@ class BridgeConfig:
     l_com_init: float = 0.1425  # default midpoint for 0.285 m link
     # Effective input-to-torque gain in surrogate dynamics: tau_motor = K_u * u
     K_u_init: float = 1.0e-5
-    # Legacy aliases kept to avoid breaking old scripts/options.
-    link_mass: float = 0.200
-    J_cm_base: float = 0.0
 
     imu_offset_x: float = 0.220
     imu_offset_y: float = 0.000
@@ -96,9 +93,7 @@ class BridgeConfig:
     topic_sim_delay_ms: str = "/sim/delay_ms"
     topic_sim_status: str = "/sim/status"
 
-    # Keep both names for backward compatibility with pre-modularized code paths.
     topic_imu: str = "/sim/imu/data"
-    topic_imu_data: str = "/sim/imu/data"
 
     log_dir: str = "./run_logs"
     log_prefix: str = "chrono_run_"
