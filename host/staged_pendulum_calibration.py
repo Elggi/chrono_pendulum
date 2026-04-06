@@ -145,14 +145,42 @@ def smooth_moving_average(x: np.ndarray, window: int) -> np.ndarray:
 
 
 def preprocess_real_timeseries(df: pd.DataFrame, cfg: PreprocessConfig) -> dict[str, np.ndarray]:
-    required = ["theta_real", "omega_real", "hw_pwm"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}")
+    if "pwm_hw" in df.columns:
+        pwm = pd.to_numeric(df["pwm_hw"], errors="coerce").to_numpy(dtype=float)
+    elif "hw_pwm" in df.columns:
+        pwm = pd.to_numeric(df["hw_pwm"], errors="coerce").to_numpy(dtype=float)
+    else:
+        raise ValueError("Missing required pwm column: pwm_hw or hw_pwm")
 
-    theta = pd.to_numeric(df["theta_real"], errors="coerce").to_numpy(dtype=float)
-    omega = pd.to_numeric(df["omega_real"], errors="coerce").to_numpy(dtype=float)
-    pwm = pd.to_numeric(df["hw_pwm"], errors="coerce").to_numpy(dtype=float)
+    # Explicit non-legacy provenance: prefer evaluated winner paths if present.
+    theta_col_candidates = [
+        "theta_winner",
+        "theta_imu_online",
+        "theta_encoder_online",
+        "theta_imu",
+        "theta_encoder",
+    ]
+    omega_col_candidates = [
+        "omega_winner",
+        "omega_imu_online",
+        "omega_encoder_online",
+        "omega_imu",
+        "omega_encoder",
+    ]
+    theta = None
+    omega = None
+    for col in theta_col_candidates:
+        if col in df.columns:
+            theta = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float)
+            break
+    for col in omega_col_candidates:
+        if col in df.columns:
+            omega = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float)
+            break
+    if theta is None:
+        raise ValueError(f"Missing theta candidate columns: {theta_col_candidates}")
+    if omega is None:
+        raise ValueError(f"Missing omega candidate columns: {omega_col_candidates}")
 
     theta = finite_interp(theta)
     omega = finite_interp(omega)

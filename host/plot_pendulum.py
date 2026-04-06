@@ -203,6 +203,82 @@ def col_any(df, keys, n_default=None):
     return np.full(n_default, np.nan, dtype=float)
 
 
+def normalize_theta_path(theta: np.ndarray) -> np.ndarray:
+    """Canonical theta normalization: unwrap phase then zero-anchor at first finite sample [rad]."""
+    return unwrap_and_zero(theta)
+
+
+def robust_mad(x: np.ndarray) -> float:
+    finite = np.isfinite(x)
+    if not np.any(finite):
+        return float("nan")
+    v = x[finite]
+    med = np.median(v)
+    return float(np.median(np.abs(v - med)) * 1.4826)
+
+
+def hf_roughness(x: np.ndarray, t: np.ndarray) -> float:
+    finite = np.isfinite(x) & np.isfinite(t)
+    if np.sum(finite) < 8:
+        return float("nan")
+    xv = x[finite]
+    tv = t[finite]
+    dt = np.diff(tv)
+    if len(dt) == 0:
+        return float("nan")
+    fs = 1.0 / max(np.median(dt), 1e-9)
+    X = np.fft.rfft(xv - np.mean(xv))
+    f = np.fft.rfftfreq(len(xv), d=1.0 / fs)
+    if len(f) <= 2:
+        return float("nan")
+    cutoff = 0.35 * (fs * 0.5)
+    idx = f >= cutoff
+    if not np.any(idx):
+        return float(0.0)
+    return float(np.sum(np.abs(X[idx]) ** 2) / max(len(xv), 1))
+
+
+def derivative_consistency(a: np.ndarray, b: np.ndarray, t: np.ndarray) -> float:
+    da = safe_gradient(a, t)
+    finite = np.isfinite(da) & np.isfinite(b)
+    if np.sum(finite) < 8:
+        return float("nan")
+    return float(np.sqrt(np.mean((da[finite] - b[finite]) ** 2)))
+
+
+def evaluate_candidate_set(candidates: dict[str, np.ndarray], t: np.ndarray, quantity: str, rest_mask: np.ndarray | None, link_ref: np.ndarray | None):
+    rows = []
+    for name, sig in candidates.items():
+        finite = np.isfinite(sig)
+        if not np.any(finite):
+            continue
+        rest = rest_mask & finite if rest_mask is not None else finite
+        std_rest = float(np.std(sig[rest])) if np.any(rest) else float(np.std(sig[finite]))
+        mad = robust_mad(sig[rest] if np.any(rest) else sig[finite])
+        rough = hf_roughness(sig, t)
+        cons = float("nan")
+        if link_ref is not None:
+            cons = float(np.sqrt(np.nanmean((sig[finite] - link_ref[finite]) ** 2)))
+        score = 0.0
+        for v, w in [(std_rest, 1.0), (mad, 1.0), (rough, 0.2), (cons, 0.6)]:
+            if np.isfinite(v):
+                score += w * float(v)
+        rows.append(
+            {
+                "quantity": quantity,
+                "candidate": name,
+                "std_rest": std_rest,
+                "mad_rest": mad,
+                "hf_roughness": rough,
+                "consistency_rmse": cons,
+                "score": score,
+            }
+        )
+    rows = sorted(rows, key=lambda r: (np.inf if not np.isfinite(r["score"]) else r["score"]))
+    winner = rows[0]["candidate"] if rows else None
+    return rows, winner
+
+
 def plot_simulation(df, csv_path: str, args):
     meta = load_meta_if_exists(csv_path)
 
@@ -252,22 +328,100 @@ def plot_simulation(df, csv_path: str, args):
     if np.isfinite(omega_sim).any():
         alpha_sim = estimate_filtered_alpha_from_omega(omega_sim, t=t)
 
-    theta_real = col_any(df, ["theta_real", "theta_imu"], n)
-    omega_real = col_any(df, ["omega_real", "omega_imu"], n)
-    alpha_real = col_any(df, ["alpha_real", "alpha_imu"], n)
-    theta_sim = unwrap_and_zero(theta_sim)
-    theta_real = unwrap_and_zero(theta_real)
-    if np.isfinite(theta_real).any():
-        theta_real = moving_average(theta_real, args.real_theta_smooth)
-    theta_sim = unwrap_and_zero(theta_sim)
-    theta_real = unwrap_and_zero(theta_real)
-    has_real = np.isfinite(theta_real).any() or np.isfinite(omega_real).any() or np.isfinite(alpha_real).any()
-    if not has_real and cpr is not None and np.isfinite(enc).any():
-        theta_real = derive_theta_from_encoder(enc, cpr, sign=args.theta_sign, offset=args.theta_offset)
-        omega_real = safe_gradient(theta_real, t)
-        omega_real = moving_average(omega_real, args.alpha_smooth)
-    if np.isfinite(omega_real).any():
-        alpha_real = estimate_filtered_alpha_from_omega(omega_real, t=t)
+    # ---- Provenance-safe candidates (legacy *_real paths are NOT trusted as canonical) ----
+    theta_sim = normalize_theta_path(theta_sim)
+    theta_imu_raw = normalize_theta_path(col_any(df, ["theta_imu"], n))
+    theta_encoder_raw = normalize_theta_path(col_any(df, ["theta_encoder"], n))
+    if not np.isfinite(theta_encoder_raw).any() and cpr is not None and np.isfinite(enc).any():
+        theta_encoder_raw = normalize_theta_path(derive_theta_from_encoder(enc, cpr, sign=args.theta_sign, offset=args.theta_offset))
+    theta_imu_online = normalize_theta_path(col_any(df, ["theta_imu_online"], n))
+    theta_encoder_online = normalize_theta_path(col_any(df, ["theta_encoder_online"], n))
+    theta_imu_offline = normalize_theta_path(offline_smooth(theta_imu_raw, win=max(11, args.real_theta_smooth * 5)))
+    theta_encoder_offline = normalize_theta_path(offline_smooth(theta_encoder_raw, win=max(11, args.real_theta_smooth * 5)))
+
+    omega_imu_direct = col_any(df, ["omega_imu"], n)
+    omega_encoder_diff = col_any(df, ["omega_encoder"], n)
+    if not np.isfinite(omega_encoder_diff).any() and np.isfinite(theta_encoder_raw).any():
+        omega_encoder_diff = safe_gradient(theta_encoder_raw, t)
+    omega_from_theta_imu_diff = safe_gradient(theta_imu_raw, t)
+    omega_imu_online = col_any(df, ["omega_imu_online"], n)
+    omega_encoder_online = col_any(df, ["omega_encoder_online"], n)
+    omega_imu_offline = offline_smooth(omega_imu_direct, win=max(11, args.alpha_smooth * 5))
+    omega_encoder_offline = offline_smooth(omega_encoder_diff, win=max(11, args.alpha_smooth * 5))
+
+    alpha_from_imu_gyro_diff = col_any(df, ["alpha_imu"], n)
+    alpha_from_linear_accel = col_any(df, ["alpha_linear"], n)
+    alpha_from_encoder_diff = col_any(df, ["alpha_encoder"], n)
+    if not np.isfinite(alpha_from_imu_gyro_diff).any() and np.isfinite(omega_imu_direct).any():
+        alpha_from_imu_gyro_diff = safe_gradient(omega_imu_direct, t)
+    alpha_from_omega_imu_diff = safe_gradient(omega_imu_direct, t)
+    alpha_imu_online = col_any(df, ["alpha_imu_online"], n)
+    alpha_linear_online = col_any(df, ["alpha_linear_online"], n)
+    alpha_imu_offline = offline_smooth(alpha_from_imu_gyro_diff, win=max(11, args.alpha_smooth * 5))
+    alpha_linear_offline = offline_smooth(alpha_from_linear_accel, win=max(11, args.alpha_smooth * 5))
+
+    pwm_hw = col_any(df, ["pwm_hw", "hw_pwm"], n)
+    i_raw = col_any(df, ["ina_current_raw_mA", "current_mA"], n)
+    i_offset = col_any(df, ["ina_current_offset_mA"], n)
+    if not np.isfinite(i_offset).any():
+        offset_fallback = 26.0
+        if meta is not None and isinstance(meta.get("warmup"), dict) and meta["warmup"].get("current_offset_mA") is not None:
+            try:
+                offset_fallback = float(meta["warmup"]["current_offset_mA"])
+            except (TypeError, ValueError):
+                offset_fallback = 26.0
+        i_offset = np.full(n, offset_fallback, dtype=float)
+    i_corr = col_any(df, ["ina_current_corr_mA"], n)
+    if not np.isfinite(i_corr).any():
+        i_corr = i_raw - i_offset
+    i_signed = col_any(df, ["ina_current_signed_mA"], n)
+    if not np.isfinite(i_signed).any():
+        i_signed = np.sign(pwm_hw) * i_corr
+    i_online = col_any(df, ["ina_current_signed_online_mA"], n)
+    if not np.isfinite(i_online).any():
+        i_online = moving_average(i_signed, max(3, args.alpha_smooth))
+    i_offline = offline_smooth(i_signed, win=max(11, args.alpha_smooth * 5))
+
+    # Quantitative candidate evaluation
+    rest_mask = np.abs(pwm_hw) < max(5.0, 0.05 * np.nanmax(np.abs(pwm_hw)) if np.isfinite(pwm_hw).any() else 5.0)
+    theta_candidates = {
+        "theta_imu_raw_unwrapped": theta_imu_raw,
+        "theta_imu_online_unwrapped": theta_imu_online,
+        "theta_imu_offline_unwrapped": theta_imu_offline,
+        "theta_encoder_raw_unwrapped": theta_encoder_raw,
+        "theta_encoder_online_unwrapped": theta_encoder_online,
+        "theta_encoder_offline_unwrapped": theta_encoder_offline,
+    }
+    theta_rows, theta_winner = evaluate_candidate_set(theta_candidates, t, "theta", rest_mask, theta_sim if np.isfinite(theta_sim).any() else None)
+    omega_candidates = {
+        "omega_imu_direct": omega_imu_direct,
+        "omega_from_theta_imu_diff": omega_from_theta_imu_diff,
+        "omega_imu_online_filtered": omega_imu_online,
+        "omega_imu_offline_filtered": omega_imu_offline,
+        "omega_encoder_diff": omega_encoder_diff,
+        "omega_encoder_online_filtered": omega_encoder_online,
+        "omega_encoder_offline_filtered": omega_encoder_offline,
+    }
+    omega_ref = safe_gradient(theta_candidates.get(theta_winner, theta_imu_raw), t) if theta_winner else None
+    omega_rows, omega_winner = evaluate_candidate_set(omega_candidates, t, "omega", rest_mask, omega_ref)
+    alpha_candidates = {
+        "alpha_from_imu_gyro_diff": alpha_from_imu_gyro_diff,
+        "alpha_from_omega_imu_diff": alpha_from_omega_imu_diff,
+        "alpha_from_linear_accel": alpha_from_linear_accel,
+        "alpha_from_encoder_diff": alpha_from_encoder_diff,
+        "alpha_from_imu_gyro_diff_online_filtered": alpha_imu_online,
+        "alpha_from_linear_accel_online_filtered": alpha_linear_online,
+        "alpha_from_imu_gyro_diff_offline_filtered": alpha_imu_offline,
+        "alpha_from_linear_accel_offline_filtered": alpha_linear_offline,
+    }
+    omega_best = omega_candidates.get(omega_winner, omega_imu_direct)
+    alpha_ref = safe_gradient(omega_best, t)
+    alpha_rows, alpha_winner = evaluate_candidate_set(alpha_candidates, t, "alpha", rest_mask, alpha_ref)
+
+    # canonical winners for downstream usage in this script
+    theta_eval = theta_candidates.get(theta_winner, theta_imu_raw)
+    omega_eval = omega_candidates.get(omega_winner, omega_imu_direct)
+    alpha_eval = alpha_candidates.get(alpha_winner, alpha_from_imu_gyro_diff)
 
     # Explicit raw/online/offline separation for analysis overlays.
     theta_raw = col_any(df, ["theta_imu"], n)
@@ -312,11 +466,12 @@ def plot_simulation(df, csv_path: str, args):
     ax_alpha = axes[2, 1]
 
     ax_cmd.plot(t_cmd, cmd_u, label="cmd_u")
-    ax_cmd.plot(t, hw_pwm, label="pwm_hw")
+    ax_cmd.plot(t, pwm_hw, label="pwm_hw")
     ax_cmd2 = ax_cmd.twinx()
-    ax_cmd2.plot(t, current_raw, label="I_raw_mA", color="tab:red", alpha=0.4)
-    ax_cmd2.plot(t, current_online, label="I_online_mA", color="tab:orange", alpha=0.9)
-    ax_cmd2.plot(t, current_offline, label="I_offline_mA", color="tab:brown", alpha=0.9)
+    ax_cmd2.plot(t, i_raw, label="I_raw_mA", color="tab:red", alpha=0.35)
+    ax_cmd2.plot(t, i_corr, label="I_offset_corrected_mA", color="tab:pink", alpha=0.8)
+    ax_cmd2.plot(t, i_online, label="I_online_filtered_mA", color="tab:orange", alpha=0.9)
+    ax_cmd2.plot(t, i_offline, label="I_offline_filtered_mA", color="tab:brown", alpha=0.9)
     ax_cmd.grid(True)
     lines1, labels1 = ax_cmd.get_legend_handles_labels()
     lines2, labels2 = ax_cmd2.get_legend_handles_labels()
@@ -325,58 +480,39 @@ def plot_simulation(df, csv_path: str, args):
     ax_cmd.set_title("Command / PWM / Current")
     ax_cmd2.set_ylabel("current [mA]")
 
-    ax_theta.plot(t, theta_sim, label="theta sim")
-    if np.isfinite(theta_raw).any():
-        ax_theta.plot(t, theta_raw, label="theta_raw", alpha=0.35)
-    if np.isfinite(theta_online).any():
-        ax_theta.plot(t, theta_online, label="theta_online", alpha=0.9)
-    if np.isfinite(theta_offline).any():
-        ax_theta.plot(t, theta_offline, label="theta_offline", alpha=0.9)
-    if np.isfinite(theta_real).any():
-        ax_theta.plot(t, theta_real, label="theta real")
+    ax_theta.plot(t, theta_sim, label="theta_sim")
+    for name, sig in theta_candidates.items():
+        if np.isfinite(sig).any():
+            ax_theta.plot(t, sig, label=name, alpha=0.75 if name == theta_winner else 0.35)
     ax_theta.grid(True)
     ax_theta.legend()
     ax_theta.set_xlabel("time [s]")
     ax_theta.set_ylabel("rad")
     ax_theta.set_title("Theta")
 
-    ax_omega.plot(t, omega_sim, label="omega sim")
-    if np.isfinite(omega_raw).any():
-        ax_omega.plot(t, omega_raw, label="omega_raw", alpha=0.35)
-    if np.isfinite(omega_online).any():
-        ax_omega.plot(t, omega_online, label="omega_online", alpha=0.9)
-    if np.isfinite(omega_offline).any():
-        ax_omega.plot(t, omega_offline, label="omega_offline", alpha=0.9)
-    if np.isfinite(omega_real).any():
-        ax_omega.plot(t, omega_real, label="omega real")
+    ax_omega.plot(t, omega_sim, label="omega_sim")
+    for name, sig in omega_candidates.items():
+        if np.isfinite(sig).any():
+            ax_omega.plot(t, sig, label=name, alpha=0.75 if name == omega_winner else 0.35)
     ax_omega.grid(True)
     ax_omega.legend()
     ax_omega.set_xlabel("time [s]")
     ax_omega.set_ylabel("rad/s")
     ax_omega.set_title("Omega")
 
-    ax_alpha.plot(t, alpha_sim, label="alpha sim")
-    if np.isfinite(alpha_raw).any():
-        ax_alpha.plot(t, alpha_raw, label="alpha_raw", alpha=0.35)
-    if np.isfinite(alpha_online).any():
-        ax_alpha.plot(t, alpha_online, label="alpha_online", alpha=0.9)
-    if np.isfinite(alpha_offline).any():
-        ax_alpha.plot(t, alpha_offline, label="alpha_offline", alpha=0.9)
-    if np.isfinite(alpha_real).any():
-        ax_alpha.plot(t, alpha_real, label="alpha real")
+    ax_alpha.plot(t, alpha_sim, label="alpha_sim")
+    for name, sig in alpha_candidates.items():
+        if np.isfinite(sig).any():
+            ax_alpha.plot(t, sig, label=name, alpha=0.75 if name == alpha_winner else 0.35)
     ax_alpha.grid(True)
     ax_alpha.legend()
     ax_alpha.set_xlabel("time [s]")
     ax_alpha.set_ylabel("rad/s^2")
     ax_alpha.set_title("Alpha")
 
-    if args.recompute_real_derivatives and np.isfinite(theta_real).any():
-        omega_real = moving_average(safe_gradient(theta_real, t), args.real_derivative_smooth)
-        alpha_real = estimate_filtered_alpha_from_omega(omega_real, t=t)
-
-    e_theta = theta_sim - theta_real if np.isfinite(theta_real).any() else np.full(n, np.nan)
-    e_omega = omega_sim - omega_real if np.isfinite(omega_real).any() else np.full(n, np.nan)
-    e_alpha = alpha_sim - alpha_real if np.isfinite(alpha_real).any() else np.full(n, np.nan)
+    e_theta = theta_sim - theta_eval if np.isfinite(theta_eval).any() else np.full(n, np.nan)
+    e_omega = omega_sim - omega_eval if np.isfinite(omega_eval).any() else np.full(n, np.nan)
+    e_alpha = alpha_sim - alpha_eval if np.isfinite(alpha_eval).any() else np.full(n, np.nan)
     ignore_mask = t < max(args.ignore_error_initial_sec, 0.0)
     e_theta[ignore_mask] = np.nan
     e_omega[ignore_mask] = np.nan
@@ -410,6 +546,116 @@ def plot_simulation(df, csv_path: str, args):
     ax_torque.set_xlabel("time [s]")
     ax_torque.set_ylabel("N·m")
     ax_torque.set_title("Torque analysis")
+
+    # Current audit / sign-mismatch diagnostics
+    excited = np.abs(pwm_hw) > max(8.0, 0.1 * np.nanmax(np.abs(pwm_hw)) if np.isfinite(pwm_hw).any() else 8.0)
+    transition = np.abs(safe_gradient(pwm_hw, t)) > (0.2 * np.nanmax(np.abs(safe_gradient(pwm_hw, t))) if np.isfinite(pwm_hw).any() else 0.0)
+    high_pwm = np.abs(pwm_hw) > max(20.0, 0.5 * np.nanmax(np.abs(pwm_hw)) if np.isfinite(pwm_hw).any() else 20.0)
+    mask_no_transition = excited & (~transition)
+
+    def _agreement(cur):
+        m = np.isfinite(cur) & np.isfinite(pwm_hw) & excited
+        if np.sum(m) == 0:
+            return float("nan")
+        return float(np.mean(np.sign(cur[m]) == np.sign(pwm_hw[m])))
+
+    def _agreement_mask(cur, m0):
+        m = np.isfinite(cur) & np.isfinite(pwm_hw) & m0
+        if np.sum(m) == 0:
+            return float("nan")
+        return float(np.mean(np.sign(cur[m]) == np.sign(pwm_hw[m])))
+
+    sign_diag = {
+        "agreement_excited_raw": _agreement(i_raw),
+        "agreement_excited_corr": _agreement(i_corr),
+        "agreement_excited_filtered": _agreement(i_online),
+        "agreement_no_transition_filtered": _agreement_mask(i_online, mask_no_transition),
+        "agreement_high_pwm_filtered": _agreement_mask(i_online, high_pwm),
+    }
+
+    # lag estimate by xcorr on excited segment
+    lag_samples = 0
+    if np.sum(excited) > 32:
+        x = (pwm_hw[excited] - np.nanmean(pwm_hw[excited]))
+        y = (i_online[excited] - np.nanmean(i_online[excited]))
+        cc = np.correlate(x, y, mode="full")
+        lag_samples = int(np.argmax(cc) - (len(x) - 1))
+    dt_med = np.nanmedian(np.diff(t)) if len(t) > 1 else np.nan
+    sign_diag["xcorr_lag_samples"] = lag_samples
+    sign_diag["xcorr_lag_sec"] = float(lag_samples * dt_med) if np.isfinite(dt_med) else float("nan")
+    rest_after_corr = i_corr[rest_mask & np.isfinite(i_corr)]
+    sign_diag["rest_mean_corr_mA"] = float(np.nanmean(rest_after_corr)) if len(rest_after_corr) else float("nan")
+
+    mismatch_state = "inconclusive"
+    a_nt = sign_diag["agreement_no_transition_filtered"]
+    a_hp = sign_diag["agreement_high_pwm_filtered"]
+    if np.isfinite(a_nt) and np.isfinite(a_hp):
+        if a_nt < 0.35 and a_hp < 0.35:
+            mismatch_state = "likely sign convention / wiring inversion or bus-current semantics mismatch"
+        elif a_nt > 0.7:
+            mismatch_state = "likely normal with transition lag"
+        else:
+            mismatch_state = "likely preprocessing/sign mismatch issue"
+    sign_diag["classification"] = mismatch_state
+
+    # Save candidate/evaluation artifacts
+    out_base = os.path.splitext(csv_path)[0]
+    metrics_rows = theta_rows + omega_rows + alpha_rows
+    if pd is not None and metrics_rows:
+        pd.DataFrame(metrics_rows).to_csv(out_base + ".signal_candidate_metrics.csv", index=False)
+    summary = {
+        "theta_winner": theta_winner,
+        "omega_winner": omega_winner,
+        "alpha_winner": alpha_winner,
+        "current_offset_applied_mA": float(np.nanmedian(i_offset[np.isfinite(i_offset)])) if np.isfinite(i_offset).any() else 0.0,
+        "current_sign_diagnostics": sign_diag,
+    }
+    with open(out_base + ".signal_winner_summary.json", "w", encoding="utf-8") as fsum:
+        json.dump(summary, fsum, indent=2)
+    if pd is not None:
+        df_aug = df.copy()
+        df_aug["theta_winner"] = theta_eval
+        df_aug["omega_winner"] = omega_eval
+        df_aug["alpha_winner"] = alpha_eval
+        df_aug["ina_current_signed_eval_mA"] = i_online
+        df_aug.to_csv(out_base + ".with_winners.csv", index=False)
+
+    # Quantity-specific candidate plots
+    for qname, qcand in [("theta", theta_candidates), ("omega", omega_candidates), ("alpha", alpha_candidates)]:
+        fig_q, ax_q = plt.subplots(1, 1, figsize=(12, 4))
+        for cname, sig in qcand.items():
+            if np.isfinite(sig).any():
+                ax_q.plot(t, sig, label=cname, alpha=0.8 if cname == summary.get(f"{qname}_winner") else 0.35)
+        ax_q.set_title(f"{qname.capitalize()} candidates")
+        ax_q.set_xlabel("time [s]")
+        ax_q.grid(True, alpha=0.3)
+        ax_q.legend(loc="upper right", fontsize=8, ncol=2)
+        fig_q.tight_layout()
+        fig_q.savefig(out_base + f".{qname}_candidates.png", dpi=130)
+        plt.close(fig_q)
+
+    fig_cur, ax_cur = plt.subplots(2, 1, figsize=(13, 6), sharex=True)
+    ax_cur[0].plot(t, pwm_hw, label="pwm_hw")
+    ax_cur[0].plot(t, i_raw, label="I_raw_mA", alpha=0.45)
+    ax_cur[0].plot(t, i_corr, label="I_offset_corrected_mA", alpha=0.8)
+    ax_cur[0].plot(t, i_online, label="I_online_filtered_mA", alpha=0.9)
+    ax_cur[0].legend(loc="upper right")
+    ax_cur[0].grid(True, alpha=0.3)
+    ax_cur[1].plot(t, np.sign(pwm_hw), label="sign(pwm_hw)")
+    ax_cur[1].plot(t, np.sign(i_online), label="sign(I_online)")
+    ax_cur[1].set_title(f"sign-agreement(no-transition={sign_diag['agreement_no_transition_filtered']:.3f}, high-pwm={sign_diag['agreement_high_pwm_filtered']:.3f})")
+    ax_cur[1].legend(loc="upper right")
+    ax_cur[1].grid(True, alpha=0.3)
+    ax_cur[1].set_xlabel("time [s]")
+    fig_cur.tight_layout()
+    fig_cur.savefig(out_base + ".current_audit.png", dpi=130)
+    plt.close(fig_cur)
+
+    print(f"winner(theta): {theta_winner}")
+    print(f"winner(omega): {omega_winner}")
+    print(f"winner(alpha): {alpha_winner}")
+    print(f"current offset applied [mA]: {summary['current_offset_applied_mA']:.3f}")
+    print(f"current sign classification: {mismatch_state}")
 
     fig.tight_layout()
     plt.show()
