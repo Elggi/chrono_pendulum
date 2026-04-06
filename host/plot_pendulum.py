@@ -83,34 +83,6 @@ def col_any(df, keys, n_default=None):
     return np.full(n_default, np.nan, dtype=float)
 
 
-def zero_start(series: np.ndarray, t: np.ndarray, window_sec: float = 0.4, force_first_zero: bool = True) -> np.ndarray:
-    y = np.asarray(series, dtype=float).copy()
-    if y.size == 0:
-        return y
-    finite = np.isfinite(y)
-    if not finite.any():
-        return y
-    tt = np.asarray(t, dtype=float)
-    if tt.size != y.size or not np.isfinite(tt).any():
-        baseline = float(y[np.where(finite)[0][0]])
-        y = y - baseline
-        if force_first_zero:
-            i0 = int(np.where(np.isfinite(y))[0][0])
-            y = y - float(y[i0])
-        return y
-    t0 = float(tt[np.where(np.isfinite(tt))[0][0]])
-    mask = finite & np.isfinite(tt) & ((tt - t0) <= max(float(window_sec), 1e-3))
-    if not mask.any():
-        baseline = float(y[np.where(finite)[0][0]])
-    else:
-        baseline = float(np.nanmedian(y[mask]))
-    y = y - baseline
-    if force_first_zero:
-        i0 = int(np.where(np.isfinite(y))[0][0])
-        y = y - float(y[i0])
-    return y
-
-
 def _print_available(df):
     print("[available columns]")
     for c in df.columns:
@@ -133,19 +105,16 @@ def plot_simulation(df, csv_path: str):
     cmd_u = col_any(df, ["cmd_u_raw", "cmd_u"], n)
     pwm_hw = col_any(df, ["pwm_hw", "hw_pwm"], n)
     i_corr = col_any(df, ["ina_current_corr_mA", "I_offset_corrected_mA"], n)
-    i_filtered = col_any(df, ["ina_current_signed_online_mA", "current_offline_filtered"], n)
+    i_filtered = col_any(df, ["ina_current_signed_online_mA", "I_filtered_mA", "current_offline_filtered"], n)
 
     theta_sim = col_any(df, ["theta"], n)
     omega_sim = col_any(df, ["omega"], n)
-    theta_imu_raw = col_any(df, ["theta_imu", "theta_imu_raw_unwrapped"], n)
-    theta_imu_f = col_any(df, ["theta_imu_online", "theta_imu_filtered_unwrapped", "theta_winner"], n)
-    omega_imu_raw = col_any(df, ["omega_imu", "omega_imu_raw"], n)
-    omega_imu_f = col_any(df, ["omega_imu_online", "omega_imu_filtered", "omega_winner"], n)
-    alpha_lin = col_any(df, ["alpha_linear", "alpha_from_linear_accel"], n)
+    theta_imu_raw = col_any(df, ["theta_imu", "theta_imu_filtered_unwrapped"], n)
+    theta_imu_f = col_any(df, ["theta_imu_online", "theta_imu_filtered_unwrapped"], n)
+    omega_imu_raw = col_any(df, ["omega_imu", "omega_imu_filtered"], n)
+    omega_imu_f = col_any(df, ["omega_imu_online", "omega_imu_filtered"], n)
+    alpha_lin = col_any(df, ["alpha_linear", "alpha_from_linear_accel_filtered"], n)
     alpha_lin_f = col_any(df, ["alpha_linear_online", "alpha_from_linear_accel_filtered"], n)
-    # Strengthen offset handling so IMU theta traces start from 0 rad like theta_sim.
-    theta_imu_raw = zero_start(theta_imu_raw, t)
-    theta_imu_f = zero_start(theta_imu_f, t)
 
     print(f"csv: {csv_path}")
     if meta is not None and isinstance(meta.get("warmup"), dict):
