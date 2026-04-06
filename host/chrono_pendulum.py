@@ -518,6 +518,13 @@ def compute_theta_wrapped_from_imu_snapshot(snap: dict, imu_R0: np.ndarray | Non
     return theta_wrapped, R_rel, imu_R0
 
 
+def gravity_world0_from_imu_anchor(imu_R0: np.ndarray | None, gravity_mps2: float) -> np.ndarray:
+    g_world = np.array([0.0, -float(gravity_mps2), 0.0], dtype=float)
+    if imu_R0 is None:
+        return g_world
+    return imu_R0.T @ g_world
+
+
 def make_status_line(host_mode: bool, cmd_u_raw: float, cmd_u_used: float, hw_pwm: float, current_mA: float, mode_name: str,
                      cfg: BridgeConfig):
     if host_mode:
@@ -758,6 +765,8 @@ def main():
             f"radius_m={cfg.radius_m:.6f}, gravity_mps2={cfg.gravity:.6f}, "
             f"gravity_compensation={'on' if gravity_comp_enabled else 'off'}"
         )
+        g0 = gravity_world0_from_imu_anchor(imu_R0=imu_R0, gravity_mps2=cfg.gravity)
+        print(f"[INFO] gravity vector in world0 frame (initial estimate): [{g0[0]:.4f}, {g0[1]:.4f}, {g0[2]:.4f}] m/s^2")
 
         try:
             while (now_wall() - wall_t0) < run_limit_sec:
@@ -811,8 +820,8 @@ def main():
                         acc_body = np.asarray(snap["imu_a"], dtype=float)
                         acc_world0 = R_rel @ acc_body if R_rel is not None else acc_body
                         if gravity_comp_enabled:
-                            acc_world0 = acc_world0 - np.array([0.0, -cfg.gravity, 0.0], dtype=float)
-                        tangent_warm = np.array([math.cos(theta_warm), math.sin(theta_warm), 0.0], dtype=float)
+                            acc_world0 = acc_world0 - gravity_world0_from_imu_anchor(imu_R0=imu_R0, gravity_mps2=cfg.gravity)
+                        tangent_warm = np.array([-math.sin(theta_warm), math.cos(theta_warm), 0.0], dtype=float)
                         a_t_warm = float(np.dot(acc_world0, tangent_warm))
                         if np.isfinite(cfg.radius_m) and cfg.radius_m > 1e-6:
                             warmup_alpha_linear_samples.append(float(a_t_warm / float(cfg.radius_m)))
@@ -983,9 +992,9 @@ def main():
                     acc_body = np.asarray(snap["imu_a"], dtype=float)
                     acc_world0 = (R_rel @ acc_body) if R_rel is not None else acc_body
                     if gravity_comp_enabled:
-                        acc_world0 = acc_world0 - np.array([0.0, -cfg.gravity, 0.0], dtype=float)
-                    theta_ref = theta_imu
-                    tangent = np.array([math.cos(theta_ref), math.sin(theta_ref), 0.0], dtype=float)
+                        acc_world0 = acc_world0 - gravity_world0_from_imu_anchor(imu_R0=imu_R0, gravity_mps2=cfg.gravity)
+                    theta_ref_abs = float(theta_meas_wrapped)
+                    tangent = np.array([-math.sin(theta_ref_abs), math.cos(theta_ref_abs), 0.0], dtype=float)
                     a_t = float(np.dot(acc_world0, tangent))
                     alpha_linear = float(a_t / float(cfg.radius_m))
                 alpha_linear = float(alpha_linear - alpha_linear_offset)
