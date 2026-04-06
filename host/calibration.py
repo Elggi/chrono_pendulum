@@ -20,7 +20,7 @@ import threading
 import time
 import tty
 from dataclasses import dataclass
-from statistics import mean
+from statistics import mean, median, pstdev
 from collections import deque
 
 import numpy as np
@@ -464,6 +464,13 @@ def run_calibration(args) -> None:
 
     cpr_trials, mean_cpr, r_trials, mean_r, g_eff, gravity_sample_count = _collect_cpr_and_r_from_imu(args)
 
+    current_stats = estimate_current_offset(
+        current_topic=args.current_topic,
+        pwm_topic=args.hw_pwm_topic,
+        sample_sec=args.current_sample_sec,
+        pwm_zero_threshold=args.pwm_zero_threshold,
+    )
+
     result = {
         "created_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "method": "manual_rotation_with_orientation",
@@ -474,9 +481,11 @@ def run_calibration(args) -> None:
             "trial_count_cpr": len(cpr_trials),
             "trial_count_r": len(r_trials),
             "trial_count_g": gravity_sample_count,
+            "ina_current_offset_mA": current_stats["median"],
         },
         "cpr_trials": cpr_trials,
         "radius_trials": r_trials,
+        "ina_current_offset": current_stats,
     }
 
     out_dir = os.path.dirname(args.output_json)
@@ -494,6 +503,52 @@ def run_calibration(args) -> None:
     else:
         print("mean g_eff    : n/a (insufficient low-gyro samples)")
     print(f"JSON saved    : {args.output_json}")
+    print(
+        "ina offset    : "
+        f"median={current_stats['median']:.6f} mA, mean={current_stats['mean']:.6f} mA, "
+        f"std={current_stats['std']:.6f} mA, n={current_stats['sample_count']}"
+    )
+
+
+class CurrentOffsetNode(Node):
+    def __init__(self, current_topic: str, pwm_topic: str):
+        super().__init__("current_offset_collector")
+        self.current_samples = []
+        self.latest_pwm = 0.0
+        self.create_subscription(Float32, current_topic, self.cb_current, 20)
+        self.create_subscription(Float32, pwm_topic, self.cb_pwm, 20)
+
+    def cb_current(self, msg: Float32):
+        self.current_samples.append(float(msg.data))
+
+    def cb_pwm(self, msg: Float32):
+        self.latest_pwm = float(msg.data)
+
+
+def estimate_current_offset(current_topic: str, pwm_topic: str, sample_sec: float, pwm_zero_threshold: float) -> dict:
+    if not rclpy.ok():
+        rclpy.init()
+    node = CurrentOffsetNode(current_topic=current_topic, pwm_topic=pwm_topic)
+    t0 = time.time()
+    accepted = []
+    try:
+        while time.time() - t0 < max(0.5, float(sample_sec)):
+            rclpy.spin_once(node, timeout_sec=0.02)
+            while node.current_samples:
+                cur = node.current_samples.pop(0)
+                if abs(node.latest_pwm) <= abs(float(pwm_zero_threshold)):
+                    accepted.append(float(cur))
+    finally:
+        node.destroy_node()
+    if not accepted:
+        accepted = [0.0]
+    return {
+        "ina_current_offset_mA": float(median(accepted)),
+        "sample_count": int(len(accepted)),
+        "mean": float(mean(accepted)),
+        "median": float(median(accepted)),
+        "std": float(pstdev(accepted)) if len(accepted) > 1 else 0.0,
+    }
 
 
 def build_argparser():
@@ -503,6 +558,10 @@ def build_argparser():
     ap.add_argument("--output-json", default="./run_logs/calibration_latest.json")
     ap.add_argument("--imu-wait-sec", type=float, default=5.0)
     ap.add_argument("--no-imu-viewer", action="store_true")
+    ap.add_argument("--current-topic", default="/ina219/current_ma")
+    ap.add_argument("--hw-pwm-topic", default="/hw/pwm_applied")
+    ap.add_argument("--current-sample-sec", type=float, default=3.0)
+    ap.add_argument("--pwm-zero-threshold", type=float, default=1.0)
     return ap
 
 
