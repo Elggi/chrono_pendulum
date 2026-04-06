@@ -139,3 +139,37 @@ class RobustSignalFilter:
             alpha = dt / (self.lpf_tau_sec + dt)
             self.lpf_state = (1.0 - alpha) * self.lpf_state + alpha * cleaned
         return float(self.lpf_state)
+
+
+class CausalIIRFilter:
+    """Simple real-time 1st-order causal IIR filter."""
+
+    def __init__(self, alpha: float = 0.18):
+        self.alpha = float(min(max(alpha, 1e-4), 1.0))
+        self.state = None
+
+    def reset(self, value: float | None = 0.0):
+        if value is None:
+            self.state = None
+        else:
+            self.state = float(value)
+
+    def update(self, value: float) -> float:
+        v = float(value)
+        if self.state is None or not np.isfinite(self.state):
+            self.state = v
+        else:
+            self.state = (1.0 - self.alpha) * self.state + self.alpha * v
+        return float(self.state)
+
+
+def causal_iir_filter_series(values: np.ndarray, alpha: float = 0.18) -> np.ndarray:
+    x = _sanitize_series(np.asarray(values, dtype=float))
+    y = np.zeros_like(x, dtype=float)
+    if x.size == 0:
+        return y
+    flt = CausalIIRFilter(alpha=alpha)
+    flt.reset(float(x[0]))
+    for i, v in enumerate(x):
+        y[i] = flt.update(float(v))
+    return y
