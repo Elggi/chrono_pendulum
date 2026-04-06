@@ -7,11 +7,6 @@
 - `ina_current_raw_mA`, `ina_bus_voltage_v`, `ina_power_mw`
 - `pwm_hw` (`/hw/pwm_applied`)
 
-## Legacy alias cleanup policy
-- `theta_real`, `omega_real`, `alpha_real` are treated as **legacy aliases** and are not used as canonical inputs for new evaluation/selection.
-- Canonical candidates are explicit provenance names (IMU/encoder/direct/derivative/filtered).
-- Downstream fitting (`staged_pendulum_calibration.py`) now prefers explicit candidate columns.
-
 ## Current processing
 - `ina_current_corr_mA = ina_current_raw_mA - ina_current_offset_mA`
 - `ina_current_signed_mA = sign(pwm_hw) * ina_current_corr_mA`

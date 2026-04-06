@@ -423,6 +423,20 @@ def plot_simulation(df, csv_path: str, args):
     omega_eval = omega_candidates.get(omega_winner, omega_imu_direct)
     alpha_eval = alpha_candidates.get(alpha_winner, alpha_from_imu_gyro_diff)
 
+    # Explicit raw/online/offline separation for analysis overlays.
+    theta_raw = col_any(df, ["theta_imu"], n)
+    theta_online = col_any(df, ["theta_imu_online"], n)
+    theta_offline = offline_smooth(theta_raw, win=max(11, args.real_theta_smooth * 5))
+    omega_raw = col_any(df, ["omega_imu"], n)
+    omega_online = col_any(df, ["omega_imu_online"], n)
+    omega_offline = offline_smooth(omega_raw, win=max(11, args.alpha_smooth * 5))
+    alpha_raw = col_any(df, ["alpha_imu"], n)
+    alpha_online = col_any(df, ["alpha_imu_online"], n)
+    alpha_offline = offline_smooth(alpha_raw, win=max(11, args.alpha_smooth * 5))
+    current_raw = col_any(df, ["ina_current_raw_mA", "current_mA"], n)
+    current_online = col_any(df, ["ina_current_signed_online_mA"], n)
+    current_offline = offline_smooth(col_any(df, ["ina_current_signed_mA"], n), win=max(11, args.alpha_smooth * 5))
+
     t_cmd = t.copy()
     if args.apply_cmd_delay_from_meta and meta is not None and meta.get("estimated_delay_ms_final") is not None:
         t_cmd = t + 0.001 * float(meta["estimated_delay_ms_final"])
