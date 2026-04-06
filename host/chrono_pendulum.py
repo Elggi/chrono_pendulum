@@ -17,6 +17,7 @@ import shutil
 import signal
 from dataclasses import dataclass, asdict
 from collections import deque
+from enum import Enum
 
 import numpy as np
 
@@ -39,6 +40,40 @@ from chrono_core.signal_filter import estimate_filtered_alpha_from_omega
 # ============================================================
 # utility
 # ============================================================
+
+
+class RunState(str, Enum):
+    STATE_INIT = "STATE_INIT"
+    STATE_WARMUP = "STATE_WARMUP"
+    STATE_RUN = "STATE_RUN"
+
+
+def compute_theta_offset(theta_array: np.ndarray) -> float:
+    """Robust theta offset from warmup samples [rad]."""
+    x = np.asarray(theta_array, dtype=float)
+    finite = np.isfinite(x)
+    if np.sum(finite) < 4:
+        return 0.0
+    xu = np.unwrap(x[finite])
+    return float(np.median(xu))
+
+
+def compute_current_offset(
+    current_array: np.ndarray,
+    pwm_array: np.ndarray,
+    omega_array: np.ndarray,
+    pwm_threshold: float = 3.0,
+    omega_threshold: float = 0.8,
+    fallback_mA: float = 26.0,
+) -> tuple[float, int]:
+    cur = np.asarray(current_array, dtype=float)
+    pwm = np.asarray(pwm_array, dtype=float)
+    omg = np.asarray(omega_array, dtype=float)
+    m = np.isfinite(cur) & np.isfinite(pwm) & np.isfinite(omg)
+    m &= (np.abs(pwm) < abs(float(pwm_threshold))) & (np.abs(omg) < abs(float(omega_threshold)))
+    if int(np.sum(m)) < 12:
+        return float(fallback_mA), int(np.sum(m))
+    return float(np.median(cur[m])), int(np.sum(m))
 
 class KeyboardReader:
     def __init__(self):
@@ -235,6 +270,9 @@ class SharedROSState:
         self.lock = threading.Lock()
         self.cmd_u = 0.0
         self.hw_pwm = 0.0
+        self.current_mA = 0.0
+        self.ina_bus_voltage_v = 0.0
+        self.ina_power_mw = 0.0
         self.hw_enc = 0.0
         self.hw_arduino_ms = 0.0
         self.imu_q = np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
@@ -251,6 +289,9 @@ class SharedROSState:
             return {
                 "cmd_u": self.cmd_u,
                 "hw_pwm": self.hw_pwm,
+                "current_mA": self.current_mA,
+                "ina_bus_voltage_v": self.ina_bus_voltage_v,
+                "ina_power_mw": self.ina_power_mw,
                 "hw_enc": self.hw_enc,
                 "hw_arduino_ms": self.hw_arduino_ms,
                 "imu_q": self.imu_q.copy(),
@@ -272,6 +313,9 @@ class PendulumROSNode(Node):
 
         self.create_subscription(Float32, cfg.topic_cmd_u, self.cb_cmd_u, 10)
         self.create_subscription(Float32, cfg.topic_hw_pwm, self.cb_hw_pwm, 10)
+        self.create_subscription(Float32, cfg.topic_hw_current_ma, self.cb_hw_current_ma, 10)
+        self.create_subscription(Float32, cfg.topic_hw_bus_voltage_v, self.cb_hw_bus_voltage_v, 10)
+        self.create_subscription(Float32, cfg.topic_hw_power_mw, self.cb_hw_power_mw, 10)
         self.create_subscription(Float32, cfg.topic_hw_enc, self.cb_hw_enc, 10)
         self.create_subscription(Float32, cfg.topic_hw_arduino_ms, self.cb_hw_ms, 10)
         self.create_subscription(Imu, cfg.topic_hw_imu, self.cb_hw_imu, 10)
@@ -300,6 +344,19 @@ class PendulumROSNode(Node):
         with self.shared.lock:
             self.shared.hw_enc = float(msg.data)
             self.shared.last_hw_enc_wall = now_wall()
+
+    def cb_hw_current_ma(self, msg: Float32):
+        with self.shared.lock:
+            self.shared.current_mA = float(msg.data)
+            self.shared.last_ina_wall = now_wall()
+
+    def cb_hw_bus_voltage_v(self, msg: Float32):
+        with self.shared.lock:
+            self.shared.ina_bus_voltage_v = float(msg.data)
+
+    def cb_hw_power_mw(self, msg: Float32):
+        with self.shared.lock:
+            self.shared.ina_power_mw = float(msg.data)
 
     def cb_hw_ms(self, msg: Float32):
         with self.shared.lock:
@@ -448,7 +505,7 @@ def quat_to_rotmat(w: float, x: float, y: float, z: float):
     )
 
 
-def make_status_line(host_mode: bool, cmd_u_raw: float, cmd_u_used: float, hw_pwm: float, mode_name: str,
+def make_status_line(host_mode: bool, cmd_u_raw: float, cmd_u_used: float, hw_pwm: float, current_mA: float, mode_name: str,
                      cfg: BridgeConfig):
     if host_mode:
         return (
@@ -456,7 +513,7 @@ def make_status_line(host_mode: bool, cmd_u_raw: float, cmd_u_used: float, hw_pw
             f"step: {cfg.pwm_step:4.1f} | max: {cfg.pwm_limit:5.1f}"
         )
     return (
-        f"cmd_u: {cmd_u_used:6.1f} | hw_pwm: {hw_pwm:6.1f} | mode: external"
+        f"cmd_u: {cmd_u_used:6.1f} | hw_pwm: {hw_pwm:6.1f} | I[mA]: {current_mA:7.1f} | mode: external"
     )
 
 
@@ -525,6 +582,7 @@ def main():
         args.host_control = False
 
     cfg = BridgeConfig()
+    imu_sign = -1.0  # fixed CW/CCW convention alignment against encoder
     cfg.enable_render = not args.headless
     cfg.enable_imu_viewer = not args.no_imu_viewer
     cfg.step = args.step
@@ -549,6 +607,16 @@ def main():
         with open(args.parameter_json, "r", encoding="utf-8") as pf:
             param_data = json.load(pf)
         init_params = build_init_params(cfg, calibration=calib, parameter_json=param_data)
+    current_offset_mA = 0.0
+    if isinstance(calib, dict):
+        sm = calib.get("summary", {}) if isinstance(calib.get("summary"), dict) else {}
+        for key in ("ina_current_offset_mA", "current_offset_mA"):
+            if key in sm:
+                try:
+                    current_offset_mA = float(sm[key])
+                except (TypeError, ValueError):
+                    current_offset_mA = 0.0
+                break
     radius_measured = extract_radius_from_json(args.radius_json)
     if radius_measured is not None:
         cfg.radius_m = float(radius_measured)
@@ -604,15 +672,44 @@ def main():
         wr.writerow(PENDULUM_LOG_COLUMNS)
 
         wall_t0 = now_wall()
+        wall_run_t0 = None
         omega_prev = model.get_omega()
         t_prev = 0.0
         enc_ref = None
         enc_prev = None
         theta_real_prev = None
+        theta_imu_prev = None
+        theta_encoder_prev = None
+        omega_imu_prev = 0.0
+        omega_encoder_prev = 0.0
         warmup_sec = 1.0
+        run_state = RunState.STATE_INIT
         imu_R0 = None
         real_omega_hist = deque(maxlen=401)
         real_time_hist = deque(maxlen=401)
+        dt_history = []
+        prev_wall_elapsed = None
+        online_alpha = 0.18
+        online_state = {
+            "theta_imu": 0.0,
+            "theta_encoder": 0.0,
+            "omega_imu": 0.0,
+            "omega_encoder": 0.0,
+            "alpha_imu": 0.0,
+            "alpha_linear": 0.0,
+            "alpha_encoder": 0.0,
+            "ina_current_signed_mA": 0.0,
+        }
+        warmup_theta_samples = []
+        warmup_omega_samples = []
+        warmup_current_samples = []
+        warmup_pwm_samples = []
+        theta_offset_rad = 0.0
+        current_offset_used_mA = float(current_offset_mA)
+        theta_imu_prev_wrapped = None
+        theta_imu_unwrapped_acc = 0.0
+        theta_encoder_prev_wrapped = None
+        theta_encoder_unwrapped_acc = 0.0
         run_limit_sec = float("inf") if args.duration <= 0.0 else float(args.duration)
 
         if host_controller is not None:
@@ -638,6 +735,7 @@ def main():
             print("[INFO] --real-alpha-source is deprecated and ignored; using filtered d(omega)/dt.")
         print("[INFO] real alpha source: filtered derivative of omega")
 
+        run_state = RunState.STATE_WARMUP
         try:
             while (now_wall() - wall_t0) < run_limit_sec:
                 if host_controller is not None:
@@ -672,21 +770,82 @@ def main():
                 wall_now = now_wall()
                 sim_t = wall_now - wall_t0
 
-                if sim_t < warmup_sec:
+                if run_state == RunState.STATE_WARMUP:
                     if host_controller is not None:
                         ros_node.publish_host_cmd(0.0, "warmup")
+                    theta_warm = float(model.get_theta())
+                    omega_warm = float(model.get_omega())
+                    if snap.get("imu_has_data", False):
+                        q = snap["imu_q"]
+                        R_abs = quat_to_rotmat(float(q[0]), float(q[1]), float(q[2]), float(q[3]))
+                        if imu_R0 is None:
+                            imu_R0 = R_abs.copy()
+                        R_rel = imu_R0.T @ R_abs
+                        tip_vec = R_rel @ np.array([0.0, -cfg.radius_m, 0.0], dtype=float)
+                        theta_warm = float(imu_sign * math.atan2(float(tip_vec[1]), float(tip_vec[0])))
+                        omega_warm = float(imu_sign * snap["imu_w"][2])
+                    warmup_theta_samples.append(theta_warm)
+                    warmup_omega_samples.append(omega_warm)
+                    warmup_current_samples.append(float(snap["current_mA"]))
+                    warmup_pwm_samples.append(float(snap["hw_pwm"]))
                     terminal_status_line(
-                        f"warmup... {sim_t:4.2f}/{warmup_sec:.2f}s | waiting for stable sensor baseline",
+                        f"[STATE_WARMUP] {sim_t:4.2f}/{warmup_sec:.2f}s | init-only collection",
                         width=cfg.terminal_status_width,
                     )
-                    if np.isfinite(snap["hw_enc"]):
-                        enc_ref = float(snap["hw_enc"])
-                        enc_prev = enc_ref
+                    if sim_t >= warmup_sec:
+                        theta_offset_rad = compute_theta_offset(np.asarray(warmup_theta_samples, dtype=float))
+                        current_offset_used_mA, valid_cur_n = compute_current_offset(
+                            np.asarray(warmup_current_samples, dtype=float),
+                            np.asarray(warmup_pwm_samples, dtype=float),
+                            np.asarray(warmup_omega_samples, dtype=float),
+                            pwm_threshold=3.0,
+                            omega_threshold=0.8,
+                            fallback_mA=26.0,
+                        )
+                        if valid_cur_n < 12:
+                            print(f"[WARN] insufficient valid warmup current samples: {valid_cur_n}")
+                        theta_var = float(np.nanstd(np.unwrap(np.asarray(warmup_theta_samples, dtype=float)))) if len(warmup_theta_samples) > 8 else 0.0
+                        if theta_var > 0.25:
+                            print(f"[WARN] high warmup theta variance: {theta_var:.5f} rad")
+                        print(
+                            "[WARMUP DONE] "
+                            f"warmup_duration={warmup_sec:.2f}s, theta_offset_rad={theta_offset_rad:.6f}, "
+                            f"current_offset_mA={current_offset_used_mA:.6f}, number_of_valid_current_samples={valid_cur_n}"
+                        )
+                        run_state = RunState.STATE_RUN
+                        wall_run_t0 = now_wall()
+                        t_prev = 0.0
+                        prev_wall_elapsed = None
+                        real_omega_hist.clear()
+                        real_time_hist.clear()
+                        theta_imu_prev_wrapped = None
+                        theta_imu_unwrapped_acc = 0.0
+                        theta_encoder_prev_wrapped = None
+                        theta_encoder_unwrapped_acc = 0.0
+                        # Explicit post-warmup filter-state reset to avoid pre-actuation drift.
+                        online_state = {
+                            "theta_imu": 0.0,
+                            "theta_encoder": 0.0,
+                            "omega_imu": 0.0,
+                            "omega_encoder": 0.0,
+                            "alpha_imu": 0.0,
+                            "alpha_linear": 0.0,
+                            "alpha_encoder": 0.0,
+                            "ina_current_signed_mA": 0.0,
+                        }
+                        omega_imu_prev = 0.0
+                        omega_encoder_prev = 0.0
+                        theta_encoder_prev = None
+                        if np.isfinite(snap["hw_enc"]):
+                            enc_ref = float(snap["hw_enc"])
+                            enc_prev = enc_ref
                     if cfg.realtime:
                         time.sleep(min(cfg.step, 0.01))
                     continue
 
                 cmd_u_used = cmd_u_raw
+                if wall_run_t0 is not None:
+                    sim_t = wall_now - wall_run_t0
 
                 theta_before = model.get_theta()
                 model_out = compute_model_torque_and_electrics(cmd_u_used, theta_before, model.get_omega(), float("nan"), sim_params, cfg)
@@ -708,9 +867,9 @@ def main():
                     enc_ref = float(snap["hw_enc"])
                     enc_prev = enc_ref
 
-                theta_real = theta
-                omega_real = omega
-                alpha_real = alpha
+                theta_meas_wrapped = theta
+                omega_meas = omega
+                alpha_meas = alpha
                 if snap.get("imu_has_data", False):
                     q = snap["imu_q"]
                     w_imu_raw = snap["imu_w"]
@@ -721,22 +880,96 @@ def main():
                     tip_vec = R_rel @ np.array([0.0, -cfg.radius_m, 0.0], dtype=float)
                     # Physical/logging convention: CCW positive on world XY.
                     # (Viewer-only mirror transforms are handled in imu_viewer, not in logged data.)
-                    theta_real = float(math.atan2(float(tip_vec[1]), float(tip_vec[0])))
-                    omega_real = float(w_imu_raw[2])
+                    theta_meas_wrapped = float(imu_sign * math.atan2(float(tip_vec[1]), float(tip_vec[0])))
+                    omega_meas = float(imu_sign * w_imu_raw[2])
 
-                real_omega_hist.append(float(omega_real))
+                if theta_imu_prev_wrapped is None:
+                    theta_imu_prev_wrapped = float(theta_meas_wrapped)
+                dth = float(theta_meas_wrapped - theta_imu_prev_wrapped)
+                while dth > math.pi:
+                    dth -= 2.0 * math.pi
+                while dth < -math.pi:
+                    dth += 2.0 * math.pi
+                theta_imu_unwrapped_acc += dth
+                theta_imu_prev_wrapped = float(theta_meas_wrapped)
+                theta_meas = float(theta_imu_unwrapped_acc - theta_offset_rad)
+
+                real_omega_hist.append(float(omega_meas))
                 real_time_hist.append(float(sim_t))
-                alpha_real = float(
+                alpha_meas = float(
                     estimate_filtered_alpha_from_omega(
                         np.asarray(real_omega_hist, dtype=float),
                         t=np.asarray(real_time_hist, dtype=float),
                     )[-1]
                 )
 
-                theta_real_prev = theta_real
-                e_theta = theta - theta_real
-                e_omega = omega - omega_real
-                e_alpha = alpha - alpha_real
+                dt_local = max(float(cfg.step), 1e-6)
+                if prev_wall_elapsed is not None:
+                    dt_history.append(float(max(sim_t - prev_wall_elapsed, 1e-6)))
+                prev_wall_elapsed = float(sim_t)
+                pwm_hw = float(snap["hw_pwm"])
+                ina_current_raw_mA = float(snap["current_mA"])
+                ina_bus_voltage_v = float(snap["ina_bus_voltage_v"])
+                ina_power_mw = float(snap["ina_power_mw"])
+                ina_current_corr_mA = float(ina_current_raw_mA - current_offset_used_mA)
+                sign_pwm = 1.0 if pwm_hw > 0.0 else (-1.0 if pwm_hw < 0.0 else 0.0)
+                ina_current_signed_mA = float(sign_pwm * ina_current_corr_mA)
+
+                theta_imu = float(theta_meas)
+                omega_imu = float(omega_meas)
+                alpha_imu = float((omega_imu - omega_imu_prev) / dt_local)
+                omega_imu_prev = omega_imu
+
+                theta_encoder = float(theta_imu if not np.isfinite(snap["hw_enc"]) else 0.0)
+                omega_encoder = float(omega_imu if not np.isfinite(snap["hw_enc"]) else 0.0)
+                alpha_encoder = float(alpha_imu if not np.isfinite(snap["hw_enc"]) else 0.0)
+                if np.isfinite(snap["hw_enc"]) and np.isfinite(cfg.cpr) and cfg.cpr > 1.0:
+                    if enc_ref is None:
+                        enc_ref = float(snap["hw_enc"])
+                    theta_enc_wrapped = float((2.0 * math.pi / float(cfg.cpr)) * (float(snap["hw_enc"]) - float(enc_ref)))
+                    if theta_encoder_prev_wrapped is None:
+                        theta_encoder_prev_wrapped = theta_enc_wrapped
+                    dth_e = float(theta_enc_wrapped - theta_encoder_prev_wrapped)
+                    while dth_e > math.pi:
+                        dth_e -= 2.0 * math.pi
+                    while dth_e < -math.pi:
+                        dth_e += 2.0 * math.pi
+                    theta_encoder_unwrapped_acc += dth_e
+                    theta_encoder_prev_wrapped = theta_enc_wrapped
+                    theta_encoder = float(theta_encoder_unwrapped_acc - theta_offset_rad)
+                    if theta_encoder_prev is not None:
+                        omega_encoder = float((theta_encoder - theta_encoder_prev) / dt_local)
+                    if theta_encoder_prev is not None:
+                        alpha_encoder = float((omega_encoder - omega_encoder_prev) / dt_local)
+                    theta_encoder_prev = theta_encoder
+                    omega_encoder_prev = omega_encoder
+
+                # alpha from linear acceleration (tangential component / radius)
+                alpha_linear = float(alpha_imu)
+                if np.isfinite(cfg.radius_m) and cfg.radius_m > 1e-6 and snap.get("imu_has_data", False):
+                    acc = np.asarray(snap["imu_a"], dtype=float)
+                    theta_ref = theta_imu
+                    tangent = np.array([math.cos(theta_ref), math.sin(theta_ref), 0.0], dtype=float)
+                    a_t = float(np.dot(acc, tangent))
+                    alpha_linear = float(a_t / float(cfg.radius_m))
+
+                # online low-pass filter (explicit online path)
+                for k, v in {
+                    "theta_imu": theta_imu,
+                    "theta_encoder": theta_encoder,
+                    "omega_imu": omega_imu,
+                    "omega_encoder": omega_encoder,
+                    "alpha_imu": alpha_imu,
+                    "alpha_linear": alpha_linear,
+                    "alpha_encoder": alpha_encoder,
+                    "ina_current_signed_mA": ina_current_signed_mA,
+                }.items():
+                    online_state[k] = (1.0 - online_alpha) * float(online_state[k]) + online_alpha * float(v)
+
+                theta_real_prev = theta_meas
+                e_theta = theta - theta_meas
+                e_omega = omega - omega_meas
+                e_alpha = alpha - alpha_meas
                 du = cmd_u_used - prev_u_eff
                 d2u = du - prev_du
                 prev_u_eff = cmd_u_used
@@ -753,6 +986,7 @@ def main():
                     cmd_u_raw=cmd_u_raw,
                     cmd_u_used=cmd_u_used,
                     hw_pwm=snap["hw_pwm"],
+                    current_mA=snap["current_mA"],
                     mode_name=mode_name,
                     cfg=cfg,
                 )
@@ -760,11 +994,21 @@ def main():
                 ros_node.publish_sim(theta, omega, alpha, model_out["tau_net"], cmd_u_used, imu_msg, status)
 
                 wr.writerow([
-                    wall_now, wall_now - wall_t0, mode_name,
-                    cmd_u_raw, cmd_u_used, snap["hw_pwm"], model_out["tau_net"],
+                    wall_now, sim_t, mode_name,
+                    cmd_u_raw, cmd_u_used, pwm_hw, model_out["tau_net"],
+                    ina_current_raw_mA, ina_bus_voltage_v, ina_power_mw,
+                    current_offset_used_mA, ina_current_corr_mA, ina_current_signed_mA,
+                    pwm_hw,
+                    theta_imu, theta_encoder,
+                    omega_imu, omega_encoder,
+                    alpha_imu, alpha_linear, alpha_encoder,
+                    online_state["theta_imu"], online_state["theta_encoder"],
+                    online_state["omega_imu"], online_state["omega_encoder"],
+                    online_state["alpha_imu"], online_state["alpha_linear"], online_state["alpha_encoder"],
+                    online_state["ina_current_signed_mA"],
                     theta, omega, alpha,
                     snap["hw_enc"], snap["hw_arduino_ms"],
-                    theta_real, omega_real, alpha_real,
+                    theta_meas, omega_meas, alpha_meas,
                     model.J_rod, model.J_imu, model.J_total,
                     model_out["tau_motor"], model_out["tau_res"], model_out["tau_visc"], model_out["tau_coul"],
                     inst_cost, inst_cost,
@@ -783,6 +1027,19 @@ def main():
                 host_controller.__exit__(None, None, None)
             elif quit_watcher is not None:
                 quit_watcher.__exit__(None, None, None)
+
+    if dt_history:
+        dt_arr = np.asarray(dt_history, dtype=float)
+        sampling_diag = {
+            "dt_mean_sec": float(np.mean(dt_arr)),
+            "dt_std_sec": float(np.std(dt_arr)),
+            "dt_min_sec": float(np.min(dt_arr)),
+            "dt_max_sec": float(np.max(dt_arr)),
+            "freq_mean_hz": float(1.0 / max(np.mean(dt_arr), 1e-9)),
+            "sample_count": int(len(dt_arr)),
+        }
+    else:
+        sampling_diag = {}
 
     meta = {
         "log_csv": log_csv,
@@ -807,6 +1064,15 @@ def main():
         "fit_complete": False,
         "fit_complete_wall": None,
         "fit_final_params": None,
+        "sampling_diagnostics": sampling_diag,
+        "warmup": {
+            "duration_sec": warmup_sec,
+            "theta_offset_rad": float(theta_offset_rad),
+            "current_offset_mA": float(current_offset_used_mA),
+            "imu_sign_applied": float(imu_sign),
+            "warmup_theta_sample_count": int(len(warmup_theta_samples)),
+            "warmup_current_sample_count": int(len(warmup_current_samples)),
+        },
     }
     with open(log_meta, "w", encoding="utf-8") as mf:
         json.dump(meta, mf, indent=2, ensure_ascii=False)
