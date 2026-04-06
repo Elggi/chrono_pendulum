@@ -148,8 +148,11 @@ class CausalIIRFilter:
         self.alpha = float(min(max(alpha, 1e-4), 1.0))
         self.state = None
 
-    def reset(self, value: float = 0.0):
-        self.state = float(value)
+    def reset(self, value: float | None = 0.0):
+        if value is None:
+            self.state = None
+        else:
+            self.state = float(value)
 
     def update(self, value: float) -> float:
         v = float(value)

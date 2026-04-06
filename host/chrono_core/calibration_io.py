@@ -62,13 +62,22 @@ def apply_calibration_json(cfg: BridgeConfig, json_path: str | None, apply_model
     summary.setdefault("mean_radius_m", float(cfg.r_imu))
     if math.isfinite(float(cfg.cpr)):
         summary.setdefault("mean_cpr", float(cfg.cpr))
-    if "g_eff_mps2" in summary:
+    g_candidates = [
+        summary.get("g_eff_mps2"),
+        summary.get("gravity_mps2"),
+        summary.get("gravity"),
+        calib.get("gravity_mps2"),
+        calib.get("gravity"),
+        calib.get("g"),
+    ]
+    for gv in g_candidates:
         try:
-            g_eff = float(summary["g_eff_mps2"])
+            g_eff = float(gv)
         except (TypeError, ValueError):
-            g_eff = None
-        if g_eff is not None and math.isfinite(g_eff) and g_eff > 0.0:
+            continue
+        if math.isfinite(g_eff) and g_eff > 0.0:
             cfg.gravity = g_eff
+            break
     calib["summary"] = summary
 
     cfg.calibration_json = json_path

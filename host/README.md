@@ -5,7 +5,7 @@ This folder contains host-side runtime, calibration, replay, plotting, and RL op
 ## Top-level scripts
 
 - `chrono_pendulum.py`  
-  Main real-time Chrono runtime. Runs sim, reads ROS sensor streams, estimates real states (`theta_real`, `omega_real`, `alpha_real`), publishes sim topics, and writes synchronized logs.
+  Main real-time Chrono runtime. Runs sim, reads ROS sensor streams, estimates runtime channels (`theta_imu/encoder`, `omega_imu/encoder`, `alpha_imu/linear/encoder` with `*_online` filters), exports offline-ID aliases (`theta_real`, `omega_real`, `alpha_real`), publishes sim topics, and writes synchronized logs.
 
 - `pendulum_stack.sh`  
   Interactive launcher menu for common workflows (viewer, calibration, RL fitting, runtime, plotting, replay validation).
