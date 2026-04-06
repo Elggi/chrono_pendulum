@@ -83,6 +83,26 @@ def col_any(df, keys, n_default=None):
     return np.full(n_default, np.nan, dtype=float)
 
 
+def zero_start(series: np.ndarray, t: np.ndarray, window_sec: float = 0.4) -> np.ndarray:
+    y = np.asarray(series, dtype=float).copy()
+    if y.size == 0:
+        return y
+    finite = np.isfinite(y)
+    if not finite.any():
+        return y
+    tt = np.asarray(t, dtype=float)
+    if tt.size != y.size or not np.isfinite(tt).any():
+        baseline = float(y[np.where(finite)[0][0]])
+        return y - baseline
+    t0 = float(tt[np.where(np.isfinite(tt))[0][0]])
+    mask = finite & np.isfinite(tt) & ((tt - t0) <= max(float(window_sec), 1e-3))
+    if not mask.any():
+        baseline = float(y[np.where(finite)[0][0]])
+    else:
+        baseline = float(np.nanmedian(y[mask]))
+    return y - baseline
+
+
 def _print_available(df):
     print("[available columns]")
     for c in df.columns:
@@ -116,10 +136,11 @@ def plot_simulation(df, csv_path: str):
     theta_imu_f = col_any(df, ["theta_imu_online", "theta_imu_filtered_unwrapped", "theta_winner"], n)
     omega_imu_raw = col_any(df, ["omega_imu", "omega_imu_raw"], n)
     omega_imu_f = col_any(df, ["omega_imu_online", "omega_imu_filtered", "omega_winner"], n)
-    alpha_imu_gyro = col_any(df, ["alpha_imu", "alpha_imu_gyro_diff"], n)
-    alpha_imu_gyro_f = col_any(df, ["alpha_imu_online", "alpha_imu_gyro_diff_filtered", "alpha_winner"], n)
     alpha_lin = col_any(df, ["alpha_linear", "alpha_from_linear_accel"], n)
     alpha_lin_f = col_any(df, ["alpha_linear_online", "alpha_from_linear_accel_filtered"], n)
+    # Strengthen offset handling so IMU theta traces start from 0 rad like theta_sim.
+    theta_imu_raw = zero_start(theta_imu_raw, t)
+    theta_imu_f = zero_start(theta_imu_f, t)
 
     print(f"csv: {csv_path}")
     if meta is not None and isinstance(meta.get("warmup"), dict):
@@ -163,9 +184,6 @@ def plot_simulation(df, csv_path: str):
     ax_omega.grid(True)
     ax_omega.legend()
 
-    ax_alpha.plot(t, alpha_sim, label="alpha_sim")
-    ax_alpha.plot(t, alpha_imu_gyro, label="alpha_imu_gyro_diff")
-    ax_alpha.plot(t, alpha_imu_gyro_f, label="alpha_imu_gyro_diff_filtered")
     ax_alpha.plot(t, alpha_lin, label="alpha_from_linear_accel")
     ax_alpha.plot(t, alpha_lin_f, label="alpha_from_linear_accel_filtered")
     ax_alpha.set_title("Alpha")
@@ -175,13 +193,10 @@ def plot_simulation(df, csv_path: str):
 
     e_theta = theta_sim - theta_imu_f
     e_omega = omega_sim - omega_imu_f
-    e_alpha = alpha_sim - alpha_imu_gyro_f
     if np.isfinite(e_theta).any():
         ax_err.plot(t, np.abs(e_theta), label="|e_theta|")
     if np.isfinite(e_omega).any():
         ax_err.plot(t, np.abs(e_omega), label="|e_omega|")
-    if np.isfinite(e_alpha).any():
-        ax_err.plot(t, np.abs(e_alpha), label="|e_alpha|")
     ax_err.grid(True)
     ax_err.set_title("Absolute tracking error")
     ax_err.legend()
