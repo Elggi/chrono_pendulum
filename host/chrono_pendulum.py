@@ -34,7 +34,7 @@ from chrono_core.dynamics import PendulumModel, compute_model_torque_and_electri
 from chrono_core.calibration_io import apply_calibration_json, extract_radius_from_json
 from chrono_core.pendulum_rl_env import build_init_params
 from chrono_core.log_schema import PENDULUM_LOG_COLUMNS
-from chrono_core.signal_filter import estimate_filtered_alpha_from_omega
+from chrono_core.signal_filter import estimate_filtered_alpha_from_omega, CausalIIRFilter
 
 
 # ============================================================
@@ -689,17 +689,17 @@ def main():
         real_time_hist = deque(maxlen=401)
         dt_history = []
         prev_wall_elapsed = None
-        online_alpha = 0.18
-        online_state = {
-            "theta_imu": 0.0,
-            "theta_encoder": 0.0,
-            "omega_imu": 0.0,
-            "omega_encoder": 0.0,
-            "alpha_imu": 0.0,
-            "alpha_linear": 0.0,
-            "alpha_encoder": 0.0,
-            "ina_current_signed_mA": 0.0,
+        online_filter_bank = {
+            "theta_imu": CausalIIRFilter(alpha=0.18),
+            "theta_encoder": CausalIIRFilter(alpha=0.18),
+            "omega_imu": CausalIIRFilter(alpha=0.18),
+            "omega_encoder": CausalIIRFilter(alpha=0.18),
+            "alpha_imu": CausalIIRFilter(alpha=0.18),
+            "alpha_linear": CausalIIRFilter(alpha=0.18),
+            "alpha_encoder": CausalIIRFilter(alpha=0.18),
+            "ina_current_signed_mA": CausalIIRFilter(alpha=0.18),
         }
+        online_state = {k: 0.0 for k in online_filter_bank.keys()}
         warmup_theta_samples = []
         warmup_omega_samples = []
         warmup_current_samples = []
@@ -823,16 +823,9 @@ def main():
                         theta_encoder_prev_wrapped = None
                         theta_encoder_unwrapped_acc = 0.0
                         # Explicit post-warmup filter-state reset to avoid pre-actuation drift.
-                        online_state = {
-                            "theta_imu": 0.0,
-                            "theta_encoder": 0.0,
-                            "omega_imu": 0.0,
-                            "omega_encoder": 0.0,
-                            "alpha_imu": 0.0,
-                            "alpha_linear": 0.0,
-                            "alpha_encoder": 0.0,
-                            "ina_current_signed_mA": 0.0,
-                        }
+                        online_state = {k: 0.0 for k in online_filter_bank.keys()}
+                        for k, flt in online_filter_bank.items():
+                            flt.reset(0.0)
                         omega_imu_prev = 0.0
                         omega_encoder_prev = 0.0
                         theta_encoder_prev = None
@@ -964,7 +957,7 @@ def main():
                     "alpha_encoder": alpha_encoder,
                     "ina_current_signed_mA": ina_current_signed_mA,
                 }.items():
-                    online_state[k] = (1.0 - online_alpha) * float(online_state[k]) + online_alpha * float(v)
+                    online_state[k] = online_filter_bank[k].update(float(v))
 
                 theta_real_prev = theta_meas
                 e_theta = theta - theta_meas
