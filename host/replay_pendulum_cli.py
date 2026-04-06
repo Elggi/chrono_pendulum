@@ -10,6 +10,7 @@ import subprocess
 import time
 
 import numpy as np
+import pandas as pd
 import pychrono as ch
 import pychrono.irrlicht as irr
 
@@ -104,6 +105,69 @@ def build_replay_series(args):
     return cfg, t, pwm, theta_sim, theta_real, omega_real
 
 
+def smooth_series(x: np.ndarray, mode: str):
+    if mode == "raw":
+        return x
+    if mode == "online":
+        alpha = 0.18
+        y = np.zeros_like(x, dtype=float)
+        for i, v in enumerate(x):
+            y[i] = (1.0 - alpha) * (y[i - 1] if i > 0 else v) + alpha * v
+        return y
+    # offline
+    win = 21
+    if len(x) < win:
+        return x
+    try:
+        from scipy.signal import savgol_filter  # type: ignore
+
+        return savgol_filter(x, win, 3, mode="interp")
+    except Exception:
+        k = np.ones(9, dtype=float) / 9.0
+        return np.convolve(np.pad(x, (4, 4), mode="edge"), k, mode="valid")
+
+
+def print_sampling_diagnostics(csv_path: str):
+    df = pd.read_csv(csv_path)
+    if "wall_elapsed" in df.columns:
+        t = pd.to_numeric(df["wall_elapsed"], errors="coerce").to_numpy(dtype=float)
+    elif "wall_time" in df.columns:
+        t0 = pd.to_numeric(df["wall_time"], errors="coerce").to_numpy(dtype=float)
+        t = t0 - t0[0]
+    else:
+        return
+    dt = np.diff(t)
+    dt = dt[np.isfinite(dt) & (dt > 0.0)]
+    if len(dt) == 0:
+        return
+    print(
+        "[sampling diagnostics] "
+        f"mean_dt={np.mean(dt):.6f}s, std_dt={np.std(dt):.6f}s, "
+        f"min_dt={np.min(dt):.6f}s, max_dt={np.max(dt):.6f}s, "
+        f"mean_f={1.0/max(np.mean(dt), 1e-9):.2f}Hz"
+    )
+
+
+def recompute_signed_current(csv_path: str):
+    df = pd.read_csv(csv_path)
+    pwm = pd.to_numeric(df.get("hw_pwm", df.get("pwm_hw", 0.0)), errors="coerce").to_numpy(dtype=float)
+    i_raw = pd.to_numeric(df.get("ina_current_raw_mA", df.get("current_mA", 0.0)), errors="coerce").to_numpy(dtype=float)
+    i_offset = 0.0
+    if "ina_current_offset_mA" in df.columns:
+        vals = pd.to_numeric(df["ina_current_offset_mA"], errors="coerce").to_numpy(dtype=float)
+        vals = vals[np.isfinite(vals)]
+        if len(vals) > 0:
+            i_offset = float(np.median(vals))
+    i_corr = i_raw - i_offset
+    i_signed = np.sign(pwm) * i_corr
+    print(
+        "[signed current] "
+        f"offset={i_offset:.4f}mA, raw_mean={np.nanmean(i_raw):.4f}mA, "
+        f"signed_mean={np.nanmean(i_signed):.4f}mA"
+    )
+    return i_signed
+
+
 def load_theta_from_csv(csv_path: str):
     import pandas as pd
     df = pd.read_csv(csv_path)
@@ -124,9 +188,14 @@ def main():
     ap.add_argument("--delay_override", type=float, default=None)
     ap.add_argument("--speed", type=float, default=1.0, help="replay speed (1.0=real-time)")
     ap.add_argument("--use-real-as-sim", action="store_true", help="if no parameter_json, render real theta as sim")
+    ap.add_argument("--filter-mode", choices=["raw", "online", "offline"], default="raw")
     args = ap.parse_args()
 
     cfg, t, pwm, theta_sim, theta_real, omega_real = build_replay_series(args)
+    theta_real = smooth_series(theta_real, args.filter_mode)
+    omega_real = smooth_series(omega_real, args.filter_mode)
+    print_sampling_diagnostics(args.csv)
+    _ = recompute_signed_current(args.csv)
     if len(t) < 2:
         raise SystemExit("Not enough replay samples")
 
