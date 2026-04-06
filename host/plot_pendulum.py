@@ -83,7 +83,7 @@ def col_any(df, keys, n_default=None):
     return np.full(n_default, np.nan, dtype=float)
 
 
-def zero_start(series: np.ndarray, t: np.ndarray, window_sec: float = 0.4) -> np.ndarray:
+def zero_start(series: np.ndarray, t: np.ndarray, window_sec: float = 0.4, force_first_zero: bool = True) -> np.ndarray:
     y = np.asarray(series, dtype=float).copy()
     if y.size == 0:
         return y
@@ -93,14 +93,22 @@ def zero_start(series: np.ndarray, t: np.ndarray, window_sec: float = 0.4) -> np
     tt = np.asarray(t, dtype=float)
     if tt.size != y.size or not np.isfinite(tt).any():
         baseline = float(y[np.where(finite)[0][0]])
-        return y - baseline
+        y = y - baseline
+        if force_first_zero:
+            i0 = int(np.where(np.isfinite(y))[0][0])
+            y = y - float(y[i0])
+        return y
     t0 = float(tt[np.where(np.isfinite(tt))[0][0]])
     mask = finite & np.isfinite(tt) & ((tt - t0) <= max(float(window_sec), 1e-3))
     if not mask.any():
         baseline = float(y[np.where(finite)[0][0]])
     else:
         baseline = float(np.nanmedian(y[mask]))
-    return y - baseline
+    y = y - baseline
+    if force_first_zero:
+        i0 = int(np.where(np.isfinite(y))[0][0])
+        y = y - float(y[i0])
+    return y
 
 
 def _print_available(df):
@@ -124,14 +132,11 @@ def plot_simulation(df, csv_path: str):
     n = len(t)
     cmd_u = col_any(df, ["cmd_u_raw", "cmd_u"], n)
     pwm_hw = col_any(df, ["pwm_hw", "hw_pwm"], n)
-    i_raw = col_any(df, ["ina_current_raw_mA", "current_mA"], n)
     i_corr = col_any(df, ["ina_current_corr_mA", "I_offset_corrected_mA"], n)
     i_filtered = col_any(df, ["ina_current_signed_online_mA", "current_offline_filtered"], n)
 
     theta_sim = col_any(df, ["theta"], n)
     omega_sim = col_any(df, ["omega"], n)
-    alpha_sim = col_any(df, ["alpha"], n)
-
     theta_imu_raw = col_any(df, ["theta_imu", "theta_imu_raw_unwrapped"], n)
     theta_imu_f = col_any(df, ["theta_imu_online", "theta_imu_filtered_unwrapped", "theta_winner"], n)
     omega_imu_raw = col_any(df, ["omega_imu", "omega_imu_raw"], n)
@@ -149,24 +154,18 @@ def plot_simulation(df, csv_path: str):
     fig, axes = plt.subplots(3, 2, figsize=(16, 10), num="Pendulum Unified Dashboard")
     ax_cmd = axes[0, 0]
     ax_theta = axes[0, 1]
-    ax_err = axes[1, 0]
+    ax_current = axes[1, 0]
     ax_omega = axes[1, 1]
     ax_torque = axes[2, 0]
     ax_alpha = axes[2, 1]
 
     ax_cmd.plot(t, cmd_u, label="cmd_u")
     ax_cmd.plot(t, pwm_hw, label="pwm_hw")
-    ax_cmd2 = ax_cmd.twinx()
-    ax_cmd2.plot(t, i_raw, label="I_raw_mA", alpha=0.4)
-    ax_cmd2.plot(t, i_corr, label="I_offset_corrected_mA", alpha=0.8)
-    ax_cmd2.plot(t, i_filtered, label="I_filtered_mA", alpha=0.9)
-    l1, n1 = ax_cmd.get_legend_handles_labels()
-    l2, n2 = ax_cmd2.get_legend_handles_labels()
-    ax_cmd.legend(l1 + l2, n1 + n2, loc="upper right")
+    ax_cmd.legend(loc="upper right")
     ax_cmd.grid(True)
-    ax_cmd.set_title("Command / PWM / Current")
+    ax_cmd.set_title("Command / PWM")
     ax_cmd.set_xlabel("time [s]")
-    ax_cmd2.set_ylabel("current [mA]")
+    ax_cmd.set_ylabel("command / pwm")
 
     ax_theta.plot(t, theta_sim, label="theta_sim")
     ax_theta.plot(t, theta_imu_raw, label="theta_imu_raw_unwrapped")
@@ -191,15 +190,12 @@ def plot_simulation(df, csv_path: str):
     ax_alpha.grid(True)
     ax_alpha.legend(fontsize=8)
 
-    e_theta = theta_sim - theta_imu_f
-    e_omega = omega_sim - omega_imu_f
-    if np.isfinite(e_theta).any():
-        ax_err.plot(t, np.abs(e_theta), label="|e_theta|")
-    if np.isfinite(e_omega).any():
-        ax_err.plot(t, np.abs(e_omega), label="|e_omega|")
-    ax_err.grid(True)
-    ax_err.set_title("Absolute tracking error")
-    ax_err.legend()
+    ax_current.plot(t, i_corr, label="I_offset_corrected_mA", alpha=0.9)
+    ax_current.plot(t, i_filtered, label="I_filtered_mA", alpha=0.9)
+    ax_current.grid(True)
+    ax_current.set_title("Current")
+    ax_current.set_ylabel("mA")
+    ax_current.legend()
 
     tau_cmd = col_any(df, ["tau_cmd"], n)
     tau_motor = col_any(df, ["tau_motor"], n)
@@ -213,7 +209,7 @@ def plot_simulation(df, csv_path: str):
     ax_torque.set_title("Torque analysis")
     ax_torque.legend(fontsize=8)
 
-    for ax in [ax_theta, ax_omega, ax_alpha, ax_err, ax_torque]:
+    for ax in [ax_theta, ax_omega, ax_alpha, ax_current, ax_torque]:
         ax.set_xlabel("time [s]")
 
     fig.tight_layout()
