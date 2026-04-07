@@ -356,6 +356,63 @@ run_staged_calibration() {
     fi
 }
 
+run_offline_benchmark_pem_sindy_ppo() {
+    echo "--------------------------------"
+    echo "[INFO] Offline Identification Benchmark (PEM + SINDy-PI + PPO)"
+    echo "[INFO] 기본 데이터셋: host/run_logs/chrono_run_1.finalized.csv + chrono_run_1.meta.json"
+
+    default_csv="$BASE_DIR/run_logs/chrono_run_1.finalized.csv"
+    default_meta="$BASE_DIR/run_logs/chrono_run_1.meta.json"
+
+    if [ ! -f "$default_csv" ]; then
+        echo "[ERROR] default csv 없음: $default_csv"
+        return
+    fi
+    if [ ! -f "$default_meta" ]; then
+        echo "[ERROR] default meta 없음: $default_meta"
+        return
+    fi
+
+    read -p "CSV 경로 [${default_csv}]: " csv_path
+    csv_path=${csv_path:-$default_csv}
+    read -p "META JSON 경로 [${default_meta}]: " meta_path
+    meta_path=${meta_path:-$default_meta}
+    read -p "출력 폴더 [${BASE_DIR}/../reports/PEM_SINDy_PPO]: " outdir
+    outdir=${outdir:-$BASE_DIR/../reports/PEM_SINDy_PPO}
+    read -p "train_ratio [0.75]: " train_ratio
+    train_ratio=${train_ratio:-0.75}
+    read -p "fit l_com도 함께 식별? (y/n) [n]: " fit_lcom_yn
+    fit_lcom_yn=${fit_lcom_yn:-n}
+    read -p "Stage2(SINDy-PI) skip? (y/n) [n]: " skip_s2_yn
+    skip_s2_yn=${skip_s2_yn:-n}
+    read -p "Stage3(PPO) skip? (y/n) [n]: " skip_s3_yn
+    skip_s3_yn=${skip_s3_yn:-n}
+    read -p "PPO timesteps [12000]: " ppo_steps
+    ppo_steps=${ppo_steps:-12000}
+
+    cmd=(python3 "$BASE_DIR/offline_id_pem_sindy_ppo.py" --csv "$csv_path" --meta "$meta_path" --outdir "$outdir" --train-ratio "$train_ratio" --ppo-steps "$ppo_steps")
+    if [[ "$fit_lcom_yn" =~ ^[Yy]$ ]]; then
+        cmd+=(--fit-lcom)
+    fi
+    if [[ "$skip_s2_yn" =~ ^[Yy]$ ]]; then
+        cmd+=(--skip-stage2)
+    fi
+    if [[ "$skip_s3_yn" =~ ^[Yy]$ ]]; then
+        cmd+=(--skip-stage3)
+    fi
+
+    echo "[INFO] command: ${cmd[*]}"
+    "${cmd[@]}"
+
+    echo "[INFO] 완료. 주요 아티팩트:"
+    echo "       - $outdir/config_used.json"
+    echo "       - $outdir/stage1_result.json"
+    echo "       - $outdir/stage2_result.json (if enabled)"
+    echo "       - $outdir/stage3_result.json (if enabled)"
+    echo "       - $outdir/benchmark_report.md"
+    echo "       - $outdir/stage1_trajectories.png"
+}
+
 run_replay_validation() {
     echo "--------------------------------"
     echo "[INFO] Replay Runs"
@@ -414,7 +471,8 @@ while true; do
     echo "5) Plot Data (Sim vs Real)"
     echo "6) Replay Runs"
     echo "7) System Identification (Physical Params, Stage-wise)"
-    echo "8) Exit"
+    echo "8) Offline Benchmark (PEM+SINDy-PI+PPO)"
+    echo "9) Exit"
     echo "=========================================="
 
     read -p "Select option: " choice
@@ -449,6 +507,10 @@ while true; do
             pause
             ;;
         8)
+            run_offline_benchmark_pem_sindy_ppo
+            pause
+            ;;
+        9)
             echo "Bye!"
             exit 0
             ;;
