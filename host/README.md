@@ -22,6 +22,13 @@ This folder contains host-side runtime, calibration, replay, plotting, and RL op
 - `train_pendulum_rl.py`  
   Offline replay-based PPO optimization for surrogate model parameters.
 
+- `offline_id_pem_sindy_ppo.py`
+  Three-stage offline identification benchmark:
+  1) PEM nominal fit with irregular-sampling RK45 (plus uniform-resampled RK4 baseline),
+  2) residual-only SINDy-PI discovery,
+  3) PPO parameter proposal optimization (rollout-level reward, **not** control).
+  Writes reproducible artifacts under `reports/PEM_SINDy_PPO/`.
+
 - `replay_pendulum_cli.py`  
   CLI replay runner that re-simulates logged command streams with chosen parameter/calibration JSON.
 
