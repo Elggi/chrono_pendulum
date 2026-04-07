@@ -356,6 +356,59 @@ run_staged_calibration() {
     fi
 }
 
+run_nnarx_sindy_ppo_benchmark() {
+    echo "--------------------------------"
+    echo "[INFO] Offline NNARX + SINDy + PPO benchmark"
+
+    local default_csv="$BASE_DIR/run_logs/chrono_run_1.finalized.csv"
+    local fallback_csv="$BASE_DIR/run_logs/chrono_run_1.csv"
+    local csv_path="$default_csv"
+    if [ ! -f "$csv_path" ] && [ -f "$fallback_csv" ]; then
+        csv_path="$fallback_csv"
+    fi
+
+    local meta_path="$BASE_DIR/run_logs/chrono_run_1.meta.json"
+    local finalized_mode=""
+
+    read -p "Use interactive CSV/JSON selection? (y/n) [n]: " finalized_mode
+    finalized_mode=${finalized_mode:-n}
+    if [[ "$finalized_mode" =~ ^[Yy]$ ]]; then
+        chosen_csv=$(select_csv_file)
+        [ -n "$chosen_csv" ] && csv_path="$chosen_csv"
+        chosen_meta=$(select_json_file "Meta JSON (optional)")
+        [ -n "$chosen_meta" ] && meta_path="$chosen_meta"
+    fi
+
+    read -p "seed [7]: " seed
+    seed=${seed:-7}
+    read -p "ylag [4]: " ylag
+    ylag=${ylag:-4}
+    read -p "xlag [4]: " xlag
+    xlag=${xlag:-4}
+    read -p "epochs [300]: " epochs
+    epochs=${epochs:-300}
+    read -p "ppo_steps [5000]: " ppo_steps
+    ppo_steps=${ppo_steps:-5000}
+
+    cmd=(
+        python3 "$BASE_DIR/nnarx_sindy_ppo_benchmark.py"
+        --csv "$csv_path"
+        --meta "$meta_path"
+        --seed "$seed"
+        --ylag "$ylag"
+        --xlag "$xlag"
+        --epochs "$epochs"
+        --ppo-steps "$ppo_steps"
+    )
+
+    echo "[INFO] command: ${cmd[*]}"
+    "${cmd[@]}"
+    echo "[INFO] benchmark artifacts:"
+    echo "       - $SCRIPT_DIR/../reports/NNARX_SINDy_PPO/benchmark_report.json"
+    echo "       - $SCRIPT_DIR/../reports/NNARX_SINDy_PPO/benchmark_report.md"
+    echo "       - $SCRIPT_DIR/../reports/NNARX_SINDy_PPO/sindy_equations.json"
+}
+
 run_replay_validation() {
     echo "--------------------------------"
     echo "[INFO] Replay Runs"
@@ -414,7 +467,8 @@ while true; do
     echo "5) Plot Data (Sim vs Real)"
     echo "6) Replay Runs"
     echo "7) System Identification (Physical Params, Stage-wise)"
-    echo "8) Exit"
+    echo "8) Offline Benchmark (NNARX + SINDy + PPO proposal)"
+    echo "9) Exit"
     echo "=========================================="
 
     read -p "Select option: " choice
@@ -449,6 +503,10 @@ while true; do
             pause
             ;;
         8)
+            run_nnarx_sindy_ppo_benchmark
+            pause
+            ;;
+        9)
             echo "Bye!"
             exit 0
             ;;
