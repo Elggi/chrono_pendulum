@@ -22,6 +22,35 @@ This folder contains host-side runtime, calibration, replay, plotting, and RL op
 - `train_pendulum_rl.py`  
   Offline replay-based PPO optimization for surrogate model parameters.
 
+- `offline_identification_benchmark.py`  
+  Three-stage offline benchmark for **LSTM nominal dynamics + residual SINDy-PI + PPO parameter proposal refinement**.
+  The pipeline enforces:
+  - irregular sampling handling via both uniform resampling and Δt-aware modeling
+  - target-type comparison (`state` vs `delta`)
+  - one-step and autoregressive rollout evaluation with drift/lag/bias checks
+  - residual-only symbolic discovery (SINDy-PI on LSTM residual, not full dynamics)
+  - PPO as a **parameter proposer** (not a controller) with rollout-level objective
+
+  Example:
+
+  ```bash
+  python host/offline_identification_benchmark.py \
+      --data-csv host/run_logs/chrono_run_1.finalized.csv \
+      --data-meta host/run_logs/chrono_run_1.meta.json \
+      --out-dir reports/LSTM_SINDy_PPO
+  ```
+
+  Outputs (under `reports/LSTM_SINDy_PPO/`) include:
+  - trained LSTM checkpoints
+  - discovered SINDy equations
+  - PPO checkpoint
+  - rollout/error plots
+  - config + metrics JSON
+  - benchmark markdown report
+
+  `host/pendulum_stack.sh` 메뉴에서도 실행 가능:
+  - `8) Offline Identification Benchmark (LSTM + SINDy-PI + PPO proposal)`
+
 - `replay_pendulum_cli.py`  
   CLI replay runner that re-simulates logged command streams with chosen parameter/calibration JSON.
 

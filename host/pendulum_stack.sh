@@ -394,6 +394,75 @@ run_replay_validation() {
     "${cmd[@]}"
 }
 
+run_offline_identification_benchmark() {
+    echo "--------------------------------"
+    echo "[INFO] Offline Identification Benchmark (LSTM + SINDy-PI + PPO parameter proposal)"
+    echo "[INFO] 기본 입력:"
+    echo "       - CSV : host/run_logs/chrono_run_1.finalized.csv (없으면 chrono_run_1.csv fallback)"
+    echo "       - META: host/run_logs/chrono_run_1.meta.json"
+    echo "       - OUT : reports/LSTM_SINDy_PPO"
+
+    read -p "CSV 파일 직접 선택? (y/n) [n]: " custom_csv_yn
+    custom_csv_yn=${custom_csv_yn:-n}
+    local csv_path="$BASE_DIR/run_logs/chrono_run_1.finalized.csv"
+    if [[ "$custom_csv_yn" =~ ^[Yy]$ ]]; then
+        picked_csv=$(select_csv_file)
+        [ -n "$picked_csv" ] && csv_path="$picked_csv"
+    fi
+
+    local default_meta="$BASE_DIR/run_logs/chrono_run_1.meta.json"
+    local meta_path="$default_meta"
+    if [ ! -f "$default_meta" ]; then
+        echo "[WARN] 기본 meta json이 없습니다: $default_meta"
+        picked_meta=$(select_json_file "Meta JSON (optional)")
+        if [ -n "$picked_meta" ]; then
+            meta_path="$picked_meta"
+        else
+            meta_path="$default_meta"
+        fi
+    fi
+
+    read -p "epochs [80]: " epochs
+    epochs=${epochs:-80}
+    read -p "sequence_len [32]: " sequence_len
+    sequence_len=${sequence_len:-32}
+    read -p "hidden_size [96]: " hidden_size
+    hidden_size=${hidden_size:-96}
+    read -p "num_layers [2]: " num_layers
+    num_layers=${num_layers:-2}
+    read -p "dropout [0.15]: " dropout
+    dropout=${dropout:-0.15}
+    read -p "ppo_steps [3000]: " ppo_steps
+    ppo_steps=${ppo_steps:-3000}
+
+    local run_id
+    run_id=$(date +"bench_%Y%m%d_%H%M%S")
+    local run_outdir="$BASE_DIR/../reports/LSTM_SINDy_PPO/$run_id"
+
+    cmd=(
+        python3 "$BASE_DIR/offline_identification_benchmark.py"
+        --data-csv "$csv_path"
+        --data-meta "$meta_path"
+        --out-dir "$run_outdir"
+        --epochs "$epochs"
+        --sequence-len "$sequence_len"
+        --hidden-size "$hidden_size"
+        --num-layers "$num_layers"
+        --dropout "$dropout"
+        --ppo-steps "$ppo_steps"
+    )
+
+    echo "[INFO] command: ${cmd[*]}"
+    "${cmd[@]}"
+
+    if [ -f "$run_outdir/summary_metrics.json" ]; then
+        echo "[INFO] benchmark summary: $run_outdir/summary_metrics.json"
+    fi
+    if [ -f "$run_outdir/benchmark_report.md" ]; then
+        echo "[INFO] benchmark report : $run_outdir/benchmark_report.md"
+    fi
+}
+
 run_full_pipeline() {
     echo "[INFO] Full pipeline 메뉴는 System Identification → Optimization → Chrono 순 workflow로 대체 예정"
 }
@@ -414,7 +483,8 @@ while true; do
     echo "5) Plot Data (Sim vs Real)"
     echo "6) Replay Runs"
     echo "7) System Identification (Physical Params, Stage-wise)"
-    echo "8) Exit"
+    echo "8) Offline Identification Benchmark (LSTM + SINDy-PI + PPO proposal)"
+    echo "9) Exit"
     echo "=========================================="
 
     read -p "Select option: " choice
@@ -449,6 +519,10 @@ while true; do
             pause
             ;;
         8)
+            run_offline_identification_benchmark
+            pause
+            ;;
+        9)
             echo "Bye!"
             exit 0
             ;;
