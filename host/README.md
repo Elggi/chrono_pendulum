@@ -66,6 +66,32 @@ This folder contains host-side runtime, calibration, replay, plotting, and RL op
   Runtime and calibration outputs (CSV + metadata JSON). Includes the latest calibration snapshots and run logs.
 
 
+
+## Offline NNARX + SINDy + PPO benchmark
+
+- `nnarx_sindy_ppo_benchmark.py`
+  End-to-end offline identification benchmark pipeline with:
+  1) nominal NNARX model fitting,
+  2) residual discovery on NNARX error (discrete + continuous variants),
+  3) PPO-based **parameter proposal** optimization on rollout-level objective.
+
+  The script compares irregular-sampling handling strategies (uniform resampling vs. Δt feature), evaluates multi-output vs separate model structures, and emits reproducible reports/artifacts under `reports/NNARX_SINDy_PPO/`.
+
+  Example:
+
+  ```bash
+  python host/nnarx_sindy_ppo_benchmark.py \
+    --csv host/run_logs/chrono_run_1.finalized.csv \
+    --meta host/run_logs/chrono_run_1.meta.json
+  ```
+
+  Or run from the stack menu:
+
+  ```bash
+  bash host/pendulum_stack.sh
+  # choose: "Offline Benchmark (NNARX + SINDy + PPO proposal)"
+  ```
+
 ## Stage-wise GRU trajectory fitting
 
 - `staged_pendulum_calibration.py`
