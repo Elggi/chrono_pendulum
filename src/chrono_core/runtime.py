@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import json
+import csv
 import math
 
 from .config import BodyGeometry, ContactConfig, PendulumPlantConfig
@@ -30,7 +31,8 @@ def main() -> None:
     parser.add_argument("--mode", choices=["sanity", "simulate", "collect-excitation"], default="sanity")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--seconds", type=float, default=2.0)
-    parser.add_argument("--current-topic", default="/ina219/current_ma")
+    parser.add_argument("--current-file", type=Path, default=Path("/tmp/chrono_current_ma.txt"))
+    parser.add_argument("--log-csv", type=Path, default=Path("data/raw/chrono_collect_log.csv"))
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -46,24 +48,6 @@ def main() -> None:
             system.DoStepDynamics(cfg.timestep_s)
         print(f"Simulated {args.seconds:.3f}s with dt={cfg.timestep_s}")
     elif args.mode == "collect-excitation":
-        try:
-            import rclpy
-            from rclpy.node import Node
-            from std_msgs.msg import Float32
-        except ImportError as exc:
-            raise RuntimeError("collect-excitation mode requires ROS2 Python packages (rclpy/std_msgs).") from exc
-
-        class CurrentBuffer(Node):
-            def __init__(self, topic: str) -> None:
-                super().__init__("chrono_current_ingest")
-                self.current_ma = 0.0
-                self.create_subscription(Float32, topic, self.on_current, 20)
-
-            def on_current(self, msg: Float32) -> None:
-                self.current_ma = float(msg.data)
-
-        rclpy.init()
-        node = CurrentBuffer(args.current_topic)
         # placeholder conversion from current to torque
         current_to_torque = 1e-3
         steps = int(args.seconds / cfg.timestep_s)
@@ -72,18 +56,29 @@ def main() -> None:
             torque_fun = None
         else:
             torque_fun = objects["motor"].GetTorqueFunction()
-        for k in range(steps):
-            rclpy.spin_once(node, timeout_sec=0.0)
-            t = k * cfg.timestep_s
-            torque = current_to_torque * node.current_ma
-            if hasattr(objects["motor"], "SetMotorTorque"):
-                objects["motor"].SetMotorTorque(torque + 0.0 * math.sin(t))
-            elif torque_fun is not None and hasattr(torque_fun, "SetConstant"):
-                torque_fun.SetConstant(torque)
-            system.DoStepDynamics(cfg.timestep_s)
-        node.destroy_node()
-        rclpy.shutdown()
-        print(f"Collected excitation run for {args.seconds:.3f}s using {args.current_topic}.")
+        args.log_csv.parent.mkdir(parents=True, exist_ok=True)
+        with args.log_csv.open("w", newline="", encoding="utf-8") as fp:
+            wr = csv.writer(fp)
+            wr.writerow(["t", "current_ma", "torque_input"])
+            for k in range(steps):
+                current_ma = 0.0
+                if args.current_file.exists():
+                    raw = args.current_file.read_text(encoding="utf-8").strip()
+                    if raw:
+                        try:
+                            _, value = raw.split(",", 1)
+                            current_ma = float(value)
+                        except ValueError:
+                            current_ma = 0.0
+                torque = current_to_torque * current_ma
+                if hasattr(objects["motor"], "SetMotorTorque"):
+                    objects["motor"].SetMotorTorque(torque)
+                elif torque_fun is not None and hasattr(torque_fun, "SetConstant"):
+                    torque_fun.SetConstant(torque)
+                system.DoStepDynamics(cfg.timestep_s)
+                wr.writerow([k * cfg.timestep_s, current_ma, torque])
+        print(f"Collected excitation run for {args.seconds:.3f}s using current file {args.current_file}.")
+        print(f"Saved runtime collection log: {args.log_csv}")
 
 
 if __name__ == "__main__":
