@@ -6,7 +6,6 @@ import argparse
 from pathlib import Path
 import json
 import csv
-import math
 
 from .config import BodyGeometry, ContactConfig, PendulumPlantConfig
 from .pendulum_base import ChronoPendulumPlant

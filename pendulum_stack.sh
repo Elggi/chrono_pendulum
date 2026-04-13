@@ -38,6 +38,20 @@ elif command -v python >/dev/null 2>&1; then
   PYTHON_BIN="python"
 fi
 
+ROS_SETUP_SCRIPT="${ROS_SETUP_SCRIPT:-/opt/ros/humble/setup.bash}"
+ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-7}"
+RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
+
+build_ros_prefix() {
+  local prefix=""
+  if [ -f "$ROS_SETUP_SCRIPT" ]; then
+    prefix="source '$ROS_SETUP_SCRIPT' && export ROS_DOMAIN_ID='$ROS_DOMAIN_ID' && export RMW_IMPLEMENTATION='$RMW_IMPLEMENTATION' && "
+  fi
+  echo "$prefix"
+}
+
+ROS_ENV_PREFIX="$(build_ros_prefix)"
+
 detect_python_with_module() {
   local module="$1"
   shift
@@ -49,11 +63,10 @@ detect_python_with_module() {
     if ! command_exists "$candidate"; then
       continue
     fi
-    if "$candidate" - <<PY >/dev/null 2>&1
+    if bash -lc "${ROS_ENV_PREFIX}${candidate} - <<'PY'
 import importlib.util
 raise SystemExit(0 if importlib.util.find_spec("$module") else 1)
-PY
-    then
+PY" >/dev/null 2>&1; then
       echo "$candidate"
       return 0
     fi
@@ -107,7 +120,7 @@ run_ros_module() {
     echo "ROS Python (rclpy) not found. Install/source ROS Python env (e.g. /usr/bin/python3 with rclpy)."
     return 1
   fi
-  run_in_repo "$ROS_PYTHON_BIN -m $cmd"
+  run_in_repo "${ROS_ENV_PREFIX}$ROS_PYTHON_BIN -m $cmd"
 }
 
 prompt_yes_no() {
@@ -183,6 +196,9 @@ environment_checks() {
   echo "Repo root: $REPO_ROOT"
   echo "Python: ${PYTHON_BIN:-NOT FOUND}"
   echo "ROS Python (rclpy): ${ROS_PYTHON_BIN:-NOT FOUND}"
+  echo "ROS setup script: ${ROS_SETUP_SCRIPT:-NOT SET}"
+  echo "ROS_DOMAIN_ID: ${ROS_DOMAIN_ID}"
+  echo "RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION}"
   echo "ros2: $(command -v ros2 || echo 'NOT FOUND')"
   echo "colcon: $(command -v colcon || echo 'NOT FOUND')"
 
@@ -246,7 +262,7 @@ launch_imu_viewer() {
     window_s="$custom_window"
   fi
 
-  run_in_repo "$ROS_PYTHON_BIN -m src.visualization.imu_viewer --topic '$imu_topic' --window '$window_s'"
+  run_in_repo "${ROS_ENV_PREFIX}$ROS_PYTHON_BIN -m src.visualization.imu_viewer --topic '$imu_topic' --window '$window_s'"
   press_enter
 }
 
@@ -298,9 +314,9 @@ chrono_runtime_menu() {
           local host_view
           read -r -p "Run realtime IMU viewer together? [y/N]: " host_view
           if [[ "$host_view" =~ ^[Yy]$ ]]; then
-            run_in_repo_bg "$ROS_PYTHON_BIN -m src.visualization.imu_viewer --topic /imu/data --window 10.0"
+            run_in_repo_bg "${ROS_ENV_PREFIX}$ROS_PYTHON_BIN -m src.visualization.imu_viewer --topic /imu/data --window 10.0"
           fi
-          run_in_repo "$ROS_PYTHON_BIN -m src.ros_io.keyboard_controller --topic-cmd-u /cmd/u --loop-hz 20.0 --pwm-step 10.0 --pwm-max 255.0"
+          run_in_repo "${ROS_ENV_PREFIX}$ROS_PYTHON_BIN -m src.ros_io.keyboard_controller --topic-cmd-u /cmd/u --loop-hz 20.0 --pwm-step 10.0 --pwm-max 255.0"
           press_enter
         elif [ "$control_mode" = "2" ]; then
           if [ -z "$ROS_PYTHON_BIN" ]; then
@@ -316,7 +332,7 @@ chrono_runtime_menu() {
           current_file="/tmp/chrono_current_ma.txt"
           bridge_log="$DATA_DIR/raw/current_bridge_$(date +%Y%m%d_%H%M%S).csv"
           runtime_log="$DATA_DIR/raw/chrono_collect_$(date +%Y%m%d_%H%M%S).csv"
-          run_in_repo_bg "$ROS_PYTHON_BIN -m src.ros_io.current_topic_bridge --topic /ina219/current_ma --imu-topic /imu/data --pwm-topic /hw/pwm_applied --out '$current_file' --log '$bridge_log' --warmup-sec 1.0"
+          run_in_repo_bg "${ROS_ENV_PREFIX}$ROS_PYTHON_BIN -m src.ros_io.current_topic_bridge --topic /ina219/current_ma --imu-topic /imu/data --pwm-topic /hw/pwm_applied --out '$current_file' --log '$bridge_log' --warmup-sec 1.0"
           run_in_repo "$SIM_PYTHON_BIN -m src.chrono_core.runtime --mode collect-excitation --config '$CONFIGS_DIR/default_pendulum.json' --seconds 20.0 --current-file '$current_file' --log-csv '$runtime_log'"
           press_enter
         else
