@@ -1,0 +1,8 @@
+{
+  "gravity_m_s2": 9.81,
+  "timestep_s": 0.002,
+  "rod": {"name": "rod", "shape": "cylinder", "density_kg_m3": 2700.0, "length_m": 0.22, "radius_m": 0.005, "offset_m": 0.11},
+  "imu": {"name": "imu", "shape": "box", "density_kg_m3": 1100.0, "length_m": 0.035, "radius_m": 0.015, "offset_m": 0.17},
+  "hub": {"name": "hub", "shape": "cylinder", "density_kg_m3": 7800.0, "length_m": 0.018, "radius_m": 0.012, "offset_m": 0.0},
+  "contact": {"friction": 0.5, "restitution": 0.1, "young_modulus_pa": 2000000000.0}
+}

@@ -1,126 +1,107 @@
-# Chrono Pendulum (1-DOF Sim2Real Digital Twin)
+# Chrono Pendulum Digital Twin (1-DOF Rotary)
 
-This repository uses **Project Chrono 9.0.1** + ROS2 to run a 1-DOF pendulum digital twin.
+This repository is a **physics-grounded sim-to-real framework** for a 1-DOF rotary pendulum.
 
-## Introduction: Research Goal
+## Core principles
 
-The main goal is to build a **Sim2Real digital twin** that can:
-- run a physically grounded pendulum model in Chrono,
-- reconstruct real states from hardware IMU/encoder streams,
-- identify/update compact surrogate dynamics parameters, and
-- validate/optimize tracking quality with replay + PPO-based tuning.
+- **Project Chrono** is the source of rigid-body truth: geometry, density-driven mass/inertia, gravity, contact, and joints.
+- Actuation enters through **`ChLinkMotorRotationTorque`**.
+- ML identifies what physics does not capture well: actuator mapping, delay/deadzone, friction mismatch, and residual dynamics.
+- RL is used for **calibration parameter tuning**, not end-to-end controller replacement.
 
-Practically, this supports a repeatable workflow from data collection → calibration → policy/parameter optimization → real-time runtime comparison.
+## Critical data interpretation rule
 
-## Framework Flow
+### Free-decay data
+- Zero/near-zero input trajectories.
+- Used for passive nominal state evolution.
+- Trains `models/nominal/model.pt`.
 
-1. **Data acquisition / runtime**
-   - `chrono_pendulum.py` runs simulation and logs synchronized sim/real channels.
-   - ROS2 bridges commands and sensor streams.
-2. **Calibration**
-   - `calibration.py` provides geometric and sensor-derived constants (e.g., CPR/radius).
-3. **Model parameter optimization**
-   - `train_pendulum_rl.py` replays logs and tunes surrogate parameters.
-4. **Validation and visualization**
-   - `plot_pendulum.py` compares `theta/omega/alpha` between sim and real.
-   - `replay_pendulum_cli.py` validates best parameters on replay data.
-5. **Operational launcher**
-   - `pendulum_stack.sh` provides menu-based orchestration of the whole pipeline.
+### Excitation data
+- Nonzero input trajectories (PWM/current/chirp/step).
+- Used for actuator and residual identification.
+- Trains `models/actuator/actuator_a2.pt` and sparse/regression artifacts.
 
-## Recommended Versions
+If logs are mixed, use segmentation to extract input-off segments before nominal training.
 
-- Python: **3.10+** (ROS2 Humble-friendly)
-- ROS2: **Humble**
-- Project Chrono: **9.0.1**
-- NumPy / Matplotlib / Pandas: recent stable releases compatible with Python 3.10+
+## Pipelines
 
-> Note: Match Chrono and ROS2 environments first; most runtime issues come from version or ABI mismatches there.
+### Pipeline N (nominal passive)
+- Module: `src/identification/nominal_free_decay/train.py`
+- Learns `(theta, omega, dt) -> (theta_next, omega_next)` from free-decay only.
+- Saves:
+  - `models/nominal/model.pt`
+  - `config_snapshot.json`
+  - `normalization.json`
+  - `feature_schema.json`
+  - `split_metadata.json`
 
-## Adopted surrogate model
+### Pipeline A-2 (neural actuator/residual)
+- Module: `src/identification/actuator_a2/train.py`
+- Learns effective torque from excitation data.
+- Saves `models/actuator/actuator_a2.pt` plus reproducibility artifacts.
 
-We use a geometry-fixed inertia surrogate:
+### Pipeline B (interpretable)
+- Regression actuator fit: `src/identification/regression/fit_actuator_regression.py`
+- Sparse residual discovery (SINDy-style STLSQ): `src/identification/sparse/fit_sindy.py`
+- Sparse equations saved in JSON under `models/sparse/`.
 
-<img width="463" height="48" alt="Screenshot from 2026-03-31 04-09-14" src="https://github.com/user-attachments/assets/63f41e68-6bc8-45f5-af6a-cda97c200834" />
+### Pipeline C-1 (RL calibration)
+- Environment: `src/calibration_rl/env.py`
+- Trainer: `src/calibration_rl/train_ppo.py`
+- PPO agent tunes calibration parameters for rollout agreement.
+- Saves policy to `models/rl/ppo_calibrator.zip`.
 
+## Directory structure
 
-- Control input: `u` (same command channel used in runtime)
-- States: `theta`, `omega`, `alpha=theta_ddot`
-- Identified parameters (only 4):
-  1. `K_u` (motor gain)
-  2. `b` (`b_eq`, viscous damping)
-  3. `tau_eq` (Coulomb friction magnitude)
-  4. `l_cg` (`l_com`, COM for gravity term)
-- `eps` is configurable (`tanh_eps`) and **not identified by default**.
+```text
+configs/
+data/raw data/processed data/splits
+models/nominal models/actuator models/sparse models/rl
+src/chrono_core/
+src/ros_io/
+src/preprocessing/
+src/identification/nominal_free_decay/
+src/identification/actuator_a2/
+src/identification/regression/
+src/identification/sparse/
+src/calibration_rl/
+src/visualization/
+src/cli/
+tests/
+docs/
+```
 
-## Geometry-based fixed inertia
+## Developer workflow
 
-Inertia is computed once from geometry/calibration and kept fixed during identification:
+1. Add free-decay logs to `data/raw/free_decay/` and convert using `src/ros_io/ingest.py`.
+2. Add excitation logs to `data/raw/excitation/` and convert similarly.
+3. Segment mixed logs with `src/preprocessing/segmentation.py`.
+4. Train nominal model:
+   - `python -m src.cli.pipeline train-nominal --data data/processed/nominal_train.csv`
+5. Train actuator A-2 model:
+   - `python -m src.cli.pipeline train-actuator-a2 --data data/processed/excitation_train.csv`
+6. Fit regression actuator law:
+   - `python -m src.cli.pipeline fit-regression --data data/processed/excitation_train.csv`
+7. Fit sparse residual equation:
+   - `python -m src.cli.pipeline fit-sparse --data data/processed/residual_train.csv`
+8. Run RL calibration:
+   - `python -m src.cli.pipeline train-rl-calibrator --data data/processed/calibration_rollout.csv`
+9. Validate via one-step and rollout metrics + overlays in `src/visualization/validation.py` and `src/visualization/imu_viewer.py`.
 
-<img width="149" height="33" alt="Screenshot from 2026-03-31 01-59-01" src="https://github.com/user-attachments/assets/65024e42-f0b8-40aa-8571-85f378dc06f5" />
+## Reproducibility
 
+Every training pipeline must persist:
+- model weights,
+- config snapshot,
+- normalization/scaler parameters,
+- feature schema,
+- trajectory-based split metadata.
 
-<img width="159" height="62" alt="Screenshot from 2026-03-31 01-58-21" src="https://github.com/user-attachments/assets/27d31549-71d4-4d32-8eb8-2568cbca4f1d" />  <img width="156" height="34" alt="Screenshot from 2026-03-31 01-59-45" src="https://github.com/user-attachments/assets/a29fafeb-65f2-4da1-8081-e59978389ae3" />
+## Dependencies
 
-Constants/config:
-- `rod_mass = 0.2 kg`
-- `rod_length = 0.285 m`
-- `imu_mass = 0.02 kg`
-- `r_imu` from calibration (`calibration.py` output) or config default
-- `gravity`, `eps` in config
-
-### Why fixed-geometry `J`?
-
-- Avoids coupling between `J` and `l_cg` (identifiability issue when both vary together).
-- Keeps `l_cg` physically interpretable in only the gravity torque term.
-- Reduces optimizer/RL search dimension and improves parameter robustness.
-
-## Real-state derivation
-
-Runtime logs `theta_real`, `omega_real`, `alpha_real` from IMU-based reconstruction:
-
-- `theta_real`: quaternion -> relative orientation -> pendulum tip direction -> planar angle
-- `omega_real`: IMU `wz`
-- `alpha_real` options (`--real-alpha-source`):
-  - `omega_diff`: derivative of `omega_real`
-  - `tangential_accel`: tangential acceleration / radius
-  - `blend`: weighted mixture of both
-
-## Config parameters required by this model
-
-`BridgeConfig` includes:
-- `rod_mass`
-- `rod_length`
-- `imu_mass`
-- `r_imu`
-- `tanh_eps` (eps)
-- `gravity`
-
-## Notes
-
-- Electrical voltage/current/power motor modeling was removed from the surrogate dynamics path.
-- `pendulum_stack.sh` monitoring can stay for Jetson runtime observability.
-
-## PPO Algorithm: how it’s built
-
-PPO training is implemented in the replay optimization path (`train_pendulum_rl.py`) with a custom pendulum replay environment (`chrono_core/pendulum_rl_env.py`).
-
-High-level structure:
-- **Environment objective**: minimize mismatch between simulated and measured trajectories (theta/omega/alpha, plus optional smoothness penalties).
-<img width="987" height="141" alt="image" src="https://github.com/user-attachments/assets/eb1c06ff-0762-4e91-b76f-7dc785323409" />
-- **Action meaning**: update candidate surrogate parameters (e.g., `l_com`, `b_eq`, `tau_eq`, `K_u`) within bounded ranges.
-<img width="252" height="32" alt="image" src="https://github.com/user-attachments/assets/b21ad714-62b7-42b8-9e2d-7d33215b101d" />
-<img width="330" height="91" alt="image" src="https://github.com/user-attachments/assets/5a43782a-8e95-4c62-93df-d3f76c61b8bc" />
-
-- **Episode loop**:
-  1. sample/init parameters,
-  2. roll out replay dynamics over logged command inputs,
-  3. compute reward from tracking error/cost,
-  4. update policy/value networks with PPO clipped objective.
-<img width="445" height="141" alt="image" src="https://github.com/user-attachments/assets/1fe7a225-d6b6-4f91-af81-2c152dacc166" />
-
-- **Outputs**:
-  - best parameter JSON,
-  - replay CSV for direct comparison plots,
-  - optional dashboard/monitor artifacts.
-
-This keeps online runtime lightweight while using offline RL to search robust parameter sets against real logs.
+- Python 3.10+
+- `pychrono`
+- `numpy`, `pandas`, `torch`
+- `gymnasium`, `stable-baselines3`
+- `matplotlib`
+- `pytest`
