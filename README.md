@@ -1,126 +1,294 @@
-# Chrono Pendulum (1-DOF Sim2Real Digital Twin)
+# Chrono Pendulum Digital Twin: Multi-Method System Identification Framework
 
-This repository uses **Project Chrono 9.0.1** + ROS2 to run a 1-DOF pendulum digital twin.
+This project is a **Sim2Real digital-twin framework** for a 1-DOF actuated pendulum using **Project Chrono** as the authoritative physics engine and a **system-identification toolbox** (regression, SINDy, neural residual models, and RL calibration).
 
-## Introduction: Research Goal
+The core philosophy is:
 
-The main goal is to build a **Sim2Real digital twin** that can:
-- run a physically grounded pendulum model in Chrono,
-- reconstruct real states from hardware IMU/encoder streams,
-- identify/update compact surrogate dynamics parameters, and
-- validate/optimize tracking quality with replay + PPO-based tuning.
+> **Chrono is the plant** (rigid-body dynamics, contact, gravity, geometry, mass/inertia).  
+> **System ID learns only what the physics model cannot know** (actuator losses, friction, small modeling errors, sensor/latency effects).
 
-Practically, this supports a repeatable workflow from data collection → calibration → policy/parameter optimization → real-time runtime comparison.
+## Vision and architecture
+### Key design decisions
+1. Chrono plant uses torque actuation via ChLinkMotorRotationTorque. This motor applies torque without enforcing motion constraints (unlike angle/speed motors), which is the correct abstraction for real actuators and robust contact events.
+2. Bodies are created using ChBodyEasy* (e.g., ChBodyEasyBox, ChBodyEasyCylinder) so that mass and inertia are computed automatically from geometry and density.
+3. All identification methods share a single canonical dataset and unit convention (rad, rad/s, rad/s², A, N·m).
+4. Any learned/identified model is packaged as an artifact:
+   - nominal parameters (JSON)
+   - discovered symbolic equation (text/JSON)
+   - NN residual model (.pt + scaler/schema)
+   - RL-calibrated parameter set (JSON)
+### Core concepts (ML terminology)
 
-## Framework Flow
+We standardize terminology across pipelines:
 
-1. **Data acquisition / runtime**
-   - `chrono_pendulum.py` runs simulation and logs synchronized sim/real channels.
-   - ROS2 bridges commands and sensor streams.
-2. **Calibration**
-   - `calibration.py` provides geometric and sensor-derived constants (e.g., CPR/radius).
-3. **Model parameter optimization**
-   - `train_pendulum_rl.py` replays logs and tunes surrogate parameters.
-4. **Validation and visualization**
-   - `plot_pendulum.py` compares `theta/omega/alpha` between sim and real.
-   - `replay_pendulum_cli.py` validates best parameters on replay data.
-5. **Operational launcher**
-   - `pendulum_stack.sh` provides menu-based orchestration of the whole pipeline.
+State:
+[ x(t) = [\theta(t), \ \omega(t)]^\top ] 
 
-## Recommended Versions
+<img width="207" height="37" alt="image" src="https://github.com/user-attachments/assets/eca5ab74-b188-4fee-bd43-b15230204da0" />
 
-- Python: **3.10+** (ROS2 Humble-friendly)
-- ROS2: **Humble**
-- Project Chrono: **9.0.1**
-- NumPy / Matplotlib / Pandas: recent stable releases compatible with Python 3.10+
+Optionally include (\alpha(t)) if available, but treat it carefully (differentiation noise).
 
-> Note: Match Chrono and ROS2 environments first; most runtime issues come from version or ABI mismatches there.
+Input / action (actuation signal):
+[ u(t) = I(t) ] 
 
-## Adopted surrogate model
+<img width="118" height="32" alt="image" src="https://github.com/user-attachments/assets/0bc5588d-cde4-472b-ad92-c0b22d1551ef" />
 
-We use a geometry-fixed inertia surrogate:
+where (I) is actuator current (amps). (PWM/voltage can be substituted if that is what hardware provides.)
 
-<img width="463" height="48" alt="Screenshot from 2026-03-31 04-09-14" src="https://github.com/user-attachments/assets/63f41e68-6bc8-45f5-af6a-cda97c200834" />
+Torque command applied to Chrono:
+[ \tau(t) \in \mathbb{R} ] 
 
+<img width="118" height="32" alt="image" src="https://github.com/user-attachments/assets/c061ad88-5e16-4a88-a0f5-142dd5ec589e" />
 
-- Control input: `u` (same command channel used in runtime)
-- States: `theta`, `omega`, `alpha=theta_ddot`
-- Identified parameters (only 4):
-  1. `K_u` (motor gain)
-  2. `b` (`b_eq`, viscous damping)
-  3. `tau_eq` (Coulomb friction magnitude)
-  4. `l_cg` (`l_com`, COM for gravity term)
-- `eps` is configurable (`tanh_eps`) and **not identified by default**.
+applied via a torque function attached to ChLinkMotorRotationTorque.
 
-## Geometry-based fixed inertia
+Feature vector (for regression/SINDy/NN):
+[ \phi(t) = f([x(t),u(t)]) ] 
 
-Inertia is computed once from geometry/calibration and kept fixed during identification:
+<img width="206" height="36" alt="image" src="https://github.com/user-attachments/assets/3fa5fc88-45ff-45d5-902f-688981e8edae" />
 
-<img width="149" height="33" alt="Screenshot from 2026-03-31 01-59-01" src="https://github.com/user-attachments/assets/65024e42-f0b8-40aa-8571-85f378dc06f5" />
+Example: ([\theta,\omega,I,\sin\theta,\tanh(\omega/\epsilon),\omega I,\ldots]).
+
+<img width="286" height="40" alt="image" src="https://github.com/user-attachments/assets/ef4fb592-dd08-4ad5-b82d-03c1773f91af" />
 
 
-<img width="159" height="62" alt="Screenshot from 2026-03-31 01-58-21" src="https://github.com/user-attachments/assets/27d31549-71d4-4d32-8eb8-2568cbca4f1d" />  <img width="156" height="34" alt="Screenshot from 2026-03-31 01-59-45" src="https://github.com/user-attachments/assets/a29fafeb-65f2-4da1-8081-e59978389ae3" />
+### Chrono plant layer
+Why ChBodyEasy* and geometry+density? 
+The plant is built from rigid bodies whose mass and inertia should be derived from geometry. Chrono provides ChBodyEasyBox and ChBodyEasyCylinder where mass and inertia are set automatically depending on density and the shape is created at the center of mass (COM). The cylinder is created along the Y axis and centered at COM. (See Chrono API docs.)
 
-Constants/config:
-- `rod_mass = 0.2 kg`
-- `rod_length = 0.285 m`
-- `imu_mass = 0.02 kg`
-- `r_imu` from calibration (`calibration.py` output) or config default
-- `gravity`, `eps` in config
+This matters because it prevents “silent” mismatches between:
 
-### Why fixed-geometry `J`?
+   - CAD dimensions vs configured mass values
+   - manually typed inertia tensors that drift over time
 
-- Avoids coupling between `J` and `l_cg` (identifiability issue when both vary together).
-- Keeps `l_cg` physically interpretable in only the gravity torque term.
-- Reduces optimizer/RL search dimension and improves parameter robustness.
+### Why torque motors, not motion-enforcing motors
+We use ChLinkMotorRotationTorque as the actuation port:
 
-## Real-state derivation
+   - It applies torque between two frames/bodies.
+   - Unlike ChLinkMotorRotationAngle and ChLinkMotorRotationSpeed, it does not enforce motion via constraints.
+   - Torque is supplied via a ChFunction (nominally (\tau = f(t)), but Chrono docs explicitly allow custom functions that also depend on state information).
 
-Runtime logs `theta_real`, `omega_real`, `alpha_real` from IMU-based reconstruction:
+This makes the simulation stable when the pendulum collides or experiences hard constraints, and it matches the reality that motors produce torque, not perfect kinematic trajectories.
 
-- `theta_real`: quaternion -> relative orientation -> pendulum tip direction -> planar angle
-- `omega_real`: IMU `wz`
-- `alpha_real` options (`--real-alpha-source`):
-  - `omega_diff`: derivative of `omega_real`
-  - `tangential_accel`: tangential acceleration / radius
-  - `blend`: weighted mixture of both
+### ROS2 data collection and logging
+Required topics (reference)
+The framework assumes ROS2 topics from a hardware bridge node (or replay source), e.g.:
 
-## Config parameters required by this model
+- IMU:
+   - /imu/data (sensor_msgs/Imu)
+- Encoder:
+   - /hw/enc (counts or radians; project-defined)
+- Current:
+   - /ina219/current_ma (mA) or /input_current (A)
+- Optional:
+   - /hw/pwm_applied
+   - /pendulum/state_estimate
 
-`BridgeConfig` includes:
-- `rod_mass`
-- `rod_length`
-- `imu_mass`
-- `r_imu`
-- `tanh_eps` (eps)
-- `gravity`
+### Logs (canonical CSV schema)
+Each run produces a CSV log that includes at minimum:
 
-## Notes
+   - time or wall_elapsed
+   - theta (rad)
+   - omega (rad/s)
+   - alpha (rad/s²) — either sensor-derived or computed from (\omega)
+   - input_current (A)
+All identification pipelines consume these logs.
 
-- Electrical voltage/current/power motor modeling was removed from the surrogate dynamics path.
-- `pendulum_stack.sh` monitoring can stay for Jetson runtime observability.
+### System identification pipelines
+We support multiple complementary ID methods. The point is not to pick one “best” method but to build a toolbox that can:
 
-## PPO Algorithm: how it’s built
+   - produce interpretable baseline models,
+   - discover missing physics terms,
+   - learn residuals when symbolic models are not enough,
+   - and calibrate parameters for sim2real fidelity.
 
-PPO training is implemented in the replay optimization path (`train_pendulum_rl.py`) with a custom pendulum replay environment (`chrono_core/pendulum_rl_env.py`).
 
-High-level structure:
-- **Environment objective**: minimize mismatch between simulated and measured trajectories (theta/omega/alpha, plus optional smoothness penalties).
-<img width="987" height="141" alt="image" src="https://github.com/user-attachments/assets/eb1c06ff-0762-4e91-b76f-7dc785323409" />
-- **Action meaning**: update candidate surrogate parameters (e.g., `l_com`, `b_eq`, `tau_eq`, `K_u`) within bounded ranges.
-<img width="252" height="32" alt="image" src="https://github.com/user-attachments/assets/b21ad714-62b7-42b8-9e2d-7d33215b101d" />
-<img width="330" height="91" alt="image" src="https://github.com/user-attachments/assets/5a43782a-8e95-4c62-93df-d3f76c61b8bc" />
+### Pipeline B: physics regression + SINDy
+Pipeline B is the interpretable baseline.
 
-- **Episode loop**:
-  1. sample/init parameters,
-  2. roll out replay dynamics over logged command inputs,
-  3. compute reward from tracking error/cost,
-  4. update policy/value networks with PPO clipped objective.
-<img width="445" height="141" alt="image" src="https://github.com/user-attachments/assets/1fe7a225-d6b6-4f91-af81-2c152dacc166" />
+### B1. Regression (nominal model)
+A standard nominal 1-DOF equation is:
 
-- **Outputs**:
-  - best parameter JSON,
-  - replay CSV for direct comparison plots,
-  - optional dashboard/monitor artifacts.
+[ J\alpha = K_I I - b_{eq}\omega - \tau_{eq}\tanh\left(\frac{\omega}{\epsilon}\right)- m g l_{com}\sin\theta ]
 
-This keeps online runtime lightweight while using offline RL to search robust parameter sets against real logs.
+<img width="439" height="42" alt="image" src="https://github.com/user-attachments/assets/b6882bcc-b2d9-48b1-80f2-537aa7bc1ebb" />
+
+
+   - (J): effective inertia about the pivot axis
+   - (K_I): current-to-torque gain
+   - (b_{eq}): viscous friction coefficient
+   - (\tau_{eq}): Coulomb friction magnitude (smoothed by (\tanh))
+   - (m g l_{com}\sin\theta): gravity load torque term for a rigid rotating assembly
+Theory: this is a linear regression problem in the parameters if you rearrange:
+
+[ J\alpha + b_{eq}\omega + \tau_{eq}\tanh(\omega/\epsilon) + m g l_{com}\sin\theta = K_I I ]
+
+<img width="439" height="42" alt="image" src="https://github.com/user-attachments/assets/711efaa4-2c63-488d-8ff2-af5b4c3b2b7c" />
+
+or stack terms and solve with least squares. This yields a robust, interpretable baseline and a residual signal for further modeling.
+
+### B2. SINDy (Sparse Identification of Nonlinear Dynamics)
+SINDy aims to discover a parsimonious symbolic model by solving:
+
+[ \dot{x} = \Theta(x,u),\xi ]
+
+<img width="156" height="38" alt="image" src="https://github.com/user-attachments/assets/8e6d4cfb-ba50-4009-bbc5-168549118289" />
+
+where:
+
+   - (\Theta(\cdot)) is a library of candidate nonlinear features (polynomials, Fourier terms, (\sin\theta), (\tanh(\omega)), etc.)
+   - (\xi) is a sparse coefficient vector found via sparse regression (e.g., STLSQ, SR3)
+
+We recommend two variants:
+
+1. Greybox SINDy (residual dynamics)
+Fit SINDy on the residual: [ \alpha_{res}(t) = \alpha_{data}(t) - \alpha_{nom}(t) ]
+
+<img width="262" height="35" alt="image" src="https://github.com/user-attachments/assets/361b4b08-3a53-4bf8-a41f-216926db2d44" />
+
+This preserves interpretability while focusing discovery on “what’s missing.”
+
+3. Blackbox SINDy (full dynamics)
+Fit SINDy to the full dynamics if interpretability constraints are relaxed.
+
+Theory: SINDy is sparse regression (compressed sensing intuition): you assume only a few terms in a large candidate set are active and use thresholding-based solvers to select them.
+
+### Pipeline A-2: Actuator neural residual (current → extra torque)
+Pipeline A-2 models unmodeled actuator effects as a learned residual torque:
+
+[ \tau(t) = \tau_{nom}(x(t),I(t)) + \tau_{res}(x(t),I(t);\psi) ]
+
+<img width="400" height="42" alt="image" src="https://github.com/user-attachments/assets/ce3af638-e8f8-402a-99b5-2daf75c92f20" />
+
+where:
+
+- (\tau_{nom}) is the nominal torque model (gain + friction)
+- (\tau_{res}) is a neural network (small MLP) trained from data
+
+A-2 residual training target
+A common residual definition is:
+
+[ \tau_{res,\ target}(t)
+J\alpha(t)
+\Big( K_I I(t)
+b_{eq}\omega(t)
+\tau_{eq}\tanh(\omega(t)/\epsilon)
+m g l_{com}\sin\theta(t) \Big) ]
+
+<img width="573" height="53" alt="image" src="https://github.com/user-attachments/assets/a0e4e920-b954-44bf-96a1-1e5576b190b2" />
+
+This target has a practical interpretation: “the torque not explained by the nominal model.”
+
+Features and scaling
+A minimal feature vector is:
+
+[ z(t) = [\theta(t),\ \omega(t),\ I(t)] ]
+
+<img width="220" height="33" alt="image" src="https://github.com/user-attachments/assets/de3fc9ab-7c64-4f89-9f9e-13070d7cce51" />
+
+In practice, scaling (standardization) is essential for stable training and cross-run generalization.
+
+Theory: this is supervised regression with a universal function approximator. Residual learning is a standard grey-box technique: keep physics constraints explicit, learn only the mismatch.
+
+### Pipeline C-1: RL calibration (PPO) for sim2real parameters
+Pipeline C-1 treats calibration as a sequential decision process:
+
+- Episode = simulate one or more logged trajectories using candidate parameters
+- Action = propose parameter updates (e.g., (K_I, b_{eq}, \tau_{eq}, l_{com}))
+- Reward = negative tracking error between simulation and real: [ r = -\mathrm{RMSE}(\theta) - \lambda_1\mathrm{RMSE}(\omega) - \lambda_2\mathrm{RMSE}(\alpha) ]
+
+<img width="439" height="35" alt="image" src="https://github.com/user-attachments/assets/1e33a7dd-cf44-4196-a64d-fcc773747d31" />
+
+Because this is fundamentally an optimization of parameters, RL is most valuable when:
+
+- the objective is non-smooth (contacts, resets),
+- the simulator is a black box w.r.t. those parameters,
+- you want robust policies over a distribution of trajectories.
+
+We use PPO (on-policy) primarily for stability; alternatives include CMA-ES or Bayesian optimization for purely static parameter tuning.
+
+Theory: PPO is policy-gradient RL with a clipped surrogate objective to prevent destructive policy updates. Here, the “policy” outputs calibration parameters bounded in a physically plausible range.
+
+Optional: RL residual tuning
+You can also combine approaches:
+
+[ \tau_{nom}(x,I;\theta) + \tau_{sindy}(x,I;\xi) + \tau_{nn}(x,I;\psi) ]
+
+<img width="380" height="42" alt="image" src="https://github.com/user-attachments/assets/d1aab18f-90da-41e5-9011-741e33f3384c" />
+
+and apply RL to tune selected scalars (e.g., gain scaling or residual weight) for robustness.
+
+### Concise module map 
+Package / module	|  Key classes / functions	  |  Responsibilities	|    Pipelines supported
+
+chrono_pendulum/plant/chrono_plant.py  |	ChronoPendulumPlant	|  Build Chrono system with ChBodyEasy* bodies; joints; ChLinkMotorRotationTorque torque port; stepping; state extraction  |	A-2, B, C-1
+
+chrono_pendulum/plant/geometry.py  | 	density_from_mass(), derived_inertia_report()  | 	Compute density so mass matches config; compute derived COM/inertia summaries for reporting  |	A-2 targets, B constants, C-1 optional
+
+chrono_pendulum/plant/contact.py  |  make_contact_material()	|  NSC/SMC surface material creation and collision enable flags  |	Plant fidelity
+
+chrono_pendulum/models/actuator_nominal.py	|   NominalTorqueModel	|   Implements (\tau_{nom}(x,u)) (gain + friction) used by A-2 and B	|   A-2, B, C-1
+
+chrono_pendulum/models/actuator_nn_residual.py	|   ResidualTorqueNN	|   Loads .pt + scaler + schema; predicts (\tau_{res})	|   A-2
+
+chrono_pendulum/models/actuator_compose.py	|   ComposedActuator	|   (\tau = \tau_{nom} + \tau_{res})	|   A-2
+
+chrono_pendulum/data/csv_io.py	|   load_log_csvs()	|   One canonical CSV parser (columns, units, alpha derivation)	|   A-2, B, C-1
+
+chrono_pendulum/pipelines/regression.py	|   fit_nominal_params()	|   Stage1 regression / least-squares identification	|   B
+
+chrono_pendulum/pipelines/sindy.py   |	fit_sindy()	|   SINDy on residual or full dynamics; exports equation	|   B
+
+chrono_pendulum/pipelines/a2_train.py	|   train_residual_nn()	|   Trains NN residual; writes artifacts; updates config	|   A-2
+
+chrono_pendulum/pipelines/c1_env.py	|  ChronoCalibrationEnv	   |   Gym/Gymnasium env for parameter calibration	|   C-1
+
+chrono_pendulum/pipelines/c1_train_ppo.py	|   train_ppo()	|   PPO trainer harness, logging and write-back	|   C-1
+
+apps/ (or keep host/)	|  CLI scripts	|   Thin wrappers only (no core logic)	|   All
+
+
+### Reproducibility (dependencies)
+We recommend a pinned Python environment.
+
+Core runtime
+Python 3.10+
+Project Chrono Python bindings (PyChrono)
+ROS2 + rclpy + relevant message packages
+Data + plotting
+numpy, scipy, pandas, matplotlib
+System identification
+PySINDy
+scikit-learn (scalers)
+Neural residual
+PyTorch (CPU is fine, GPU optional)
+RL calibration
+gymnasium
+stable-baselines3
+tensorboard (recommended)
+
+### Target project layout (after refactor)
+chrono_pendulum/
+  plant/
+  models/
+  data/
+  pipelines/
+apps/
+  chrono_pendulum_run.py
+  imu_viewer.py
+  replay.py
+configs/
+  motor_torque.json
+  calibration_latest.json
+
+### Workflow quickstart (conceptual)
+1. Collect data (ROS2) → CSV logs
+2. Run Regression (B1) → nominal params
+3. Run SINDy (B2) → discovered terms/equation
+4. Train NN residual (A-2) if needed → model.pt
+5. Run RL calibration (C-1) for sim2real match → calibrated params
+6. Use the assembled actuator model + Chrono plant for replay and prediction
+
+
+<img width="998" height="626" alt="image" src="https://github.com/user-attachments/assets/febeb639-f8b5-4e7e-bb9b-77d95da3d4af" />
+
