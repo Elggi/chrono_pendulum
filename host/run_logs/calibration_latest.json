@@ -1,0 +1,73 @@
+{
+  "created_at_utc": "2026-03-31T08:43:36Z",
+  "method": "manual_rotation_with_orientation",
+  "summary": {
+    "mean_cpr": 189.0,
+    "mean_radius_m": 0.24979305872167723,
+    "g_eff_mps2": 9.797604406435664,
+    "trial_count_cpr": 3,
+    "trial_count_r": 9,
+    "trial_count_g": 87
+  },
+  "cpr_trials": [
+    {
+      "trial": 1,
+      "cpr": 186.0
+    },
+    {
+      "trial": 2,
+      "cpr": 159.0
+    },
+    {
+      "trial": 3,
+      "cpr": 222.0
+    }
+  ],
+  "radius_trials": [
+    {
+      "trial": 444,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24975643239382844
+    },
+    {
+      "trial": 445,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24998385173424773
+    },
+    {
+      "trial": 446,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24987329043572015
+    },
+    {
+      "trial": 447,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.2493836526172492
+    },
+    {
+      "trial": 551,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24981030733870632
+    },
+    {
+      "trial": 552,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.2498957480441443
+    },
+    {
+      "trial": 592,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24961804373615507
+    },
+    {
+      "trial": 593,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24998947991954626
+    },
+    {
+      "trial": 594,
+      "method": "anti_parallel_chord",
+      "radius_m": 0.24982672227549751
+    }
+  ]
+}
