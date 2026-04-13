@@ -19,8 +19,8 @@ This folder contains host-side runtime, calibration, replay, plotting, and RL op
 - `plot_pendulum.py`  
   Unified plotting dashboard for simulation/real trajectory comparison and error visualization.
 
-- `train_pendulum_rl.py`  
-  Offline replay-based PPO optimization for surrogate model parameters.
+- `stage3_sb3_ppo.py`  
+  Chrono-direct PPO optimization stage (Option 7).
 
 - `replay_pendulum_cli.py`  
   CLI replay runner that re-simulates logged command streams with chosen parameter/calibration JSON.
@@ -86,3 +86,9 @@ This folder contains host-side runtime, calibration, replay, plotting, and RL op
   - `trajectory_fit_summary.json` (pipeline summary)
   - `trajectory_model_params.json` (Chrono `--parameter-json` compatible wrapper + GRU checkpoint reference)
   - `stageN/stageN_loss_history.csv` and `stageN/stageN_loss_convergence.png` (epoch-wise loss logs/plot)
+
+
+## Option 5 regression note
+
+- Option 3 updates geometry COM only.
+- Dynamic inertia `J` is identified from data in Option 5 (`stage1_regression.py`), not fixed from geometry inertia calculation.
