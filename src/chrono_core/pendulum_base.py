@@ -34,6 +34,7 @@ class ChronoPendulumPlant:
         system.Add(ground)
 
         rod = chrono.ChBodyEasyCylinder(
+            chrono.ChAxis_Z,
             self.config.rod.radius_m,
             self.config.rod.length_m,
             self.config.rod.density_kg_m3,
@@ -55,6 +56,7 @@ class ChronoPendulumPlant:
         system.Add(imu)
 
         hub = chrono.ChBodyEasyCylinder(
+            chrono.ChAxis_Z,
             self.config.hub.radius_m,
             self.config.hub.length_m,
             self.config.hub.density_kg_m3,

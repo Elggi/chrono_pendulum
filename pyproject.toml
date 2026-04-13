@@ -7,6 +7,10 @@ name = "chrono-pendulum-digital-twin"
 version = "0.1.0"
 description = "Physics-grounded sim-to-real digital twin for a 1-DOF Chrono pendulum"
 requires-python = ">=3.10"
+dependencies = [
+  "pandas>=2.0",
+  "pysindy>=1.7",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
