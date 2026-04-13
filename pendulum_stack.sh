@@ -38,9 +38,32 @@ elif command -v python >/dev/null 2>&1; then
   PYTHON_BIN="python"
 fi
 
-ROS_SETUP_SCRIPT="${ROS_SETUP_SCRIPT:-/opt/ros/humble/setup.bash}"
+ROS_SETUP_SCRIPT="${ROS_SETUP_SCRIPT:-}"
 ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-7}"
 RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
+
+resolve_ros_setup_script() {
+  if [ -n "$ROS_SETUP_SCRIPT" ] && [ -f "$ROS_SETUP_SCRIPT" ]; then
+    echo "$ROS_SETUP_SCRIPT"
+    return 0
+  fi
+
+  local candidates=(
+    "/opt/ros/humble/setup.bash"
+    "/opt/ros/${ROS_DISTRO:-humble}/setup.bash"
+    "$REPO_ROOT/ros2_ws/install/setup.bash"
+  )
+  local p
+  for p in "${candidates[@]}"; do
+    if [ -f "$p" ]; then
+      echo "$p"
+      return 0
+    fi
+  done
+  return 1
+}
+
+ROS_SETUP_SCRIPT="$(resolve_ros_setup_script || true)"
 
 build_ros_prefix() {
   local prefix=""
@@ -60,7 +83,7 @@ detect_python_with_module() {
     if [ -z "$candidate" ]; then
       continue
     fi
-    if ! command_exists "$candidate"; then
+    if ! command -v "$candidate" >/dev/null 2>&1; then
       continue
     fi
     if bash -lc "${ROS_ENV_PREFIX}${candidate} - <<'PY'
