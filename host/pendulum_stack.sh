@@ -152,6 +152,14 @@ run_imu_viewer() {
 
 run_chrono_pendulum() {
     echo "--------------------------------"
+    read -p "Initial angle theta0 [deg] (+CCW, -CW) [0]: " theta0_deg
+    theta0_deg=${theta0_deg:-0}
+    if ! [[ "$theta0_deg" =~ ^[+-]?[0-9]+([.][0-9]+)?$ ]]; then
+        echo "[WARN] Invalid theta0 input '$theta0_deg'. Fallback to 0 deg."
+        theta0_deg=0
+    fi
+    echo "theta0_deg = $theta0_deg (+:CCW, -:CW)"
+    echo "--------------------------------"
     echo "Select mode:"
     echo "1) Host mode (keyboard control)"
     echo "2) Jetson mode (ROS input)"
@@ -165,13 +173,13 @@ run_chrono_pendulum() {
 
     if [ "$mode" == "1" ]; then
         echo "[INFO] chrono_pendulum (HOST mode)"
-        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode host)
+        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode host --theta0-deg "$theta0_deg")
         [ -n "$param_json" ] && cmd+=(--parameter-json "$param_json")
         [ -n "$calib_json" ] && cmd+=(--calibration-json "$calib_json" --radius-json "$calib_json")
         "${cmd[@]}"
     elif [ "$mode" == "2" ]; then
         echo "[INFO] chrono_pendulum (JETSON mode)"
-        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode jetson)
+        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode jetson --theta0-deg "$theta0_deg")
         [ -n "$param_json" ] && cmd+=(--parameter-json "$param_json")
         [ -n "$calib_json" ] && cmd+=(--calibration-json "$calib_json" --radius-json "$calib_json")
         "${cmd[@]}"

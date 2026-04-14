@@ -571,7 +571,12 @@ def main():
     ap.add_argument("--duration", type=float, default=-1.0,
                     help="Run duration in seconds. <=0 means run until user quits.")
     ap.add_argument("--step", type=float, default=0.001)
-    ap.add_argument("--theta0-deg", type=float, default=0.0)
+    ap.add_argument(
+        "--theta0-deg",
+        type=float,
+        default=0.0,
+        help="Initial angle in degrees. + is CCW, - is CW (default: 0.0).",
+    )
     ap.add_argument("--omega0", type=float, default=0.0)
     ap.add_argument("--link-mass", type=float, default=0.200)
     ap.add_argument("--link-length", type=float, default=0.285)
@@ -891,7 +896,16 @@ def main():
                     sim_t = wall_now - wall_run_t0
 
                 theta_before = model.get_theta()
-                model_out = compute_model_torque_and_electrics(cmd_u_used, theta_before, model.get_omega(), float("nan"), sim_params, cfg)
+                motor_input_current = float(online_state.get("ina_current_signed_mA", 0.0))
+                model_out = compute_model_torque_and_electrics(
+                    motor_input_current,
+                    theta_before,
+                    model.get_omega(),
+                    float("nan"),
+                    sim_params,
+                    cfg,
+                    cmd_u_for_duty=cmd_u_used,
+                )
                 model.apply_torque(model_out["tau_net"])
                 model.step(cfg.step)
 

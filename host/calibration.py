@@ -8,6 +8,7 @@
 """
 
 import argparse
+import csv
 import json
 import math
 import os
@@ -293,6 +294,7 @@ class CprCollector:
                 "last_cpr": self.state.last_cpr,
                 "full_rotations": int(self.state.rev_index),
                 "angle_unwrapped_rad": float(self.state.angle_unwrapped),
+                "enc": float(self.state.enc),
                 "angle_travel_rad": float(self.state.angle_travel),
                 "tip_hist": tip_hist,
                 "tip0": tip0,
@@ -510,6 +512,158 @@ def run_calibration(args) -> None:
     )
 
 
+def _gyro_norm(snapshot: dict) -> float:
+    g = np.asarray(snapshot.get("gyro", [np.nan, np.nan, np.nan]), dtype=float)
+    if not np.isfinite(g).all():
+        return float("nan")
+    return float(np.linalg.norm(g))
+
+
+def run_free_decay_collection(args) -> None:
+    collector = CprCollector(imu_topic=args.imu_topic, enc_topic=args.hw_enc_topic)
+    viewer_proc = maybe_launch_imu_viewer(args)
+    ctrl = None
+
+    print("=== Free-Decay Data Collection (Option 2: model calibration) ===")
+    print("[INFO] 모터 명령은 0으로 고정합니다. 로드를 손으로 원하는 각도에 맞춰 잡아주세요.")
+    print("[INFO] 충분히 정지 상태가 확인되면 자동 arm되고, 손을 놓아 움직임이 커지는 시점을 release로 자동 검출합니다.")
+    print("[INFO] q 키를 누르면 언제든 수집을 취소할 수 있습니다.")
+
+    try:
+        collector.start()
+        if not collector.wait_for_imu(timeout_sec=args.imu_wait_sec):
+            raise RuntimeError("IMU 데이터를 받지 못했습니다. 토픽 연결 상태를 확인하세요.")
+
+        ctrl = collector._controller_node
+        ctrl.set_manual_mode()
+        ctrl.current_u = 0.0
+        ctrl.publish_state("free_decay_init")
+
+        hold_start_ts = None
+        armed = False
+        theta_hold = None
+        theta_buffer = deque(maxlen=max(10, int(args.free_decay_sample_hz * 0.5)))
+        release_ts = None
+        release_theta = None
+        rows = []
+        last_pub_ts = 0.0
+        sample_period = 1.0 / max(float(args.free_decay_sample_hz), 1e-6)
+
+        with KeyboardReader() as kb:
+            while True:
+                if viewer_proc is not None and viewer_proc.poll() is not None:
+                    raise RuntimeError("IMU viewer가 종료되어 free decay 수집을 중단합니다.")
+
+                snap = collector.snapshot()
+                now = time.time()
+                gyro_n = _gyro_norm(snap)
+                theta = float(snap.get("angle_unwrapped_rad", 0.0))
+                enc = float(snap.get("enc", 0.0))
+                theta_buffer.append(theta)
+
+                key = kb.read_key_nonblocking(timeout=0.01)
+                if key in ("q", "Q", "ESC"):
+                    raise RuntimeError("사용자 요청으로 free decay 수집을 취소했습니다.")
+
+                # Keep motor command at zero.
+                if (now - last_pub_ts) >= 0.05:
+                    ctrl.current_u = 0.0
+                    ctrl.publish_state("free_decay_zero")
+                    last_pub_ts = now
+
+                if not armed:
+                    if math.isfinite(gyro_n) and gyro_n <= float(args.free_decay_hold_gyro_threshold):
+                        if hold_start_ts is None:
+                            hold_start_ts = now
+                        hold_elapsed = now - hold_start_ts
+                        if hold_elapsed >= float(args.free_decay_hold_min_sec):
+                            armed = True
+                            theta_hold = float(np.median(np.asarray(theta_buffer, dtype=float)))
+                    else:
+                        hold_start_ts = None
+
+                    hold_elapsed = 0.0 if hold_start_ts is None else (now - hold_start_ts)
+                    terminal_status_line(
+                        f"[ARM 대기] gyro_norm={gyro_n:7.4f} rad/s | "
+                        f"hold_elapsed={hold_elapsed:5.2f}/{args.free_decay_hold_min_sec:.2f}s | "
+                        f"theta_now={theta: .4f} rad"
+                    )
+                    time.sleep(sample_period)
+                    continue
+
+                if release_ts is None:
+                    dtheta_from_hold = abs(theta - float(theta_hold))
+                    if (
+                        math.isfinite(gyro_n)
+                        and gyro_n >= float(args.free_decay_release_gyro_threshold)
+                        and dtheta_from_hold >= float(args.free_decay_release_theta_threshold)
+                    ):
+                        release_ts = now
+                        release_theta = theta
+                        print(
+                            f"\n[INFO] release 검출: t={release_ts:.6f}, "
+                            f"theta_release={release_theta:.6f} rad, gyro_norm={gyro_n:.6f} rad/s"
+                        )
+                    else:
+                        terminal_status_line(
+                            f"[ARM 완료] release 대기 | gyro_norm={gyro_n:7.4f}/{args.free_decay_release_gyro_threshold:.4f} | "
+                            f"|theta-theta_hold|={dtheta_from_hold:7.4f}/{args.free_decay_release_theta_threshold:.4f}"
+                        )
+                        time.sleep(sample_period)
+                        continue
+
+                t_rel = now - release_ts
+                rows.append(
+                    {
+                        "t_sec": t_rel,
+                        "theta_raw_rad": theta,
+                        "theta_from_hold_rad": theta - float(theta_hold),
+                        "theta_from_release_rad": theta - float(release_theta),
+                        "omega_z_rad_s": float(np.asarray(snap.get("gyro", [0.0, 0.0, 0.0]), dtype=float)[2]),
+                        "gyro_norm_rad_s": gyro_n,
+                        "enc_count": enc,
+                    }
+                )
+                terminal_status_line(
+                    f"[수집중] t={t_rel:6.3f}/{args.free_decay_duration_sec:.3f}s | "
+                    f"theta={theta: .5f} rad | omega_z={rows[-1]['omega_z_rad_s']: .5f} rad/s"
+                )
+                if t_rel >= float(args.free_decay_duration_sec):
+                    break
+                time.sleep(sample_period)
+        print()
+
+        if not rows:
+            raise RuntimeError("free decay 샘플이 비어 있습니다.")
+
+        out_dir = os.path.abspath(args.free_decay_dir)
+        os.makedirs(out_dir, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+        out_csv = os.path.join(out_dir, f"free_decay_{stamp}.csv")
+        with open(out_csv, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+
+        print("\n=== Free Decay Collection Result ===")
+        print(f"release_theta(rad): {float(release_theta):.6f}")
+        print(f"hold_theta(rad)   : {float(theta_hold):.6f}")
+        print(f"samples           : {len(rows)}")
+        print(f"saved_csv         : {out_csv}")
+
+    finally:
+        if ctrl is not None:
+            ctrl.current_u = 0.0
+            ctrl.publish_state("free_decay_exit")
+        collector.stop()
+        if viewer_proc is not None and viewer_proc.poll() is None:
+            viewer_proc.terminate()
+            try:
+                viewer_proc.wait(timeout=1.5)
+            except Exception:
+                viewer_proc.kill()
+
+
 class CurrentOffsetNode(Node):
     def __init__(self, current_topic: str, pwm_topic: str):
         super().__init__("current_offset_collector")
@@ -553,6 +707,7 @@ def estimate_current_offset(current_topic: str, pwm_topic: str, sample_sec: floa
 
 def build_argparser():
     ap = argparse.ArgumentParser(description="CPR/r 캘리브레이션 (IMU CPR + orientation r)")
+    ap.add_argument("--mode", choices=["cpr", "free_decay"], default="cpr")
     ap.add_argument("--imu-topic", default="/imu/data")
     ap.add_argument("--hw-enc-topic", default="/hw/enc")
     ap.add_argument("--output-json", default="./run_logs/calibration_latest.json")
@@ -562,6 +717,13 @@ def build_argparser():
     ap.add_argument("--hw-pwm-topic", default="/hw/pwm_applied")
     ap.add_argument("--current-sample-sec", type=float, default=3.0)
     ap.add_argument("--pwm-zero-threshold", type=float, default=1.0)
+    ap.add_argument("--free-decay-dir", default="./free_decay_data")
+    ap.add_argument("--free-decay-duration-sec", type=float, default=8.0)
+    ap.add_argument("--free-decay-sample-hz", type=float, default=200.0)
+    ap.add_argument("--free-decay-hold-min-sec", type=float, default=0.8)
+    ap.add_argument("--free-decay-hold-gyro-threshold", type=float, default=0.15)
+    ap.add_argument("--free-decay-release-gyro-threshold", type=float, default=0.35)
+    ap.add_argument("--free-decay-release-theta-threshold", type=float, default=0.01)
     return ap
 
 
@@ -588,7 +750,10 @@ def maybe_launch_imu_viewer(args):
 def main():
     args = build_argparser().parse_args()
     try:
-        run_calibration(args)
+        if args.mode == "free_decay":
+            run_free_decay_collection(args)
+        else:
+            run_calibration(args)
     except RuntimeError as exc:
         print(f"[ERROR] {exc}")
 
