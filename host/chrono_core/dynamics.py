@@ -66,9 +66,8 @@ class PendulumModel:
         theta0 = math.radians(cfg.theta0_deg)
         q_link = ch.QuatFromAngleZ(theta0)
         self.link.SetRot(q_link)
-        com_x = -math.sin(theta0) * (cfg.link_L / 2.0)
-        com_y = -math.cos(theta0) * (cfg.link_L / 2.0)
-        self.link.SetPos(ch.ChVector3d(com_x, com_y, cfg.motor_length / 2.0))
+        com0 = self._link_com_world_from_theta(theta0)
+        self.link.SetPos(com0)
         self.link.SetAngVelLocal(ch.ChVector3d(0.0, 0.0, cfg.omega0))
         self.sys.Add(self.link)
 
@@ -79,8 +78,7 @@ class PendulumModel:
             mass=cfg.imu_mass,
             color=ch.ChColor(0.60, 0.60, 0.60),
         )
-        imu_com_local = self._imu_com_local()
-        imu_abs = self.link.TransformPointLocalToParent(imu_com_local)
+        imu_abs = self._imu_com_world_from_theta(theta0)
         self.imu.SetPos(imu_abs)
         self.imu.SetRot(self.link.GetRot())
         self.sys.Add(self.imu)
@@ -91,7 +89,11 @@ class PendulumModel:
         self.sys.Add(self.fix_imu)
 
         self.motor = ch.ChLinkMotorRotationTorque()
-        self.motor.Initialize(self.link, self.base, ch.ChFramed(ch.ChVector3d(0.0, 0.0, 0.0), ch.QUNIT))
+        self.motor.Initialize(
+            self.link,
+            self.base,
+            ch.ChFramed(ch.ChVector3d(0.0, 0.0, cfg.motor_length / 2.0), ch.QUNIT),
+        )
         self.tau_fun = ch.ChFunctionConst(0.0)
         self.motor.SetTorqueFunction(self.tau_fun)
         self.sys.Add(self.motor)
@@ -102,6 +104,22 @@ class PendulumModel:
 
     def pivot_pos_world(self):
         return np.array([0.0, 0.0, float(self.cfg.motor_length / 2.0)], dtype=float)
+
+    def _link_com_world_from_theta(self, theta_rad: float):
+        half_l = 0.5 * float(self.cfg.link_L)
+        return ch.ChVector3d(
+            -math.sin(float(theta_rad)) * half_l,
+            -math.cos(float(theta_rad)) * half_l,
+            float(self.cfg.motor_length / 2.0),
+        )
+
+    def _imu_com_world_from_theta(self, theta_rad: float):
+        # Place IMU center directly from pivot using calibrated pivot->IMU radius.
+        return ch.ChVector3d(
+            -math.sin(float(theta_rad)) * float(self.cfg.r_imu),
+            -math.cos(float(theta_rad)) * float(self.cfg.r_imu),
+            float(self.cfg.motor_length / 2.0),
+        )
 
     def rod_com_pos_world(self):
         p = self.link.GetPos()
@@ -158,10 +176,6 @@ class PendulumModel:
                 shape0.SetColor(color)
         return body
 
-    def _imu_com_local(self):
-        # r_imu is the calibrated pivot->IMU-center radius.
-        return ch.ChVector3d(0.0, -float(self.cfg.r_imu), 0.0)
-
     def update_identified_structure(self, params: dict):
         _ = params
         # Mass/COM/inertia are derived from geometry+density via ChBodyEasyBox.
@@ -176,14 +190,16 @@ class PendulumModel:
     def set_theta_kinematic(self, theta_rad: float, omega_rad_s: float = 0.0):
         theta = float(theta_rad)
         q_link = ch.QuatFromAngleZ(theta)
-        com_x = -math.sin(theta) * (self.cfg.link_L / 2.0)
-        com_y = -math.cos(theta) * (self.cfg.link_L / 2.0)
+        com_w = self._link_com_world_from_theta(theta)
+        # This SetPos is the COM position implied by pure rotation about fixed
+        # pivot. It is not translational tracking of measured hand movement.
         self.link.SetRot(q_link)
-        self.link.SetPos(ch.ChVector3d(com_x, com_y, self.cfg.motor_length / 2.0))
+        self.link.SetPos(com_w)
         self.link.SetPosDt(ch.ChVector3d(0.0, 0.0, 0.0))
         self.link.SetAngVelLocal(ch.ChVector3d(0.0, 0.0, float(omega_rad_s)))
-        imu_com_local = self._imu_com_local()
-        imu_abs = self.link.TransformPointLocalToParent(imu_com_local)
+        # Free-decay sync is rotation-only and IMU center is directly placed at
+        # pivot + r_imu for the same theta.
+        imu_abs = self._imu_com_world_from_theta(theta)
         self.imu.SetPos(imu_abs)
         self.imu.SetRot(q_link)
         self.imu.SetPosDt(ch.ChVector3d(0.0, 0.0, 0.0))

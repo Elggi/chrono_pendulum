@@ -675,6 +675,15 @@ def main():
     imu_com_w = model.imu_com_pos_world()
     total_com_w = model.total_com_pos_world()
     imu_local = model.imu_local_on_rod()
+    theta0_rad = math.radians(cfg.theta0_deg)
+    imu_target_w = np.array(
+        [
+            -math.sin(theta0_rad) * cfg.r_imu,
+            -math.cos(theta0_rad) * cfg.r_imu,
+            cfg.motor_length / 2.0,
+        ],
+        dtype=float,
+    )
     print(
         f"[com] pivot_world=[{pivot_w[0]:+.4f}, {pivot_w[1]:+.4f}, {pivot_w[2]:+.4f}] m | "
         f"rod_com_world=[{rod_com_w[0]:+.4f}, {rod_com_w[1]:+.4f}, {rod_com_w[2]:+.4f}] m"
@@ -689,8 +698,8 @@ def main():
     )
     print(
         f"[imu-fix] imu_com_world=[{imu_com_w[0]:+.4f}, {imu_com_w[1]:+.4f}, {imu_com_w[2]:+.4f}] m | "
-        f"imu_local_on_rod=[{imu_local[0]:+.4f}, {imu_local[1]:+.4f}, {imu_local[2]:+.4f}] m "
-        f"(target local=[0.0000, {-cfg.r_imu:+.4f}, 0.0000] m)"
+        f"imu_target_world_from_pivot=[{imu_target_w[0]:+.4f}, {imu_target_w[1]:+.4f}, {imu_target_w[2]:+.4f}] m | "
+        f"imu_local_on_rod=[{imu_local[0]:+.4f}, {imu_local[1]:+.4f}, {imu_local[2]:+.4f}] m"
     )
     print(f"[imu-fix] imu_radius_from_pivot={model.imu_radius_from_pivot():.6f} m")
     sim_params = {
@@ -739,6 +748,7 @@ def main():
 
         wall_t0 = now_wall()
         wall_run_t0 = None
+        last_model_step_wall = None
         omega_prev = model.get_omega()
         t_prev = 0.0
         enc_ref = None
@@ -921,6 +931,7 @@ def main():
                         else:
                             run_state = RunState.STATE_RUN
                             wall_run_t0 = now_wall()
+                            last_model_step_wall = wall_run_t0
                         t_prev = 0.0
                         prev_wall_elapsed = None
                         real_omega_hist.clear()
@@ -1019,6 +1030,7 @@ def main():
                             )
                             run_state = RunState.STATE_RUN
                             wall_run_t0 = now_wall()
+                            last_model_step_wall = wall_run_t0
                             t_prev = 0.0
                             omega_prev = model.get_omega()
                         free_decay_theta_prev = float(theta_lp)
@@ -1042,7 +1054,17 @@ def main():
                     cmd_u_for_duty=cmd_u_used,
                 )
                 model.apply_torque(model_out["tau_net"])
-                model.step(cfg.step)
+                step_h = float(cfg.step)
+                if cfg.realtime:
+                    if last_model_step_wall is None:
+                        last_model_step_wall = wall_now
+                    dt_wall = max(wall_now - last_model_step_wall, 0.0)
+                    # Prevent apparent slow-motion when render/host loop is slower
+                    # than configured dynamics step by syncing integration horizon to
+                    # elapsed wall time.
+                    step_h = min(max(dt_wall, cfg.step), 0.05)
+                    last_model_step_wall = wall_now
+                model.step(step_h)
 
                 # wall_elapsed is the canonical timeline for runtime + replay CSVs.
                 theta = model.get_theta()
