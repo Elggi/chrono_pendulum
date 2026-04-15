@@ -532,7 +532,8 @@ def split_trajectories(paths: list[Path], seed: int = 0):
 
 def build_init_params(cfg: BridgeConfig, calibration: dict[str, Any] | None = None, parameter_json: dict[str, Any] | None = None):
     out = {
-        "K_u": float(cfg.K_u_init),
+        "K_u": float(cfg.K_i_init),
+        "K_i": float(cfg.K_i_init),
         "l_com": float(cfg.l_com_init),
         "b_eq": float(cfg.b_eq_init),
         "tau_eq": float(cfg.tau_eq_init),

@@ -11,6 +11,7 @@ export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
 BASE_DIR="$SCRIPT_DIR"
 CSV_DIR="$BASE_DIR/run_logs"
+REPORTS_STAGE1_DIR="$BASE_DIR/../reports/Stage1_CMAES"
 
 # ======================================================
 # 유틸
@@ -24,7 +25,7 @@ select_csv_file() {
     echo "--------------------------------" >&2
     echo "[INFO] CSV 파일 선택" >&2
 
-    local search_dirs=("$BASE_DIR/run_logs" "$BASE_DIR/rl_results")
+    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results" "$REPORTS_STAGE1_DIR")
     local files=()
     local d
     for d in "${search_dirs[@]}"; do
@@ -40,7 +41,7 @@ select_csv_file() {
         return 1
     fi
 
-    IFS=$'\n' files=($(printf "%s\n" "${files[@]}" | sort))
+    IFS=$'\n' files=($(printf "%s\n" "${files[@]}" | sort -u))
     unset IFS
 
     select file in "${files[@]}"; do
@@ -54,11 +55,110 @@ select_csv_file() {
     done
 }
 
+select_csv_files_multi() {
+    echo "--------------------------------" >&2
+    echo "[INFO] 학습용 CSV 파일들 선택 (복수 선택 가능)" >&2
+
+    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results" "$REPORTS_STAGE1_DIR")
+    local files=()
+    local d
+    for d in "${search_dirs[@]}"; do
+        if [ -d "$d" ]; then
+            while IFS= read -r -d '' f; do
+                files+=("$f")
+            done < <(find "$d" -type f -name "*.csv" -print0 2>/dev/null)
+        fi
+    done
+
+    if [ "${#files[@]}" -eq 0 ]; then
+        echo "[ERROR] 선택 가능한 CSV가 없습니다." >&2
+        return 1
+    fi
+
+    IFS=$'\n' files=($(printf "%s\n" "${files[@]}" | sort -u))
+    unset IFS
+
+    local i=1
+    for f in "${files[@]}"; do
+        echo "  [$i] $f" >&2
+        i=$((i + 1))
+    done
+
+    local default_sel="1"
+    read -p "선택 번호들 (공백구분) [${default_sel}]: " sel
+    sel=${sel:-$default_sel}
+
+    local out=()
+    local idx
+    for idx in $sel; do
+        if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -ge 1 ] && [ "$idx" -le "${#files[@]}" ]; then
+            out+=("${files[$((idx - 1))]}")
+        fi
+    done
+
+    if [ "${#out[@]}" -eq 0 ]; then
+        echo "[ERROR] 유효한 CSV 선택이 없습니다." >&2
+        return 1
+    fi
+
+    printf "%s\n" "${out[@]}"
+}
+
+select_finalized_csv_files_multi() {
+    echo "--------------------------------" >&2
+    echo "[INFO] Stage2용 finalized CSV 파일들 선택 (복수 선택 가능)" >&2
+
+    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results")
+    local files=()
+    local d
+    for d in "${search_dirs[@]}"; do
+        if [ -d "$d" ]; then
+            while IFS= read -r -d '' f; do
+                files+=("$f")
+            done < <(find "$d" -type f -name "*.finalized.csv" -print0 2>/dev/null)
+        fi
+    done
+
+    if [ "${#files[@]}" -eq 0 ]; then
+        echo "[WARN] finalized CSV가 없어 일반 CSV 선택기로 전환합니다." >&2
+        select_csv_files_multi
+        return
+    fi
+
+    IFS=$'\n' files=($(printf "%s\n" "${files[@]}" | sort -u))
+    unset IFS
+
+    local i=1
+    for f in "${files[@]}"; do
+        echo "  [$i] $f" >&2
+        i=$((i + 1))
+    done
+
+    local default_sel="1"
+    read -p "선택 번호들 (공백구분) [${default_sel}]: " sel
+    sel=${sel:-$default_sel}
+
+    local out=()
+    local idx
+    for idx in $sel; do
+        if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -ge 1 ] && [ "$idx" -le "${#files[@]}" ]; then
+            out+=("${files[$((idx - 1))]}")
+        fi
+    done
+
+    if [ "${#out[@]}" -eq 0 ]; then
+        echo "[ERROR] 유효한 CSV 선택이 없습니다." >&2
+        return 1
+    fi
+
+    printf "%s\n" "${out[@]}"
+}
+
 select_plot_csv_file() {
     echo "--------------------------------" >&2
     echo "[INFO] Plot 가능한 CSV 선택 (chrono/replay 형식만 표시)" >&2
 
-    local search_dirs=("$BASE_DIR/run_logs" "$BASE_DIR/rl_results")
+    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results" "$REPORTS_STAGE1_DIR")
     local files=()
     local d
     for d in "${search_dirs[@]}"; do
@@ -80,7 +180,7 @@ select_plot_csv_file() {
         return 1
     fi
 
-    IFS=$'\n' files=($(printf "%s\n" "${files[@]}" | sort))
+    IFS=$'\n' files=($(printf "%s\n" "${files[@]}" | sort -u))
     unset IFS
 
     select file in "${files[@]}"; do
@@ -100,7 +200,7 @@ select_json_file() {
     echo "[INFO] ${label} 선택" >&2
 
     local valid=()
-    local search_dirs=("$BASE_DIR/run_logs" "$BASE_DIR/rl_results")
+    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results" "$REPORTS_STAGE1_DIR")
     local d
     for d in "${search_dirs[@]}"; do
         if [ ! -d "$d" ]; then
@@ -114,7 +214,7 @@ select_json_file() {
         done < <(find "$d" -type f -name "*.json" -print0 2>/dev/null)
     done
     if [ "${#valid[@]}" -gt 0 ]; then
-        IFS=$'\n' valid=($(printf "%s\n" "${valid[@]}" | sort))
+        IFS=$'\n' valid=($(printf "%s\n" "${valid[@]}" | sort -u))
         unset IFS
     fi
 
@@ -152,6 +252,26 @@ run_imu_viewer() {
 
 run_chrono_pendulum() {
     echo "--------------------------------"
+    read -p "Initial angle theta0 [deg] (+CCW, -CW) [0]: " theta0_deg
+    theta0_deg=${theta0_deg:-0}
+    if ! [[ "$theta0_deg" =~ ^[+-]?[0-9]+([.][0-9]+)?$ ]]; then
+        echo "[WARN] Invalid theta0 input '$theta0_deg'. Fallback to 0 deg."
+        theta0_deg=0
+    fi
+    echo "theta0_deg = $theta0_deg (+:CCW, -:CW)"
+    read -p "Enable Chrono free-decay startup mode? (y/n) [n]: " free_decay_mode_yn
+    free_decay_mode_yn=${free_decay_mode_yn:-n}
+    free_decay_args=()
+    if [[ "$free_decay_mode_yn" =~ ^[Yy]$ ]]; then
+        read -p "free-decay arm minimum angle [deg] (default: 5.0): " arm_min_angle_deg
+        arm_min_angle_deg=${arm_min_angle_deg:-5.0}
+        if ! [[ "$arm_min_angle_deg" =~ ^[+-]?[0-9]+([.][0-9]+)?$ ]]; then
+            echo "[WARN] Invalid arm minimum angle '$arm_min_angle_deg'. Fallback to 5.0 deg."
+            arm_min_angle_deg=5.0
+        fi
+        free_decay_args+=(--enable-free-decay-mode --free-decay-arm-min-angle-deg "$arm_min_angle_deg")
+    fi
+    echo "--------------------------------"
     echo "Select mode:"
     echo "1) Host mode (keyboard control)"
     echo "2) Jetson mode (ROS input)"
@@ -165,13 +285,15 @@ run_chrono_pendulum() {
 
     if [ "$mode" == "1" ]; then
         echo "[INFO] chrono_pendulum (HOST mode)"
-        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode host)
+        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode host --theta0-deg "$theta0_deg")
+        cmd+=("${free_decay_args[@]}")
         [ -n "$param_json" ] && cmd+=(--parameter-json "$param_json")
         [ -n "$calib_json" ] && cmd+=(--calibration-json "$calib_json" --radius-json "$calib_json")
         "${cmd[@]}"
     elif [ "$mode" == "2" ]; then
         echo "[INFO] chrono_pendulum (JETSON mode)"
-        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode jetson)
+        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode jetson --theta0-deg "$theta0_deg")
+        cmd+=("${free_decay_args[@]}")
         [ -n "$param_json" ] && cmd+=(--parameter-json "$param_json")
         [ -n "$calib_json" ] && cmd+=(--calibration-json "$calib_json" --radius-json "$calib_json")
         "${cmd[@]}"
@@ -183,7 +305,99 @@ run_chrono_pendulum() {
 run_system_identification() {
     echo "--------------------------------"
     echo "[INFO] Calibration 시작"
-    python3 $BASE_DIR/calibration.py
+    read -p "collect free-decay data[y]/n? : " free_decay_yn
+    free_decay_yn=${free_decay_yn:-y}
+    if [[ "$free_decay_yn" =~ ^[Yy]$ ]]; then
+        read -p "arm minimum angle [deg] (default: 5.0): " arm_min_angle_deg
+        arm_min_angle_deg=${arm_min_angle_deg:-5.0}
+        if ! [[ "$arm_min_angle_deg" =~ ^[+-]?[0-9]+([.][0-9]+)?$ ]]; then
+            echo "[WARN] Invalid arm minimum angle '$arm_min_angle_deg'. Fallback to 5.0 deg."
+            arm_min_angle_deg=5.0
+        fi
+        echo "[INFO] free-decay mode 실행 (arm_min_angle_deg=${arm_min_angle_deg})"
+        python3 "$BASE_DIR/calibration.py" --mode free_decay --free-decay-arm-min-angle-deg "$arm_min_angle_deg"
+    else
+        echo "[INFO] manual CPR/r calibration 실행"
+        python3 "$BASE_DIR/calibration.py"
+    fi
+}
+
+run_stage1_pem_identification() {
+    echo "--------------------------------"
+    echo "[INFO] Stage1 Identification 실행 (CMA-ES + Headless Chrono)"
+    mapfile -t selected_csvs < <(select_csv_files_multi)
+    if [ "${#selected_csvs[@]}" -eq 0 ]; then
+        echo "[ERROR] 선택된 CSV가 없습니다." >&2
+        return
+    fi
+    default_calib="$BASE_DIR/run_logs/calibration_latest.json"
+    default_model_param="$BASE_DIR/model_parameter.json"
+    if [ ! -f "$default_model_param" ]; then
+        default_model_param="$BASE_DIR/model_parameter.template.json"
+    fi
+    read -p "Calibration JSON [${default_calib}]: " calib_json
+    calib_json=${calib_json:-$default_calib}
+    read -p "Model Parameter JSON [${default_model_param}]: " model_param_json
+    model_param_json=${model_param_json:-$default_model_param}
+    read -p "출력 폴더 [${BASE_DIR}/../reports/Stage1_CMAES]: " outdir
+    outdir=${outdir:-$BASE_DIR/../reports/Stage1_CMAES}
+    read -p "세대 수 [30]: " gens
+    gens=${gens:-30}
+    read -p "병렬 worker 수 [8]: " workers
+    workers=${workers:-8}
+    read -p "theta RMSE weight (w_theta) [default: 1.0]: " w_theta
+    w_theta=${w_theta:-1.0}
+    read -p "omega RMSE weight (w_omega) [default: 0.1]: " w_omega
+    w_omega=${w_omega:-0.1}
+    echo "[INFO] Stage1 weighted RMSE loss: w_theta=${w_theta}, w_omega=${w_omega}"
+    local csv_args=("${selected_csvs[@]}")
+    cmd=(python3 "$BASE_DIR/stage1_cmaes_chrono.py" --csv "${csv_args[@]}" --calibration-json "$calib_json" --model-parameter-json "$model_param_json" --outdir "$outdir" --max-generations "$gens" --workers "$workers" --w-theta "$w_theta" --w-omega "$w_omega")
+    echo "[INFO] command: ${cmd[*]}"
+    "${cmd[@]}"
+}
+
+run_stage2_sindy_identification() {
+    echo "--------------------------------"
+    echo "[INFO] Stage2 Greybox Residual-Torque SINDy 실행"
+    mapfile -t selected_csvs < <(select_finalized_csv_files_multi)
+    if [ "${#selected_csvs[@]}" -eq 0 ]; then
+        echo "[ERROR] 선택된 CSV가 없습니다." >&2
+        return
+    fi
+    default_model_param="$BASE_DIR/model_parameter.json"
+    if [ ! -f "$default_model_param" ]; then
+        default_model_param="$BASE_DIR/model_parameter.template.json"
+    fi
+    read -p "Model Parameter JSON [${default_model_param}]: " model_param_json
+    model_param_json=${model_param_json:-$default_model_param}
+    read -p "출력 폴더 [${BASE_DIR}/../reports/SINDy_stage2]: " outdir
+    outdir=${outdir:-$BASE_DIR/../reports/SINDy_stage2}
+    read -p "sparsity threshold [1e-4]: " threshold
+    threshold=${threshold:-1e-4}
+    read -p "feature set (comma-separated) [1,theta,omega,sin_theta,cos_theta,theta2,omega2,motor_input]: " feature_set
+    feature_set=${feature_set:-1,theta,omega,sin_theta,cos_theta,theta2,omega2,motor_input}
+    local csv_args=("${selected_csvs[@]}")
+    cmd=(python3 "$BASE_DIR/stage2_sindy_entry.py" --csv "${csv_args[@]}" --model-parameter-json "$model_param_json" --outdir "$outdir" --threshold "$threshold" --features "$feature_set")
+    echo "[INFO] command: ${cmd[*]}"
+    "${cmd[@]}"
+}
+
+run_stage3_ppo_identification() {
+    echo "--------------------------------"
+    echo "[INFO] Stage3 PPO Identification 실행"
+    default_csv="$BASE_DIR/run_logs/chrono_run_1.finalized.csv"
+    default_meta="$BASE_DIR/run_logs/chrono_run_1.meta.json"
+    read -p "CSV 경로 [${default_csv}]: " csv_path
+    csv_path=${csv_path:-$default_csv}
+    read -p "META JSON 경로 [${default_meta}]: " meta_path
+    meta_path=${meta_path:-$default_meta}
+    read -p "출력 폴더 [${BASE_DIR}/../reports/PPO_stage3]: " outdir
+    outdir=${outdir:-$BASE_DIR/../reports/PPO_stage3}
+    read -p "PPO timesteps [12000]: " ppo_steps
+    ppo_steps=${ppo_steps:-12000}
+    cmd=(python3 "$BASE_DIR/stage3_ppo_entry.py" --csv "$csv_path" --meta "$meta_path" --outdir "$outdir" --ppo-steps "$ppo_steps")
+    echo "[INFO] command: ${cmd[*]}"
+    "${cmd[@]}"
 }
 
 run_plot() {
@@ -433,6 +647,10 @@ run_replay_validation() {
         param_json="$BASE_DIR/rl_results/latest/final_params_rl.json"
     elif [ -f "$BASE_DIR/rl_results/latest/best_params.json" ]; then
         param_json="$BASE_DIR/rl_results/latest/best_params.json"
+    elif [ -f "$BASE_DIR/model_parameter.json" ]; then
+        param_json="$BASE_DIR/model_parameter.json"
+    elif [ -f "$BASE_DIR/model_parameter.template.json" ]; then
+        param_json="$BASE_DIR/model_parameter.template.json"
     fi
     if [ -n "$param_json" ]; then
         echo "[INFO] Auto parameter JSON: $param_json"
@@ -466,13 +684,14 @@ while true; do
     echo "=========================================="
     echo "1) IMU Viewer (Standalone Viewer)"
     echo "2) Model Calibration (radius, IMU gravity)"
-    echo "3) Parameter Finetuning (SB3 PPO)"
-    echo "4) Chrono Pendulum (Select Host/Jetson mode)"
-    echo "5) Plot Data (Sim vs Real)"
-    echo "6) Replay Runs"
-    echo "7) System Identification (Physical Params, Stage-wise)"
-    echo "8) Offline Benchmark (PEM+SINDy-PI+PPO)"
-    echo "9) Exit"
+    echo "3) Stage1 Identification (CMA-ES Headless)"
+    echo "4) Stage2 Identification (SINDy)"
+    echo "5) Stage3 Identification (PPO)"
+    echo "6) Chrono Pendulum (Select Host/Jetson mode)"
+    echo "7) Plot Data (Sim vs Real)"
+    echo "8) Replay Runs"
+    echo "9) Offline Benchmark (PEM+SINDy-PI+PPO)"
+    echo "10) Exit"
     echo "=========================================="
 
     read -p "Select option: " choice
@@ -487,30 +706,34 @@ while true; do
             pause
             ;;
         3)
-            run_rl_fitting
+            run_stage1_pem_identification
             pause
             ;;
         4)
-            run_chrono_pendulum
+            run_stage2_sindy_identification
             pause
             ;;
         5)
-            run_plot
+            run_stage3_ppo_identification
             pause
             ;;
         6)
-            run_replay_validation
+            run_chrono_pendulum
             pause
             ;;
         7)
-            run_staged_calibration
+            run_plot
             pause
             ;;
         8)
-            run_offline_benchmark_pem_sindy_ppo
+            run_replay_validation
             pause
             ;;
         9)
+            run_offline_benchmark_pem_sindy_ppo
+            pause
+            ;;
+        10)
             echo "Bye!"
             exit 0
             ;;
