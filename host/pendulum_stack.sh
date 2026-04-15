@@ -11,6 +11,7 @@ export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
 BASE_DIR="$SCRIPT_DIR"
 CSV_DIR="$BASE_DIR/run_logs"
+REPORTS_STAGE1_DIR="$BASE_DIR/../reports/Stage1_CMAES"
 
 # ======================================================
 # 유틸
@@ -24,7 +25,7 @@ select_csv_file() {
     echo "--------------------------------" >&2
     echo "[INFO] CSV 파일 선택" >&2
 
-    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results")
+    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results" "$REPORTS_STAGE1_DIR")
     local files=()
     local d
     for d in "${search_dirs[@]}"; do
@@ -40,7 +41,7 @@ select_csv_file() {
         return 1
     fi
 
-    IFS=$'\n' files=($(printf "%s\n" "${files[@]}" | sort))
+    IFS=$'\n' files=($(printf "%s\n" "${files[@]}" | sort -u))
     unset IFS
 
     select file in "${files[@]}"; do
@@ -54,11 +55,60 @@ select_csv_file() {
     done
 }
 
+select_csv_files_multi() {
+    echo "--------------------------------" >&2
+    echo "[INFO] 학습용 CSV 파일들 선택 (복수 선택 가능)" >&2
+
+    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results" "$REPORTS_STAGE1_DIR")
+    local files=()
+    local d
+    for d in "${search_dirs[@]}"; do
+        if [ -d "$d" ]; then
+            while IFS= read -r -d '' f; do
+                files+=("$f")
+            done < <(find "$d" -type f -name "*.csv" -print0 2>/dev/null)
+        fi
+    done
+
+    if [ "${#files[@]}" -eq 0 ]; then
+        echo "[ERROR] 선택 가능한 CSV가 없습니다." >&2
+        return 1
+    fi
+
+    IFS=$'\n' files=($(printf "%s\n" "${files[@]}" | sort -u))
+    unset IFS
+
+    local i=1
+    for f in "${files[@]}"; do
+        echo "  [$i] $f" >&2
+        i=$((i + 1))
+    done
+
+    local default_sel="1"
+    read -p "선택 번호들 (공백구분) [${default_sel}]: " sel
+    sel=${sel:-$default_sel}
+
+    local out=()
+    local idx
+    for idx in $sel; do
+        if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -ge 1 ] && [ "$idx" -le "${#files[@]}" ]; then
+            out+=("${files[$((idx - 1))]}")
+        fi
+    done
+
+    if [ "${#out[@]}" -eq 0 ]; then
+        echo "[ERROR] 유효한 CSV 선택이 없습니다." >&2
+        return 1
+    fi
+
+    printf "%s\n" "${out[@]}"
+}
+
 select_plot_csv_file() {
     echo "--------------------------------" >&2
     echo "[INFO] Plot 가능한 CSV 선택 (chrono/replay 형식만 표시)" >&2
 
-    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results")
+    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results" "$REPORTS_STAGE1_DIR")
     local files=()
     local d
     for d in "${search_dirs[@]}"; do
@@ -80,7 +130,7 @@ select_plot_csv_file() {
         return 1
     fi
 
-    IFS=$'\n' files=($(printf "%s\n" "${files[@]}" | sort))
+    IFS=$'\n' files=($(printf "%s\n" "${files[@]}" | sort -u))
     unset IFS
 
     select file in "${files[@]}"; do
@@ -100,7 +150,7 @@ select_json_file() {
     echo "[INFO] ${label} 선택" >&2
 
     local valid=()
-    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results")
+    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results" "$REPORTS_STAGE1_DIR")
     local d
     for d in "${search_dirs[@]}"; do
         if [ ! -d "$d" ]; then
@@ -114,7 +164,7 @@ select_json_file() {
         done < <(find "$d" -type f -name "*.json" -print0 2>/dev/null)
     done
     if [ "${#valid[@]}" -gt 0 ]; then
-        IFS=$'\n' valid=($(printf "%s\n" "${valid[@]}" | sort))
+        IFS=$'\n' valid=($(printf "%s\n" "${valid[@]}" | sort -u))
         unset IFS
     fi
 
@@ -225,10 +275,11 @@ run_system_identification() {
 run_stage1_pem_identification() {
     echo "--------------------------------"
     echo "[INFO] Stage1 Identification 실행 (CMA-ES + Headless Chrono)"
-    default_csv="$BASE_DIR/run_logs/chrono_run_1.finalized.csv"
-    read -p "CSV 경로 [${default_csv}]: " csv_path
-    csv_path=${csv_path:-$default_csv}
-    read -p "추가 학습 CSV 경로들(공백구분, optional): " extra_csvs
+    mapfile -t selected_csvs < <(select_csv_files_multi)
+    if [ "${#selected_csvs[@]}" -eq 0 ]; then
+        echo "[ERROR] 선택된 CSV가 없습니다." >&2
+        return
+    fi
     default_calib="$BASE_DIR/run_logs/calibration_latest.json"
     default_model_param="$BASE_DIR/model_parameter.json"
     if [ ! -f "$default_model_param" ]; then
@@ -244,12 +295,7 @@ run_stage1_pem_identification() {
     gens=${gens:-30}
     read -p "병렬 worker 수 [8]: " workers
     workers=${workers:-8}
-    local csv_args=("$csv_path")
-    if [ -n "$extra_csvs" ]; then
-        for ec in $extra_csvs; do
-            csv_args+=("$ec")
-        done
-    fi
+    local csv_args=("${selected_csvs[@]}")
     cmd=(python3 "$BASE_DIR/stage1_cmaes_chrono.py" --csv "${csv_args[@]}" --calibration-json "$calib_json" --model-parameter-json "$model_param_json" --outdir "$outdir" --max-generations "$gens" --workers "$workers")
     echo "[INFO] command: ${cmd[*]}"
     "${cmd[@]}"
