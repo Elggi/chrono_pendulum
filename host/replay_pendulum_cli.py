@@ -150,8 +150,16 @@ def print_sampling_diagnostics(csv_path: str):
 
 def recompute_signed_current(csv_path: str):
     df = pd.read_csv(csv_path)
-    pwm = pd.to_numeric(df.get("hw_pwm", df.get("pwm_hw", 0.0)), errors="coerce").to_numpy(dtype=float)
-    i_raw = pd.to_numeric(df.get("ina_current_raw_mA", df.get("current_mA", 0.0)), errors="coerce").to_numpy(dtype=float)
+    n = len(df)
+    pwm_src = df.get("hw_pwm", df.get("pwm_hw"))
+    if pwm_src is None:
+        pwm_src = pd.Series(np.zeros(n, dtype=float))
+    pwm = pd.to_numeric(pwm_src, errors="coerce").to_numpy(dtype=float)
+
+    i_raw_src = df.get("ina_current_raw_mA", df.get("current_mA"))
+    if i_raw_src is None:
+        i_raw_src = pd.Series(np.zeros(n, dtype=float))
+    i_raw = pd.to_numeric(i_raw_src, errors="coerce").to_numpy(dtype=float)
     i_offset = 0.0
     if "ina_current_offset_mA" in df.columns:
         vals = pd.to_numeric(df["ina_current_offset_mA"], errors="coerce").to_numpy(dtype=float)

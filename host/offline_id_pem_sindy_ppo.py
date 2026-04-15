@@ -28,7 +28,7 @@ except Exception as exc:  # pragma: no cover - dependency gate
 
 
 EPS = 1e-9
-PARAM_KEYS = ("K_u", "b_eq", "tau_eq", "l_com")
+PARAM_KEYS = ("K_i", "b_eq", "tau_eq", "l_com")
 
 
 @dataclass
@@ -151,7 +151,7 @@ def nrmse(y_hat: np.ndarray, y: np.ndarray) -> float:
 def _rhs(x: np.ndarray, u: float, p: dict[str, float], cfg: PhysicalConfig) -> np.ndarray:
     theta, omega = float(x[0]), float(x[1])
     domega = (
-        p["K_u"] * u
+        p["K_i"] * u
         - p["b_eq"] * omega
         - p["tau_eq"] * math.tanh(omega / cfg.eps)
         - cfg.m * cfg.g * p["l_com"] * math.sin(theta)
@@ -263,13 +263,13 @@ def residual_autocorr(signal: np.ndarray, max_lag: int = 50) -> np.ndarray:
 
 
 def _param_from_vec(v: np.ndarray, fit_lcom: bool, lcom_fixed: float) -> dict[str, float]:
-    out = {"K_u": float(v[0]), "b_eq": float(v[1]), "tau_eq": float(v[2])}
+    out = {"K_i": float(v[0]), "b_eq": float(v[1]), "tau_eq": float(v[2])}
     out["l_com"] = float(v[3]) if fit_lcom else float(lcom_fixed)
     return out
 
 
 def _vec_from_param(p: dict[str, float], fit_lcom: bool) -> np.ndarray:
-    base = [p["K_u"], p["b_eq"], p["tau_eq"]]
+    base = [p["K_i"], p["b_eq"], p["tau_eq"]]
     if fit_lcom:
         base.append(p["l_com"])
     return np.asarray(base, dtype=float)
@@ -414,7 +414,7 @@ def fit_stage2_sindy(
 
     p = stage1.params
     ode_nom = (
-        p["K_u"] * run_train.u
+        p["K_i"] * run_train.u
         - p["b_eq"] * run_train.omega
         - p["tau_eq"] * np.tanh(run_train.omega / cfg.eps)
         - cfg.m * cfg.g * p["l_com"] * np.sin(run_train.theta)
@@ -514,7 +514,7 @@ def rollout_with_residual(
     for i in range(len(run.t) - 1):
         h = float(max(run.t[i + 1] - run.t[i], 1e-6))
         nom = (
-            p["K_u"] * run.u[i]
+            p["K_i"] * run.u[i]
             - p["b_eq"] * omega[i]
             - p["tau_eq"] * math.tanh(omega[i] / cfg.eps)
             - cfg.m * cfg.g * p["l_com"] * math.sin(theta[i])
@@ -562,7 +562,7 @@ def fit_stage3_ppo(
 
         def _action_to_params(self, action: np.ndarray) -> dict[str, float]:
             span = {
-                "K_u": 0.5 * abs(self.nom["K_u"] + 1e-6),
+                "K_i": 0.5 * abs(self.nom["K_i"] + 1e-6),
                 "b_eq": 0.5 * max(abs(self.nom["b_eq"]), 1e-4),
                 "tau_eq": 0.5 * max(abs(self.nom["tau_eq"]), 1e-4),
                 "l_com": 0.2 * max(abs(self.nom["l_com"]), 1e-3),
@@ -579,7 +579,7 @@ def fit_stage3_ppo(
                     pen += (lo - p[k]) ** 2
                 if p[k] > hi:
                     pen += (p[k] - hi) ** 2
-            if p["K_u"] <= 0.0:
+            if p["K_i"] <= 0.0:
                 pen += 100.0
             if p["b_eq"] < 0.0 or p["tau_eq"] < 0.0:
                 pen += 100.0
@@ -611,7 +611,7 @@ def fit_stage3_ppo(
                 self.rng = np.random.default_rng(seed)
             run0 = runs[0]
             obs = np.array(
-                [run0.theta[0], run0.omega[0], self.nom["K_u"], self.nom["b_eq"], self.nom["tau_eq"], self.nom["l_com"], *self.stats],
+                [run0.theta[0], run0.omega[0], self.nom["K_i"], self.nom["b_eq"], self.nom["tau_eq"], self.nom["l_com"], *self.stats],
                 dtype=np.float32,
             )
             return obs, {}
@@ -811,7 +811,7 @@ def main() -> None:
     meta = _load_json(args.meta)
     cfg_meta = meta.get("config", {})
     init_params = {
-        "K_u": float(cfg_meta.get("K_u_init", 1e-5)),
+        "K_i": float(cfg_meta.get("K_i_init", 1e-5)),
         "b_eq": float(cfg_meta.get("b_eq_init", 0.02)),
         "tau_eq": float(cfg_meta.get("tau_eq_init", 0.01)),
         "l_com": float(cfg_meta.get("l_com_init", 0.1425)),
@@ -853,7 +853,7 @@ def main() -> None:
             nominal_params=stage1.params,
             residual_fn=residual_fn,
             weights=weights,
-            bounds={"K_u": (1e-9, 1.0), "b_eq": (0.0, 10.0), "tau_eq": (0.0, 10.0), "l_com": (0.03, 0.45)},
+            bounds={"K_i": (1e-9, 1.0), "b_eq": (0.0, 10.0), "tau_eq": (0.0, 10.0), "l_com": (0.03, 0.45)},
             seed_list=list(args.ppo_seeds),
             total_timesteps=args.ppo_steps,
             outdir=args.outdir,
