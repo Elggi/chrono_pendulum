@@ -728,28 +728,11 @@ def run_free_decay_collection(args) -> None:
             writer.writeheader()
             writer.writerows(export_rows)
 
-        result = {
-            "created_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "method": "free_decay_auto_arm_release",
-            "summary": {
-                "sample_count": int(len(export_rows)),
-                "theta_arm_deg": float(math.degrees(theta_arm)) if theta_arm is not None else None,
-                "stop_rule": "rounded_theta_lp_3dp_hold",
-                "stop_hold_sec": float(args.free_decay_stop_hold_sec),
-                "theta_unwrapped": True,
-            },
-            "artifacts": {
-                "free_decay_csv": out_csv,
-            },
-        }
-        with open(args.output_json, "w", encoding="utf-8") as jf:
-            json.dump(result, jf, indent=2, ensure_ascii=False)
-
         print("\n=== Free Decay Collection Result ===")
         print(f"theta_arm(deg)    : {float(math.degrees(theta_arm)):.6f}")
         print(f"samples           : {len(rows)}")
         print(f"saved_csv         : {out_csv}")
-        print(f"saved_json        : {args.output_json}")
+        print("[INFO] calibration_latest.json is not modified in free-decay mode.")
 
     finally:
         if ctrl is not None:

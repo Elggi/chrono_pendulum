@@ -757,6 +757,8 @@ def main():
         free_decay_arm_start = None
         free_decay_theta_prev = None
         free_decay_theta_hold = None
+        free_decay_theta_prev_wrapped = None
+        free_decay_theta_unwrapped_acc = 0.0
         free_decay_theta_filter = CausalIIRFilter(alpha=0.12)
         free_decay_omega_filter = CausalIIRFilter(alpha=0.18)
 
@@ -889,6 +891,8 @@ def main():
                             free_decay_arm_start = None
                             free_decay_theta_prev = None
                             free_decay_theta_hold = None
+                            free_decay_theta_prev_wrapped = None
+                            free_decay_theta_unwrapped_acc = float(theta_offset_rad)
                             free_decay_theta_filter.reset(None)
                             free_decay_omega_filter.reset(None)
                             print("[INFO] entering free-decay arming phase")
@@ -936,7 +940,16 @@ def main():
                             imu_sign=imu_sign,
                         )
                         if theta_wrapped_imu is not None:
-                            theta_meas = float(theta_wrapped_imu)
+                            if free_decay_theta_prev_wrapped is None:
+                                free_decay_theta_prev_wrapped = float(theta_wrapped_imu)
+                            dth_fd = float(theta_wrapped_imu - free_decay_theta_prev_wrapped)
+                            while dth_fd > math.pi:
+                                dth_fd -= 2.0 * math.pi
+                            while dth_fd < -math.pi:
+                                dth_fd += 2.0 * math.pi
+                            free_decay_theta_unwrapped_acc += dth_fd
+                            free_decay_theta_prev_wrapped = float(theta_wrapped_imu)
+                            theta_meas = float(free_decay_theta_unwrapped_acc - theta_offset_rad)
                         omega_meas = float(imu_sign * snap["imu_w"][2])
 
                     theta_lp = float(free_decay_theta_filter.update(theta_meas))
