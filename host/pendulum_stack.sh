@@ -24,7 +24,7 @@ select_csv_file() {
     echo "--------------------------------" >&2
     echo "[INFO] CSV 파일 선택" >&2
 
-    local search_dirs=("$BASE_DIR/run_logs" "$BASE_DIR/rl_results")
+    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results")
     local files=()
     local d
     for d in "${search_dirs[@]}"; do
@@ -58,7 +58,7 @@ select_plot_csv_file() {
     echo "--------------------------------" >&2
     echo "[INFO] Plot 가능한 CSV 선택 (chrono/replay 형식만 표시)" >&2
 
-    local search_dirs=("$BASE_DIR/run_logs" "$BASE_DIR/rl_results")
+    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results")
     local files=()
     local d
     for d in "${search_dirs[@]}"; do
@@ -100,7 +100,7 @@ select_json_file() {
     echo "[INFO] ${label} 선택" >&2
 
     local valid=()
-    local search_dirs=("$BASE_DIR/run_logs" "$BASE_DIR/rl_results")
+    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results")
     local d
     for d in "${search_dirs[@]}"; do
         if [ ! -d "$d" ]; then
@@ -224,16 +224,33 @@ run_system_identification() {
 
 run_stage1_pem_identification() {
     echo "--------------------------------"
-    echo "[INFO] Stage1 PEM Identification 실행"
+    echo "[INFO] Stage1 Identification 실행 (CMA-ES + Headless Chrono)"
     default_csv="$BASE_DIR/run_logs/chrono_run_1.finalized.csv"
-    default_meta="$BASE_DIR/run_logs/chrono_run_1.meta.json"
     read -p "CSV 경로 [${default_csv}]: " csv_path
     csv_path=${csv_path:-$default_csv}
-    read -p "META JSON 경로 [${default_meta}]: " meta_path
-    meta_path=${meta_path:-$default_meta}
-    read -p "출력 폴더 [${BASE_DIR}/../reports/PEM_only]: " outdir
-    outdir=${outdir:-$BASE_DIR/../reports/PEM_only}
-    cmd=(python3 "$BASE_DIR/stage1_pem_entry.py" --csv "$csv_path" --meta "$meta_path" --outdir "$outdir")
+    read -p "추가 학습 CSV 경로들(공백구분, optional): " extra_csvs
+    default_calib="$BASE_DIR/run_logs/calibration_latest.json"
+    default_model_param="$BASE_DIR/model_parameter.json"
+    if [ ! -f "$default_model_param" ]; then
+        default_model_param="$BASE_DIR/model_parameter.template.json"
+    fi
+    read -p "Calibration JSON [${default_calib}]: " calib_json
+    calib_json=${calib_json:-$default_calib}
+    read -p "Model Parameter JSON [${default_model_param}]: " model_param_json
+    model_param_json=${model_param_json:-$default_model_param}
+    read -p "출력 폴더 [${BASE_DIR}/../reports/Stage1_CMAES]: " outdir
+    outdir=${outdir:-$BASE_DIR/../reports/Stage1_CMAES}
+    read -p "세대 수 [30]: " gens
+    gens=${gens:-30}
+    read -p "병렬 worker 수 [8]: " workers
+    workers=${workers:-8}
+    local csv_args=("$csv_path")
+    if [ -n "$extra_csvs" ]; then
+        for ec in $extra_csvs; do
+            csv_args+=("$ec")
+        done
+    fi
+    cmd=(python3 "$BASE_DIR/stage1_cmaes_chrono.py" --csv "${csv_args[@]}" --calibration-json "$calib_json" --model-parameter-json "$model_param_json" --outdir "$outdir" --max-generations "$gens" --workers "$workers")
     echo "[INFO] command: ${cmd[*]}"
     "${cmd[@]}"
 }
@@ -519,6 +536,10 @@ run_replay_validation() {
         param_json="$BASE_DIR/rl_results/latest/final_params_rl.json"
     elif [ -f "$BASE_DIR/rl_results/latest/best_params.json" ]; then
         param_json="$BASE_DIR/rl_results/latest/best_params.json"
+    elif [ -f "$BASE_DIR/model_parameter.json" ]; then
+        param_json="$BASE_DIR/model_parameter.json"
+    elif [ -f "$BASE_DIR/model_parameter.template.json" ]; then
+        param_json="$BASE_DIR/model_parameter.template.json"
     fi
     if [ -n "$param_json" ]; then
         echo "[INFO] Auto parameter JSON: $param_json"
@@ -552,7 +573,7 @@ while true; do
     echo "=========================================="
     echo "1) IMU Viewer (Standalone Viewer)"
     echo "2) Model Calibration (radius, IMU gravity)"
-    echo "3) Stage1 Identification (PEM)"
+    echo "3) Stage1 Identification (CMA-ES Headless)"
     echo "4) Stage2 Identification (SINDy)"
     echo "5) Stage3 Identification (PPO)"
     echo "6) Chrono Pendulum (Select Host/Jetson mode)"

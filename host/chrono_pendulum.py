@@ -32,7 +32,7 @@ from chrono_core.config import BridgeConfig
 from chrono_core.utils import clamp, now_wall, terminal_status_line, sanitize_float, make_numbered_path
 from chrono_core.dynamics import PendulumModel, compute_model_torque_and_electrics
 from chrono_core.calibration_io import apply_calibration_json, extract_radius_from_json
-from chrono_core.pendulum_rl_env import build_init_params
+from chrono_core.model_parameter_io import load_model_parameter_json, extract_runtime_overrides
 from chrono_core.log_schema import PENDULUM_LOG_COLUMNS
 from chrono_core.signal_filter import estimate_filtered_alpha_from_omega, CausalIIRFilter
 
@@ -634,11 +634,8 @@ def main():
     cfg.K_i_init = float(args.k_i) if args.k_i is not None else float(cfg.K_i_init)
 
     calib = apply_calibration_json(cfg, args.calibration_json)
-    param_data = None
-    if args.parameter_json:
-        with open(args.parameter_json, "r", encoding="utf-8") as pf:
-            param_data = json.load(pf)
-        init_params = build_init_params(cfg, calibration=calib, parameter_json=param_data)
+    param_data = load_model_parameter_json(args.parameter_json)
+    runtime_overrides = extract_runtime_overrides(param_data, cfg) if param_data is not None else {}
     current_offset_mA = 0.0
     if isinstance(calib, dict):
         sm = calib.get("summary", {}) if isinstance(calib.get("summary"), dict) else {}
@@ -652,6 +649,11 @@ def main():
     radius_measured = extract_radius_from_json(args.radius_json)
     if radius_measured is not None:
         cfg.r_imu = float(radius_measured)
+    if runtime_overrides:
+        if "r_imu" in runtime_overrides:
+            cfg.r_imu = float(runtime_overrides["r_imu"])
+        if "gravity" in runtime_overrides:
+            cfg.gravity = float(runtime_overrides["gravity"])
 
     log_csv = make_numbered_path(cfg.log_dir, cfg.log_prefix, ".csv")
     log_finalized_csv = log_csv[:-4] + ".finalized.csv"
@@ -703,9 +705,10 @@ def main():
     )
     print(f"[imu-fix] imu_radius_from_pivot={model.imu_radius_from_pivot():.6f} m")
     sim_params = {
-        "b_eq": float(cfg.b_eq_init),
-        "tau_eq": float(cfg.tau_eq_init),
-        "K_i": float(cfg.K_i_init),
+        "b_eq": float(runtime_overrides.get("b_eq", cfg.b_eq_init)),
+        "tau_eq": float(runtime_overrides.get("tau_eq", cfg.tau_eq_init)),
+        "K_i": float(runtime_overrides.get("K_i", cfg.K_i_init)),
+        "residual_terms": list(runtime_overrides.get("residual_terms", [])),
     }
     model.update_identified_structure(sim_params)
     prev_u_eff = 0.0
@@ -803,6 +806,8 @@ def main():
 
         if calib is not None:
             print(f"[INFO] Loaded calibration json: {args.calibration_json}")
+        if param_data is not None:
+            print(f"[INFO] Loaded model-parameter json: {args.parameter_json}")
         if radius_measured is not None:
             print(f"[INFO] Loaded radius json: {args.radius_json}")
         if np.isfinite(cfg.cpr):
@@ -815,6 +820,13 @@ def main():
             print("[INFO] run limit: none (quit with q/ESC)")
         print("[INFO] alpha_real (legacy/export) source: filtered derivative of omega")
         print("[INFO] finalized training alpha source: tangential linear acceleration / radius")
+        if runtime_overrides:
+            print(
+                "[INFO] Runtime overrides from model-parameter json: "
+                f"K_i={sim_params['K_i']:.6g}, b_eq={sim_params['b_eq']:.6g}, tau_eq={sim_params['tau_eq']:.6g}, "
+                f"r_imu={cfg.r_imu:.6f}, gravity={cfg.gravity:.6f}, "
+                f"residual_terms={len(sim_params.get('residual_terms', []))}"
+            )
         if args.enable_free_decay_mode:
             print(
                 "[INFO] free-decay startup mode: enabled "
