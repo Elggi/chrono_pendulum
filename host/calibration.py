@@ -561,11 +561,11 @@ def run_free_decay_collection(args) -> None:
         theta_arm = None
         release_ts = None
         stop_hold_start = None
+        stop_theta_bin = None
         rows = []
         last_pub_ts = 0.0
         sample_period = 1.0 / max(float(args.free_decay_sample_hz), 1e-6)
         theta_window = deque(maxlen=max(10, int(args.free_decay_sample_hz * max(args.free_decay_steady_window_sec, 0.2))))
-        theta_stop_window = deque(maxlen=max(10, int(args.free_decay_sample_hz * max(args.free_decay_stop_hold_sec, 0.5))))
         theta_filt = CausalIIRFilter(alpha=float(args.free_decay_theta_filter_alpha))
         omega_filt = CausalIIRFilter(alpha=float(args.free_decay_omega_filter_alpha))
         theta_prev = None
@@ -585,7 +585,6 @@ def run_free_decay_collection(args) -> None:
                 theta_lp = float(theta_filt.update(theta))
                 omega_lp = float(omega_filt.update(omega_z))
                 theta_window.append(theta_lp)
-                theta_stop_window.append(theta_lp)
 
                 key = kb.read_key_nonblocking(timeout=0.01)
                 if key in ("q", "Q", "ESC"):
@@ -669,42 +668,17 @@ def run_free_decay_collection(args) -> None:
                     f"theta_lp={theta_lp: .5f} rad | omega_lp={omega_lp: .5f} rad/s"
                 )
 
-                theta_stop_std = float(np.std(np.asarray(theta_stop_window, dtype=float))) if len(theta_stop_window) >= 3 else float("inf")
-                near_zero = abs(math.degrees(theta_lp)) <= float(args.free_decay_stop_near_zero_deg)
-                # Bias-robust steady test: use theta trend slope + residual spread
-                slope_rad_s = float("inf")
-                theta_resid_std = float("inf")
-                if len(rows) >= 8:
-                    w = min(len(rows), int(max(10, args.free_decay_sample_hz * args.free_decay_stop_hold_sec)))
-                    t_w = np.asarray([r["t_sec"] for r in rows[-w:]], dtype=float)
-                    th_w = np.asarray([r["theta_filtered_rad"] for r in rows[-w:]], dtype=float)
-                    t0 = t_w[0]
-                    tt = t_w - t0
-                    A = np.vstack([tt, np.ones_like(tt)]).T
-                    coef, _, _, _ = np.linalg.lstsq(A, th_w, rcond=None)
-                    slope_rad_s = float(coef[0])
-                    th_fit = A @ coef
-                    theta_resid_std = float(np.std(th_w - th_fit))
-                is_steady_stop = (
-                    math.isfinite(omega_lp)
-                    and abs(omega_lp) <= float(args.free_decay_stop_gyro_threshold)
-                    and abs(math.degrees(slope_rad_s)) <= float(args.free_decay_stop_slope_deg_s)
-                    and math.degrees(theta_resid_std) <= float(args.free_decay_stop_resid_std_deg)
-                )
-                if near_zero and is_steady_stop and theta_stop_std <= math.radians(float(args.free_decay_stop_std_deg)):
-                    if stop_hold_start is None:
-                        stop_hold_start = now
-                    if (now - stop_hold_start) >= float(args.free_decay_stop_hold_sec):
+                theta_bin = round(theta_lp, 3)
+                if stop_theta_bin is None or theta_bin != stop_theta_bin:
+                    stop_theta_bin = theta_bin
+                    stop_hold_start = now
+                else:
+                    if stop_hold_start is not None and (now - stop_hold_start) >= float(args.free_decay_stop_hold_sec):
                         print(
-                            f"\n[INFO] stop condition met: |theta|<={args.free_decay_stop_near_zero_deg:.2f}deg "
-                            f"and steady for {args.free_decay_stop_hold_sec:.2f}s "
-                            f"(theta_std_deg={math.degrees(theta_stop_std):.4f}, "
-                            f"slope_deg_s={math.degrees(slope_rad_s):.5f}, "
-                            f"resid_std_deg={math.degrees(theta_resid_std):.5f})"
+                            f"\n[INFO] stop condition met: rounded theta_lp={theta_bin:.3f} "
+                            f"held for {args.free_decay_stop_hold_sec:.2f}s"
                         )
                         break
-                else:
-                    stop_hold_start = None
 
                 theta_prev = theta_lp
                 time.sleep(sample_period)
@@ -760,7 +734,8 @@ def run_free_decay_collection(args) -> None:
             "summary": {
                 "sample_count": int(len(export_rows)),
                 "theta_arm_deg": float(math.degrees(theta_arm)) if theta_arm is not None else None,
-                "stop_near_zero_deg": float(args.free_decay_stop_near_zero_deg),
+                "stop_rule": "rounded_theta_lp_3dp_hold",
+                "stop_hold_sec": float(args.free_decay_stop_hold_sec),
                 "theta_unwrapped": True,
             },
             "artifacts": {
@@ -852,12 +827,7 @@ def build_argparser():
     ap.add_argument("--free-decay-omega-filter-alpha", type=float, default=0.18)
     ap.add_argument("--free-decay-release-gyro-threshold", type=float, default=0.35)
     ap.add_argument("--free-decay-release-delta-deg", type=float, default=0.25)
-    ap.add_argument("--free-decay-stop-near-zero-deg", type=float, default=1.9)
     ap.add_argument("--free-decay-stop-hold-sec", type=float, default=2.0)
-    ap.add_argument("--free-decay-stop-gyro-threshold", type=float, default=0.12)
-    ap.add_argument("--free-decay-stop-std-deg", type=float, default=0.08)
-    ap.add_argument("--free-decay-stop-slope-deg-s", type=float, default=0.02)
-    ap.add_argument("--free-decay-stop-resid-std-deg", type=float, default=0.05)
     return ap
 
 
