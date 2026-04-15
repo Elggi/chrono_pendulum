@@ -32,6 +32,7 @@ from rclpy.node import Node
 from std_msgs.msg import Float32, String
 
 from imu_viewer import SharedState, ViewerNode
+from chrono_core.signal_filter import CausalIIRFilter
 
 
 def terminal_status_line(msg: str, width: int = 140):
@@ -564,6 +565,9 @@ def run_free_decay_collection(args) -> None:
         last_pub_ts = 0.0
         sample_period = 1.0 / max(float(args.free_decay_sample_hz), 1e-6)
         theta_window = deque(maxlen=max(10, int(args.free_decay_sample_hz * max(args.free_decay_steady_window_sec, 0.2))))
+        theta_stop_window = deque(maxlen=max(10, int(args.free_decay_sample_hz * max(args.free_decay_stop_hold_sec, 0.5))))
+        theta_filt = CausalIIRFilter(alpha=float(args.free_decay_theta_filter_alpha))
+        omega_filt = CausalIIRFilter(alpha=float(args.free_decay_omega_filter_alpha))
         theta_prev = None
         release_detected = False
 
@@ -577,7 +581,11 @@ def run_free_decay_collection(args) -> None:
                 gyro_n = _gyro_norm(snap)
                 theta = float(snap.get("angle_unwrapped_rad", 0.0))
                 enc = float(snap.get("enc", 0.0))
-                theta_window.append(theta)
+                omega_z = float(np.asarray(snap.get("gyro", [0.0, 0.0, 0.0]), dtype=float)[2])
+                theta_lp = float(theta_filt.update(theta))
+                omega_lp = float(omega_filt.update(omega_z))
+                theta_window.append(theta_lp)
+                theta_stop_window.append(theta_lp)
 
                 key = kb.read_key_nonblocking(timeout=0.01)
                 if key in ("q", "Q", "ESC"):
@@ -590,12 +598,12 @@ def run_free_decay_collection(args) -> None:
                     last_pub_ts = now
 
                 if not armed:
-                    theta_abs_deg = abs(math.degrees(theta))
+                    theta_abs_deg = abs(math.degrees(theta_lp))
                     is_lifted = theta_abs_deg >= float(args.free_decay_arm_min_angle_deg)
                     theta_std = float(np.std(np.asarray(theta_window, dtype=float))) if len(theta_window) >= 3 else float("inf")
                     is_steady = (
-                        math.isfinite(gyro_n)
-                        and gyro_n <= float(args.free_decay_hold_gyro_threshold)
+                        math.isfinite(omega_lp)
+                        and abs(omega_lp) <= float(args.free_decay_hold_gyro_threshold)
                         and theta_std <= math.radians(float(args.free_decay_hold_std_deg))
                     )
                     if is_lifted and is_steady:
@@ -612,34 +620,34 @@ def run_free_decay_collection(args) -> None:
                     arm_elapsed = 0.0 if arm_start_ts is None else (now - arm_start_ts)
                     terminal_status_line(
                         f"[arming...] |theta|={theta_abs_deg:6.2f}/{args.free_decay_arm_min_angle_deg:.2f} deg | "
-                        f"gyro={gyro_n:7.4f} | std_deg={math.degrees(theta_std):6.3f}/{args.free_decay_hold_std_deg:.3f} | "
+                        f"omega_lp={omega_lp:7.4f} | std_deg={math.degrees(theta_std):6.3f}/{args.free_decay_hold_std_deg:.3f} | "
                         f"steady={arm_elapsed:5.2f}/{args.free_decay_hold_min_sec:.2f}s"
                     )
                     time.sleep(sample_period)
                     continue
 
                 if not release_detected:
-                    dtheta = 0.0 if theta_prev is None else (theta - theta_prev)
+                    dtheta = 0.0 if theta_prev is None else (theta_lp - theta_prev)
                     if (
-                        math.isfinite(gyro_n)
+                        math.isfinite(omega_lp)
                         and (
                             abs(dtheta) >= math.radians(float(args.free_decay_release_delta_deg))
-                            or gyro_n >= float(args.free_decay_release_gyro_threshold)
+                            or abs(omega_lp) >= float(args.free_decay_release_gyro_threshold)
                         )
                     ):
                         release_detected = True
                         release_ts = now
                         print(
                             f"\n[INFO] release 검출: t={release_ts:.6f}, "
-                            f"theta={math.degrees(theta):.3f} deg, gyro_norm={gyro_n:.6f} rad/s"
+                            f"theta={math.degrees(theta_lp):.3f} deg, omega_lp={omega_lp:.6f} rad/s"
                         )
                     else:
                         dtheta_deg = math.degrees(dtheta)
                         terminal_status_line(
                             f"[armed] release 대기 | dtheta={dtheta_deg:7.3f}/{args.free_decay_release_delta_deg:.3f} deg | "
-                            f"gyro={gyro_n:7.4f}/{args.free_decay_release_gyro_threshold:.4f}"
+                            f"omega_lp={omega_lp:7.4f}/{args.free_decay_release_gyro_threshold:.4f}"
                         )
-                        theta_prev = theta
+                        theta_prev = theta_lp
                         time.sleep(sample_period)
                         continue
 
@@ -648,32 +656,36 @@ def run_free_decay_collection(args) -> None:
                     {
                         "t_sec": t_rel,
                         "theta_raw_rad": theta,
-                        "theta_from_arm_rad": theta - float(theta_arm),
-                        "omega_z_rad_s": float(np.asarray(snap.get("gyro", [0.0, 0.0, 0.0]), dtype=float)[2]),
+                        "theta_filtered_rad": theta_lp,
+                        "theta_from_arm_rad": theta_lp - float(theta_arm),
+                        "omega_z_rad_s": omega_z,
+                        "omega_filtered_rad_s": omega_lp,
                         "gyro_norm_rad_s": gyro_n,
                         "enc_count": enc,
                     }
                 )
                 terminal_status_line(
                     f"[수집중] t={t_rel:6.3f}s | "
-                    f"theta={theta: .5f} rad | omega_z={rows[-1]['omega_z_rad_s']: .5f} rad/s"
+                    f"theta_lp={theta_lp: .5f} rad | omega_lp={omega_lp: .5f} rad/s"
                 )
 
-                near_zero = abs(math.degrees(theta)) <= float(args.free_decay_stop_near_zero_deg)
-                is_steady_stop = math.isfinite(gyro_n) and gyro_n <= float(args.free_decay_stop_gyro_threshold)
+                theta_stop_std = float(np.std(np.asarray(theta_stop_window, dtype=float))) if len(theta_stop_window) >= 3 else float("inf")
+                near_zero = abs(math.degrees(theta_lp)) <= float(args.free_decay_stop_near_zero_deg)
+                is_steady_stop = math.isfinite(omega_lp) and abs(omega_lp) <= float(args.free_decay_stop_gyro_threshold)
                 if near_zero and is_steady_stop:
                     if stop_hold_start is None:
                         stop_hold_start = now
-                    if (now - stop_hold_start) >= float(args.free_decay_stop_hold_sec):
+                    if (now - stop_hold_start) >= float(args.free_decay_stop_hold_sec) and theta_stop_std <= math.radians(float(args.free_decay_stop_std_deg)):
                         print(
                             f"\n[INFO] stop condition met: |theta|<={args.free_decay_stop_near_zero_deg:.2f}deg "
-                            f"and steady for {args.free_decay_stop_hold_sec:.2f}s"
+                            f"and steady for {args.free_decay_stop_hold_sec:.2f}s "
+                            f"(theta_std_deg={math.degrees(theta_stop_std):.4f})"
                         )
                         break
                 else:
                     stop_hold_start = None
 
-                theta_prev = theta
+                theta_prev = theta_lp
                 time.sleep(sample_period)
         print()
 
@@ -684,17 +696,51 @@ def run_free_decay_collection(args) -> None:
         os.makedirs(out_dir, exist_ok=True)
         out_csv = _next_free_decay_csv_path(out_dir)
         with open(out_csv, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            t_arr = np.asarray([r["t_sec"] for r in rows], dtype=float)
+            theta_arr = np.asarray([r["theta_filtered_rad"] for r in rows], dtype=float)
+            omega_arr = np.asarray([r["omega_filtered_rad_s"] for r in rows], dtype=float)
+            alpha_arr = np.zeros_like(omega_arr)
+            if len(omega_arr) >= 2:
+                alpha_arr = np.gradient(omega_arr, np.maximum(t_arr, 1e-6), edge_order=1)
+            export_rows = []
+            for i, r in enumerate(rows):
+                export_rows.append(
+                    {
+                        "wall_elapsed": float(r["t_sec"]),
+                        "theta": float(theta_arr[i]),
+                        "omega": float(omega_arr[i]),
+                        "alpha": float(alpha_arr[i]),
+                        "theta_imu": float(r["theta_raw_rad"]),
+                        "theta_imu_online": float(theta_arr[i]),
+                        "omega_imu": float(r["omega_z_rad_s"]),
+                        "omega_imu_online": float(omega_arr[i]),
+                        "alpha_linear": float(alpha_arr[i]),
+                        "alpha_linear_online": float(alpha_arr[i]),
+                        "cmd_u_raw": 0.0,
+                        "cmd_u": 0.0,
+                        "pwm_hw": 0.0,
+                        "hw_pwm": 0.0,
+                        "ina_current_corr_mA": 0.0,
+                        "ina_current_signed_online_mA": 0.0,
+                        "tau_cmd": 0.0,
+                        "tau_motor": 0.0,
+                        "tau_visc": 0.0,
+                        "tau_coul": 0.0,
+                        "enc_count": float(r["enc_count"]),
+                    }
+                )
+            writer = csv.DictWriter(f, fieldnames=list(export_rows[0].keys()))
             writer.writeheader()
-            writer.writerows(rows)
+            writer.writerows(export_rows)
 
         result = {
             "created_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "method": "free_decay_auto_arm_release",
             "summary": {
-                "sample_count": int(len(rows)),
+                "sample_count": int(len(export_rows)),
                 "theta_arm_deg": float(math.degrees(theta_arm)) if theta_arm is not None else None,
                 "stop_near_zero_deg": float(args.free_decay_stop_near_zero_deg),
+                "theta_unwrapped": True,
             },
             "artifacts": {
                 "free_decay_csv": out_csv,
@@ -781,11 +827,14 @@ def build_argparser():
     ap.add_argument("--free-decay-steady-window-sec", type=float, default=0.6)
     ap.add_argument("--free-decay-hold-std-deg", type=float, default=0.4)
     ap.add_argument("--free-decay-hold-gyro-threshold", type=float, default=0.15)
+    ap.add_argument("--free-decay-theta-filter-alpha", type=float, default=0.12)
+    ap.add_argument("--free-decay-omega-filter-alpha", type=float, default=0.18)
     ap.add_argument("--free-decay-release-gyro-threshold", type=float, default=0.35)
     ap.add_argument("--free-decay-release-delta-deg", type=float, default=0.25)
     ap.add_argument("--free-decay-stop-near-zero-deg", type=float, default=1.9)
     ap.add_argument("--free-decay-stop-hold-sec", type=float, default=2.0)
     ap.add_argument("--free-decay-stop-gyro-threshold", type=float, default=0.12)
+    ap.add_argument("--free-decay-stop-std-deg", type=float, default=0.08)
     return ap
 
 
