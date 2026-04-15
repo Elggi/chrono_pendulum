@@ -36,7 +36,7 @@ def apply_calibration_json(cfg: BridgeConfig, json_path: str | None, apply_model
         cfg.l_com_init = float(model_init.get("l_com", cfg.l_com_init))
         cfg.b_eq_init = float(model_init.get("b_eq", model_init.get("b", cfg.b_eq_init)))
         cfg.tau_eq_init = float(model_init.get("tau_eq", model_init.get("tau_c", cfg.tau_eq_init)))
-        cfg.K_u_init = float(model_init.get("K_u", model_init.get("k_u", cfg.K_u_init)))
+        cfg.K_i_init = float(model_init.get("K_i", cfg.K_i_init))
     cfg.r_imu = float(
         model_init.get(
             "r_imu",
