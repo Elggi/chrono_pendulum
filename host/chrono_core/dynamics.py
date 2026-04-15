@@ -138,6 +138,22 @@ class PendulumModel:
     def get_omega(self):
         return float(self.link.GetAngVelLocal().z)
 
+    def set_theta_kinematic(self, theta_rad: float, omega_rad_s: float = 0.0):
+        theta = float(theta_rad)
+        q_link = ch.QuatFromAngleZ(theta)
+        com_x = -math.sin(theta) * (self.cfg.link_L / 2.0)
+        com_y = -math.cos(theta) * (self.cfg.link_L / 2.0)
+        self.link.SetRot(q_link)
+        self.link.SetPos(ch.ChVector3d(com_x, com_y, self.cfg.motor_length / 2.0))
+        self.link.SetPosDt(ch.ChVector3d(0.0, 0.0, 0.0))
+        self.link.SetAngVelLocal(ch.ChVector3d(0.0, 0.0, float(omega_rad_s)))
+        imu_com_local = ch.ChVector3d(0.0, -self.cfg.link_L + self.cfg.imu_size_y / 2.0, 0.0)
+        imu_abs = self.link.TransformPointLocalToParent(imu_com_local)
+        self.imu.SetPos(imu_abs)
+        self.imu.SetRot(q_link)
+        self.imu.SetPosDt(ch.ChVector3d(0.0, 0.0, 0.0))
+        self.imu.SetAngVelLocal(ch.ChVector3d(0.0, 0.0, float(omega_rad_s)))
+
     def get_sensor_kinematics(self, cur_t, step):
         pos_w = self.imu.GetPos()
         vel_w = self.imu.GetPosDt()

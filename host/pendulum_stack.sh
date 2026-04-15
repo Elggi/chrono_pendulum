@@ -159,6 +159,18 @@ run_chrono_pendulum() {
         theta0_deg=0
     fi
     echo "theta0_deg = $theta0_deg (+:CCW, -:CW)"
+    read -p "Enable Chrono free-decay startup mode? (y/n) [n]: " free_decay_mode_yn
+    free_decay_mode_yn=${free_decay_mode_yn:-n}
+    free_decay_args=()
+    if [[ "$free_decay_mode_yn" =~ ^[Yy]$ ]]; then
+        read -p "free-decay arm minimum angle [deg] (default: 5.0): " arm_min_angle_deg
+        arm_min_angle_deg=${arm_min_angle_deg:-5.0}
+        if ! [[ "$arm_min_angle_deg" =~ ^[+-]?[0-9]+([.][0-9]+)?$ ]]; then
+            echo "[WARN] Invalid arm minimum angle '$arm_min_angle_deg'. Fallback to 5.0 deg."
+            arm_min_angle_deg=5.0
+        fi
+        free_decay_args+=(--enable-free-decay-mode --free-decay-arm-min-angle-deg "$arm_min_angle_deg")
+    fi
     echo "--------------------------------"
     echo "Select mode:"
     echo "1) Host mode (keyboard control)"
@@ -174,12 +186,14 @@ run_chrono_pendulum() {
     if [ "$mode" == "1" ]; then
         echo "[INFO] chrono_pendulum (HOST mode)"
         cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode host --theta0-deg "$theta0_deg")
+        cmd+=("${free_decay_args[@]}")
         [ -n "$param_json" ] && cmd+=(--parameter-json "$param_json")
         [ -n "$calib_json" ] && cmd+=(--calibration-json "$calib_json" --radius-json "$calib_json")
         "${cmd[@]}"
     elif [ "$mode" == "2" ]; then
         echo "[INFO] chrono_pendulum (JETSON mode)"
         cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode jetson --theta0-deg "$theta0_deg")
+        cmd+=("${free_decay_args[@]}")
         [ -n "$param_json" ] && cmd+=(--parameter-json "$param_json")
         [ -n "$calib_json" ] && cmd+=(--calibration-json "$calib_json" --radius-json "$calib_json")
         "${cmd[@]}"
@@ -206,6 +220,56 @@ run_system_identification() {
         echo "[INFO] manual CPR/r calibration 실행"
         python3 "$BASE_DIR/calibration.py"
     fi
+}
+
+run_stage1_pem_identification() {
+    echo "--------------------------------"
+    echo "[INFO] Stage1 PEM Identification 실행"
+    default_csv="$BASE_DIR/run_logs/chrono_run_1.finalized.csv"
+    default_meta="$BASE_DIR/run_logs/chrono_run_1.meta.json"
+    read -p "CSV 경로 [${default_csv}]: " csv_path
+    csv_path=${csv_path:-$default_csv}
+    read -p "META JSON 경로 [${default_meta}]: " meta_path
+    meta_path=${meta_path:-$default_meta}
+    read -p "출력 폴더 [${BASE_DIR}/../reports/PEM_only]: " outdir
+    outdir=${outdir:-$BASE_DIR/../reports/PEM_only}
+    cmd=(python3 "$BASE_DIR/stage1_pem_entry.py" --csv "$csv_path" --meta "$meta_path" --outdir "$outdir")
+    echo "[INFO] command: ${cmd[*]}"
+    "${cmd[@]}"
+}
+
+run_stage2_sindy_identification() {
+    echo "--------------------------------"
+    echo "[INFO] Stage2 SINDy Identification 실행"
+    default_csv="$BASE_DIR/run_logs/chrono_run_1.finalized.csv"
+    default_meta="$BASE_DIR/run_logs/chrono_run_1.meta.json"
+    read -p "CSV 경로 [${default_csv}]: " csv_path
+    csv_path=${csv_path:-$default_csv}
+    read -p "META JSON 경로 [${default_meta}]: " meta_path
+    meta_path=${meta_path:-$default_meta}
+    read -p "출력 폴더 [${BASE_DIR}/../reports/SINDy_stage2]: " outdir
+    outdir=${outdir:-$BASE_DIR/../reports/SINDy_stage2}
+    cmd=(python3 "$BASE_DIR/stage2_sindy_entry.py" --csv "$csv_path" --meta "$meta_path" --outdir "$outdir")
+    echo "[INFO] command: ${cmd[*]}"
+    "${cmd[@]}"
+}
+
+run_stage3_ppo_identification() {
+    echo "--------------------------------"
+    echo "[INFO] Stage3 PPO Identification 실행"
+    default_csv="$BASE_DIR/run_logs/chrono_run_1.finalized.csv"
+    default_meta="$BASE_DIR/run_logs/chrono_run_1.meta.json"
+    read -p "CSV 경로 [${default_csv}]: " csv_path
+    csv_path=${csv_path:-$default_csv}
+    read -p "META JSON 경로 [${default_meta}]: " meta_path
+    meta_path=${meta_path:-$default_meta}
+    read -p "출력 폴더 [${BASE_DIR}/../reports/PPO_stage3]: " outdir
+    outdir=${outdir:-$BASE_DIR/../reports/PPO_stage3}
+    read -p "PPO timesteps [12000]: " ppo_steps
+    ppo_steps=${ppo_steps:-12000}
+    cmd=(python3 "$BASE_DIR/stage3_ppo_entry.py" --csv "$csv_path" --meta "$meta_path" --outdir "$outdir" --ppo-steps "$ppo_steps")
+    echo "[INFO] command: ${cmd[*]}"
+    "${cmd[@]}"
 }
 
 run_plot() {
@@ -488,13 +552,14 @@ while true; do
     echo "=========================================="
     echo "1) IMU Viewer (Standalone Viewer)"
     echo "2) Model Calibration (radius, IMU gravity)"
-    echo "3) Parameter Finetuning (SB3 PPO)"
-    echo "4) Chrono Pendulum (Select Host/Jetson mode)"
-    echo "5) Plot Data (Sim vs Real)"
-    echo "6) Replay Runs"
-    echo "7) System Identification (Physical Params, Stage-wise)"
-    echo "8) Offline Benchmark (PEM+SINDy-PI+PPO)"
-    echo "9) Exit"
+    echo "3) Stage1 Identification (PEM)"
+    echo "4) Stage2 Identification (SINDy)"
+    echo "5) Stage3 Identification (PPO)"
+    echo "6) Chrono Pendulum (Select Host/Jetson mode)"
+    echo "7) Plot Data (Sim vs Real)"
+    echo "8) Replay Runs"
+    echo "9) Offline Benchmark (PEM+SINDy-PI+PPO)"
+    echo "10) Exit"
     echo "=========================================="
 
     read -p "Select option: " choice
@@ -509,30 +574,34 @@ while true; do
             pause
             ;;
         3)
-            run_rl_fitting
+            run_stage1_pem_identification
             pause
             ;;
         4)
-            run_chrono_pendulum
+            run_stage2_sindy_identification
             pause
             ;;
         5)
-            run_plot
+            run_stage3_ppo_identification
             pause
             ;;
         6)
-            run_replay_validation
+            run_chrono_pendulum
             pause
             ;;
         7)
-            run_staged_calibration
+            run_plot
             pause
             ;;
         8)
-            run_offline_benchmark_pem_sindy_ppo
+            run_replay_validation
             pause
             ;;
         9)
+            run_offline_benchmark_pem_sindy_ppo
+            pause
+            ;;
+        10)
             echo "Bye!"
             exit 0
             ;;
