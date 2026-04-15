@@ -19,24 +19,23 @@ class BridgeConfig:
     shaft_radius: float = 0.004
     shaft_length: float = 0.015
 
-    # Visual geometry (rendering / IMU widget placement)
+    # Rod body box dimensions used directly by Chrono rigid-body construction (no separate visualization model).
     link_L: float = 0.285
     link_W: float = 0.020
     link_T: float = 0.006
 
-    # Dynamic geometry and encoder scaling
-    radius_m: float = 0.285
+    # Unified physical radius: pivot -> IMU center.
+    # This is the single effective radius used by Chrono geometry, solver physics, and IMU-derived alpha conversion.
+    r_imu: float = 0.285
     cpr: float = float("nan")
 
     # Fixed masses (physical model)
     rod_mass: float = 0.200
     imu_mass: float = 0.020
     rod_length: float = 0.285
-    # IMU radius from pivot (loaded from calibration when available)
-    r_imu: float = 0.285
-    l_com_init: float = 0.1425  # default midpoint for 0.285 m link
-    # Effective input-to-torque gain in surrogate dynamics: tau_motor = K_u * u
-    K_u_init: float = 1.0e-5
+    # Motor torque constant in surrogate dynamics: tau_motor = K_i * I_filtered
+    K_i_init: float = 1.0e-5
+    _l_com_override: float | None = None
 
     imu_offset_x: float = 0.220
     imu_offset_y: float = 0.000
@@ -99,3 +98,26 @@ class BridgeConfig:
     log_prefix: str = "chrono_run_"
 
     calibration_json: str = ""
+
+    @property
+    def radius_m(self) -> float:
+        # Backward compatibility alias. Physical runtime radius is unified to r_imu.
+        return float(self.r_imu)
+
+    @radius_m.setter
+    def radius_m(self, value: float) -> None:
+        self.r_imu = float(value)
+
+    @property
+    def l_com_init(self) -> float:
+        if self._l_com_override is not None:
+            return float(self._l_com_override)
+        # Effective total COM from pivot using Chrono body geometry assumptions.
+        m_rod = float(self.rod_mass)
+        m_imu = float(self.imu_mass)
+        return float((m_rod * (0.5 * float(self.link_L)) + m_imu * float(self.r_imu)) / max(m_rod + m_imu, 1e-12))
+
+    @l_com_init.setter
+    def l_com_init(self, value: float) -> None:
+        # Deprecated override; kept only to avoid breaking legacy call-sites.
+        self._l_com_override = float(value)
