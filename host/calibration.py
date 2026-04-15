@@ -581,7 +581,9 @@ def run_free_decay_collection(args) -> None:
                 gyro_n = _gyro_norm(snap)
                 theta = float(snap.get("angle_unwrapped_rad", 0.0))
                 enc = float(snap.get("enc", 0.0))
-                omega_z = float(np.asarray(snap.get("gyro", [0.0, 0.0, 0.0]), dtype=float)[2])
+                # Free-decay collection convention:
+                # theta>0 for CCW, theta<0 for CW. Align omega sign to d(theta)/dt for this export path.
+                omega_z = -float(np.asarray(snap.get("gyro", [0.0, 0.0, 0.0]), dtype=float)[2])
                 theta_lp = float(theta_filt.update(theta))
                 omega_lp = float(omega_filt.update(omega_z))
                 theta_window.append(theta_lp)
