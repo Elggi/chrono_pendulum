@@ -811,7 +811,7 @@ def main() -> None:
     meta = _load_json(args.meta)
     cfg_meta = meta.get("config", {})
     init_params = {
-        "K_u": float(cfg_meta.get("K_u_init", 1e-5)),
+        "K_u": float(cfg_meta.get("K_i_init", cfg_meta.get("K_u_init", 1e-5))),
         "b_eq": float(cfg_meta.get("b_eq_init", 0.02)),
         "tau_eq": float(cfg_meta.get("tau_eq_init", 0.01)),
         "l_com": float(cfg_meta.get("l_com_init", 0.1425)),

@@ -6,6 +6,8 @@ import pychrono as ch
 from .config import BridgeConfig
 from .utils import quat_to_np, clamp, sanitize_float
 
+EARTH_GRAVITY_MPS2 = 9.81
+
 
 def add_axes_visual(sys_ch, axis_len=0.12, axis_thk=0.002):
     axes = ch.ChBody()
@@ -29,7 +31,9 @@ class PendulumModel:
     def __init__(self, cfg: BridgeConfig):
         self.cfg = cfg
         self.sys = ch.ChSystemNSC()
-        self.sys.SetGravitationalAcceleration(ch.ChVector3d(0.0, -cfg.gravity, 0.0))
+        # Use physical Earth gravity in Chrono dynamics.
+        # cfg.gravity can be calibrated for IMU gravity-compensation, but should not alter physics gravity here.
+        self.sys.SetGravitationalAcceleration(ch.ChVector3d(0.0, -EARTH_GRAVITY_MPS2, 0.0))
         add_axes_visual(self.sys)
 
         self.base = ch.ChBody()
@@ -52,30 +56,34 @@ class PendulumModel:
             ),
         )
 
-        self.link = ch.ChBody()
-        self.link.SetPos(ch.ChVector3d(0.0, 0.0, cfg.motor_length / 2.0))
-        self.link.SetRot(ch.QuatFromAngleZ(math.radians(cfg.theta0_deg)))
-        self.sys.Add(self.link)
+        self.link = self._create_easy_box(
+            size_x=cfg.link_W,
+            size_y=cfg.link_L,
+            size_z=cfg.link_T,
+            mass=cfg.rod_mass,
+            color=ch.ChColor(0.93, 0.93, 0.93),
+        )
+        theta0 = math.radians(cfg.theta0_deg)
+        q_link = ch.QuatFromAngleZ(theta0)
+        self.link.SetRot(q_link)
+        com_x = -math.sin(theta0) * (cfg.link_L / 2.0)
+        com_y = -math.cos(theta0) * (cfg.link_L / 2.0)
+        self.link.SetPos(ch.ChVector3d(com_x, com_y, cfg.motor_length / 2.0))
         self.link.SetAngVelLocal(ch.ChVector3d(0.0, 0.0, cfg.omega0))
+        self.sys.Add(self.link)
 
-        self._apply_dynamic_properties()
-
-        vis_link = ch.ChVisualShapeBox(cfg.link_W, cfg.link_L, cfg.link_T)
-        vis_link.SetColor(ch.ChColor(0.93, 0.93, 0.93))
-        self.link.AddVisualShape(vis_link, ch.ChFramed(ch.ChVector3d(0.0, -cfg.link_L / 2.0, 0.0), ch.QUNIT))
-
-        self.imu = ch.ChBody()
-        self.imu.SetMass(1e-6)
-        self.imu.SetInertiaXX(ch.ChVector3d(1e-6, 1e-6, 1e-6))
-        imu_local = ch.ChVector3d(0.0, -cfg.link_L + cfg.imu_size_y / 2.0, 0.0)
-        imu_abs = self.link.TransformPointLocalToParent(imu_local)
+        self.imu = self._create_easy_box(
+            size_x=cfg.imu_size_x,
+            size_y=cfg.imu_size_y,
+            size_z=cfg.imu_size_z,
+            mass=cfg.imu_mass,
+            color=ch.ChColor(0.60, 0.60, 0.60),
+        )
+        imu_com_local = self._imu_com_local()
+        imu_abs = self.link.TransformPointLocalToParent(imu_com_local)
         self.imu.SetPos(imu_abs)
         self.imu.SetRot(self.link.GetRot())
         self.sys.Add(self.imu)
-
-        vis_imu = ch.ChVisualShapeBox(cfg.imu_size_x, cfg.imu_size_y, cfg.imu_size_z)
-        vis_imu.SetColor(ch.ChColor(0.60, 0.60, 0.60))
-        self.imu.AddVisualShape(vis_imu)
 
         fix_frame_abs = ch.ChFramed(imu_abs, self.link.GetRot())
         self.fix_imu = ch.ChLinkLockLock()
@@ -87,34 +95,66 @@ class PendulumModel:
         self.tau_fun = ch.ChFunctionConst(0.0)
         self.motor.SetTorqueFunction(self.tau_fun)
         self.sys.Add(self.motor)
+        self._torque_model = None
 
         self.prev_sensor_vel = np.zeros(3, dtype=float)
         self.prev_t = None
 
+    def pivot_pos_world(self):
+        return np.array([0.0, 0.0, float(self.cfg.motor_length / 2.0)], dtype=float)
+
+    def rod_com_pos_world(self):
+        p = self.link.GetPos()
+        return np.array([float(p.x), float(p.y), float(p.z)], dtype=float)
+
+    def imu_com_pos_world(self):
+        p = self.imu.GetPos()
+        return np.array([float(p.x), float(p.y), float(p.z)], dtype=float)
+
+    def imu_local_on_rod(self):
+        p_local = self.link.TransformPointParentToLocal(self.imu.GetPos())
+        return np.array([float(p_local.x), float(p_local.y), float(p_local.z)], dtype=float)
+
+    def rod_com_radius_from_pivot(self):
+        return float(self.cfg.link_L / 2.0)
+
+    def imu_radius_from_pivot(self):
+        return float(np.linalg.norm(self.imu_com_pos_world() - self.pivot_pos_world()))
+
     @property
     def m_total(self):
-        return float(self.cfg.rod_mass + self.cfg.imu_mass)
+        return float(self.link.GetMass() + self.imu.GetMass())
 
     @property
     def J_rod(self):
-        return float((1.0 / 3.0) * self.cfg.rod_mass * (self.cfg.rod_length ** 2))
+        return float(self.link.GetInertiaXX().z)
 
     @property
     def J_imu(self):
-        return float(self.cfg.imu_mass * (self.cfg.r_imu ** 2))
+        return float(self.imu.GetInertiaXX().z)
 
     @property
     def J_total(self):
         return float(self.J_rod + self.J_imu)
 
-    def _apply_dynamic_properties(self):
-        """Apply geometry-based rigid-body properties with fixed inertia."""
-        self.link.SetMass(max(self.m_total, 1e-6))
-        self.link.SetInertiaXX(ch.ChVector3d(1e-5, 1e-5, max(self.J_total, 1e-8)))
+    def _create_easy_box(self, size_x, size_y, size_z, mass, color):
+        vol = max(float(size_x) * float(size_y) * float(size_z), 1e-12)
+        density = max(float(mass), 1e-9) / vol
+        body = ch.ChBodyEasyBox(float(size_x), float(size_y), float(size_z), density, True, False)
+        body.SetMass(max(float(mass), 1e-9))
+        if hasattr(body, "GetVisualShape"):
+            shape0 = body.GetVisualShape(0)
+            if shape0 is not None:
+                shape0.SetColor(color)
+        return body
+
+    def _imu_com_local(self):
+        # r_imu is the calibrated pivot->IMU-center radius.
+        return ch.ChVector3d(0.0, -float(self.cfg.r_imu), 0.0)
 
     def update_identified_structure(self, params: dict):
-        # l_cg is identified only in gravity torque; inertia remains fixed by geometry.
-        self._apply_dynamic_properties()
+        _ = params
+        # Mass/COM/inertia are derived from geometry+density via ChBodyEasyBox.
 
     def get_theta(self):
         d = self.link.TransformDirectionLocalToParent(ch.ChVector3d(0.0, -1.0, 0.0))
@@ -122,6 +162,22 @@ class PendulumModel:
 
     def get_omega(self):
         return float(self.link.GetAngVelLocal().z)
+
+    def set_theta_kinematic(self, theta_rad: float, omega_rad_s: float = 0.0):
+        theta = float(theta_rad)
+        q_link = ch.QuatFromAngleZ(theta)
+        com_x = -math.sin(theta) * (self.cfg.link_L / 2.0)
+        com_y = -math.cos(theta) * (self.cfg.link_L / 2.0)
+        self.link.SetRot(q_link)
+        self.link.SetPos(ch.ChVector3d(com_x, com_y, self.cfg.motor_length / 2.0))
+        self.link.SetPosDt(ch.ChVector3d(0.0, 0.0, 0.0))
+        self.link.SetAngVelLocal(ch.ChVector3d(0.0, 0.0, float(omega_rad_s)))
+        imu_com_local = self._imu_com_local()
+        imu_abs = self.link.TransformPointLocalToParent(imu_com_local)
+        self.imu.SetPos(imu_abs)
+        self.imu.SetRot(q_link)
+        self.imu.SetPosDt(ch.ChVector3d(0.0, 0.0, 0.0))
+        self.imu.SetAngVelLocal(ch.ChVector3d(0.0, 0.0, float(omega_rad_s)))
 
     def get_sensor_kinematics(self, cur_t, step):
         pos_w = self.imu.GetPos()
@@ -142,20 +198,34 @@ class PendulumModel:
     def apply_torque(self, tau_z):
         self.tau_fun.SetConstant(sanitize_float(tau_z))
 
+    def set_torque_model(self, fn):
+        """Set callable torque model: fn(theta, omega, context_dict) -> tau_z."""
+        self._torque_model = fn
+
+    def apply_modeled_torque(self, theta, omega, context=None):
+        if self._torque_model is None:
+            return 0.0
+        ctx = {} if context is None else dict(context)
+        tau = sanitize_float(self._torque_model(float(theta), float(omega), ctx))
+        self.apply_torque(tau)
+        return float(tau)
+
     def step(self, h):
         self.sys.DoStepDynamics(h)
 
 
-def compute_model_torque_and_electrics(cmd_u, theta, omega, bus_v, p, cfg: BridgeConfig):
+def compute_model_torque_and_electrics(motor_input, theta, omega, bus_v, p, cfg: BridgeConfig, cmd_u_for_duty=None):
     _ = bus_v
-    tau_motor = p["K_u"] * cmd_u
+    motor_gain = float(p.get("K_i", p.get("K_u", cfg.K_i_init)))
+    tau_motor = motor_gain * float(motor_input)
     tau_visc = p["b_eq"] * omega
     tau_coul = p["tau_eq"] * math.tanh(omega / max(cfg.tanh_eps, 1e-9))
     tau_res = tau_visc + tau_coul
-    tau_gravity = (cfg.rod_mass + cfg.imu_mass) * cfg.gravity * p["l_com"] * math.sin(theta)
-    tau_net = tau_motor - tau_res - tau_gravity
+    tau_gravity = 0.0
+    tau_net = tau_motor - tau_res
+    duty_input = 0.0 if cmd_u_for_duty is None else float(cmd_u_for_duty)
     return {
-        "duty": clamp(cmd_u / max(cfg.pwm_limit, 1e-9), -1.0, 1.0),
+        "duty": clamp(duty_input / max(cfg.pwm_limit, 1e-9), -1.0, 1.0),
         "tau_motor": tau_motor,
         "tau_visc": tau_visc,
         "tau_coul": tau_coul,
@@ -168,13 +238,15 @@ def compute_model_torque_and_electrics(cmd_u, theta, omega, bus_v, p, cfg: Bridg
 def blend_parameters_for_sim(ekf_params: dict, cfg: BridgeConfig):
     b_eq = float(ekf_params.get("b_eq", ekf_params.get("b", cfg.b_eq_init)))
     tau_eq = float(ekf_params.get("tau_eq", ekf_params.get("tau_c", cfg.tau_eq_init)))
+    k_i = float(ekf_params.get("K_i", ekf_params.get("K_u", ekf_params.get("k_u", cfg.K_i_init))))
     return {
         "theta": float(ekf_params["theta"]),
         "omega": float(ekf_params["omega"]),
         "l_com": float(ekf_params.get("l_com", cfg.l_com_init)),
         "b_eq": b_eq,
         "tau_eq": tau_eq,
-        "K_u": float(ekf_params.get("K_u", ekf_params.get("k_u", cfg.K_u_init))),
+        "K_u": k_i,
+        "K_i": k_i,
         "delay_sec": float(ekf_params["delay_sec"]),
     }
 
