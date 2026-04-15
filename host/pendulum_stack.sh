@@ -104,6 +104,56 @@ select_csv_files_multi() {
     printf "%s\n" "${out[@]}"
 }
 
+select_finalized_csv_files_multi() {
+    echo "--------------------------------" >&2
+    echo "[INFO] Stage2용 finalized CSV 파일들 선택 (복수 선택 가능)" >&2
+
+    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results")
+    local files=()
+    local d
+    for d in "${search_dirs[@]}"; do
+        if [ -d "$d" ]; then
+            while IFS= read -r -d '' f; do
+                files+=("$f")
+            done < <(find "$d" -type f -name "*.finalized.csv" -print0 2>/dev/null)
+        fi
+    done
+
+    if [ "${#files[@]}" -eq 0 ]; then
+        echo "[WARN] finalized CSV가 없어 일반 CSV 선택기로 전환합니다." >&2
+        select_csv_files_multi
+        return
+    fi
+
+    IFS=$'\n' files=($(printf "%s\n" "${files[@]}" | sort -u))
+    unset IFS
+
+    local i=1
+    for f in "${files[@]}"; do
+        echo "  [$i] $f" >&2
+        i=$((i + 1))
+    done
+
+    local default_sel="1"
+    read -p "선택 번호들 (공백구분) [${default_sel}]: " sel
+    sel=${sel:-$default_sel}
+
+    local out=()
+    local idx
+    for idx in $sel; do
+        if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -ge 1 ] && [ "$idx" -le "${#files[@]}" ]; then
+            out+=("${files[$((idx - 1))]}")
+        fi
+    done
+
+    if [ "${#out[@]}" -eq 0 ]; then
+        echo "[ERROR] 유효한 CSV 선택이 없습니다." >&2
+        return 1
+    fi
+
+    printf "%s\n" "${out[@]}"
+}
+
 select_plot_csv_file() {
     echo "--------------------------------" >&2
     echo "[INFO] Plot 가능한 CSV 선택 (chrono/replay 형식만 표시)" >&2
@@ -309,7 +359,7 @@ run_stage1_pem_identification() {
 run_stage2_sindy_identification() {
     echo "--------------------------------"
     echo "[INFO] Stage2 Greybox Residual-Torque SINDy 실행"
-    mapfile -t selected_csvs < <(select_csv_files_multi)
+    mapfile -t selected_csvs < <(select_finalized_csv_files_multi)
     if [ "${#selected_csvs[@]}" -eq 0 ]; then
         echo "[ERROR] 선택된 CSV가 없습니다." >&2
         return

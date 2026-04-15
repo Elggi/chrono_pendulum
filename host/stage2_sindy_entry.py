@@ -37,6 +37,12 @@ def main() -> None:
     args = ap.parse_args()
 
     features = _parse_features(args.features)
+    print("[Stage2-Entry] Running Stage2 with the following configuration:")
+    print(f"[Stage2-Entry]   csv: {[str(p) for p in args.csv]}")
+    print(f"[Stage2-Entry]   model_parameter_json: {args.model_parameter_json}")
+    print(f"[Stage2-Entry]   outdir: {args.outdir}")
+    print(f"[Stage2-Entry]   threshold: {args.threshold}")
+    print(f"[Stage2-Entry]   features: {features}")
     result = run_stage2(
         csv_paths=list(args.csv),
         model_parameter_json=args.model_parameter_json,
@@ -48,8 +54,12 @@ def main() -> None:
     (args.outdir / "stage2_result.json").write_text(json.dumps(asdict(result), indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"[DONE] Stage2 summary: {summary_path}")
     print(f"[DONE] Updated model parameter json: {args.model_parameter_json}")
+    print("[DONE] Next steps:")
+    print(f"  1) Inspect equation text: {result.output_equation_txt}")
+    print(f"  2) Inspect coefficient table: {result.output_coeff_csv}")
+    print(f"  3) Inspect per-trajectory overlays: {result.output_overlay_per_trajectory}")
+    print("  4) Run replay/chrono with updated model_parameter.json")
 
 
 if __name__ == "__main__":
     main()
-

@@ -69,7 +69,6 @@ def _fit_sparse(
         model = ps.SINDy(
             optimizer=ps.STLSQ(threshold=float(threshold), alpha=0.0, normalize_columns=True),
             feature_library=ps.IdentityLibrary(),
-            feature_names=list(feature_names),
         )
         if phi_trajs and y_trajs and len(phi_trajs) == len(y_trajs):
             x_list = []
@@ -80,7 +79,13 @@ def _fit_sparse(
                 xd_i[:, 0] = np.asarray(yt, dtype=float).reshape(-1)
                 x_list.append(x_i)
                 xdot_list.append(xd_i)
-            model.fit(x=x_list, t=1.0, x_dot=xdot_list, multiple_trajectories=True)
+            try:
+                model.fit(x=x_list, t=1.0, x_dot=xdot_list, multiple_trajectories=True)
+            except TypeError:
+                # Compatibility path for older PySINDy APIs.
+                x_cat = np.vstack(x_list)
+                xd_cat = np.vstack(xdot_list)
+                model.fit(x=x_cat, t=1.0, x_dot=xd_cat)
         else:
             x = np.asarray(phi, dtype=float)
             x_dot = np.zeros_like(x, dtype=float)
@@ -140,6 +145,15 @@ def run_stage2(
     threshold: float,
 ) -> Stage2Result:
     outdir.mkdir(parents=True, exist_ok=True)
+    print("[Stage2] ===============================================")
+    print("[Stage2] Greybox Residual-Torque SINDy (PySINDy 2.1.0-compatible path)")
+    print(f"[Stage2] outdir: {outdir}")
+    print(f"[Stage2] model_parameter_json: {model_parameter_json}")
+    print(f"[Stage2] num_input_csv: {len(csv_paths)}")
+    for i, p in enumerate(csv_paths, start=1):
+        print(f"[Stage2]   csv[{i}]: {p}")
+    print(f"[Stage2] feature_library: {features}")
+    print(f"[Stage2] threshold: {threshold}")
     trajs: list[Stage2Trajectory] = load_trajectories(csv_paths)
     model_data = load_model_parameter_json(str(model_parameter_json))
     if model_data is None:
@@ -175,6 +189,7 @@ def run_stage2(
         y_trajs=ys,
     )
     yhat_all = phi_all @ coefs
+    print(f"[Stage2] optimizer_used: {optimizer_name}")
 
     metrics_per: dict[str, Stage2Metrics] = {}
     for name, rec in per_traj.items():
@@ -237,6 +252,10 @@ def run_stage2(
 
     eq = _equation_string(names, coefs, precision=8)
     overall = Stage2Metrics(rmse=_rmse(y_all, yhat_all), r2=_r2(y_all, yhat_all))
+    print(f"[Stage2] discovered_equation: {eq}")
+    print(f"[Stage2] overall_metrics: rmse={overall.rmse:.6e}, r2={overall.r2:.6f}")
+    for k, v in metrics_per.items():
+        print(f"[Stage2] per_trajectory[{k}]: rmse={v.rmse:.6e}, r2={v.r2:.6f}")
 
     coeff_csv = outdir / "stage2_coefficients.csv"
     with coeff_csv.open("w", encoding="utf-8", newline="") as f:
@@ -279,6 +298,9 @@ def run_stage2(
     model_data["stage_outputs"].setdefault("stage1", None)
     model_data["stage_outputs"].setdefault("stage3", None)
     model_parameter_json.write_text(json.dumps(model_data, indent=2, ensure_ascii=False), encoding="utf-8")
+    print("[Stage2] updated model_parameter.json:")
+    print(f"[Stage2]   torque_model.residual_terms <- {active_terms}")
+    print(f"[Stage2]   stage_outputs.stage2.method <- greybox_residual_torque_sindy")
 
     result = Stage2Result(
         method="greybox_residual_torque_sindy",
@@ -296,6 +318,14 @@ def run_stage2(
         output_overlay_csv=str(overlay_csv),
         output_overlay_per_trajectory=overlay_artifacts,
     )
+    print("[Stage2] output artifacts:")
+    print(f"[Stage2]   equation_txt: {eq_txt}")
+    print(f"[Stage2]   coefficients_csv: {coeff_csv}")
+    print(f"[Stage2]   overlay_csv_combined: {overlay_csv}")
+    for name, paths in overlay_artifacts.items():
+        print(f"[Stage2]   overlay[{name}].csv: {paths.get('overlay_csv', '')}")
+        print(f"[Stage2]   overlay[{name}].png: {paths.get('overlay_png', '')}")
+    print("[Stage2] ===============================================")
     return result
 
 
