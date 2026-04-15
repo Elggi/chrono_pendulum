@@ -777,6 +777,7 @@ def main():
             print(f"[INFO] CPR from calibration json: {cfg.cpr:.3f} counts/rev")
         print(f"[INFO] Visual link length (--link-length): {cfg.link_L:.6f} m")
         print(f"[INFO] Computation radius (from radius-json): {cfg.radius_m:.6f} m")
+        print(f"[INFO] IMU center radius (pivot->IMU COM): {cfg.r_imu:.6f} m")
         if math.isfinite(run_limit_sec):
             print(f"[INFO] run limit: {run_limit_sec:.1f}s")
         else:

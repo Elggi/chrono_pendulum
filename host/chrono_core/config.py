@@ -19,12 +19,12 @@ class BridgeConfig:
     shaft_radius: float = 0.004
     shaft_length: float = 0.015
 
-    # Visual geometry (rendering / IMU widget placement)
+    # Rod body box dimensions (used for both rendering and rigid-body mass properties)
     link_L: float = 0.285
     link_W: float = 0.020
     link_T: float = 0.006
 
-    # Dynamic geometry and encoder scaling
+    # Runtime geometry / sensor scaling
     radius_m: float = 0.285
     cpr: float = float("nan")
 
@@ -32,10 +32,10 @@ class BridgeConfig:
     rod_mass: float = 0.200
     imu_mass: float = 0.020
     rod_length: float = 0.285
-    # IMU radius from pivot (loaded from calibration when available)
+    # IMU center radius from pivot (loaded from calibration when available)
     r_imu: float = 0.285
     l_com_init: float = 0.1425  # default midpoint for 0.285 m link
-    # Effective input-to-torque gain in surrogate dynamics: tau_motor = K_u * u
+    # Effective input-to-torque gain in surrogate dynamics: tau_motor = K_i * I_filtered
     K_u_init: float = 1.0e-5
 
     imu_offset_x: float = 0.220

@@ -79,7 +79,7 @@ class PendulumModel:
             mass=cfg.imu_mass,
             color=ch.ChColor(0.60, 0.60, 0.60),
         )
-        imu_com_local = ch.ChVector3d(0.0, -cfg.link_L + cfg.imu_size_y / 2.0, 0.0)
+        imu_com_local = self._imu_com_local()
         imu_abs = self.link.TransformPointLocalToParent(imu_com_local)
         self.imu.SetPos(imu_abs)
         self.imu.SetRot(self.link.GetRot())
@@ -127,6 +127,10 @@ class PendulumModel:
                 shape0.SetColor(color)
         return body
 
+    def _imu_com_local(self):
+        # r_imu is the calibrated pivot->IMU-center radius.
+        return ch.ChVector3d(0.0, -float(self.cfg.r_imu), 0.0)
+
     def update_identified_structure(self, params: dict):
         _ = params
         # Mass/COM/inertia are derived from geometry+density via ChBodyEasyBox.
@@ -147,7 +151,7 @@ class PendulumModel:
         self.link.SetPos(ch.ChVector3d(com_x, com_y, self.cfg.motor_length / 2.0))
         self.link.SetPosDt(ch.ChVector3d(0.0, 0.0, 0.0))
         self.link.SetAngVelLocal(ch.ChVector3d(0.0, 0.0, float(omega_rad_s)))
-        imu_com_local = ch.ChVector3d(0.0, -self.cfg.link_L + self.cfg.imu_size_y / 2.0, 0.0)
+        imu_com_local = self._imu_com_local()
         imu_abs = self.link.TransformPointLocalToParent(imu_com_local)
         self.imu.SetPos(imu_abs)
         self.imu.SetRot(q_link)
