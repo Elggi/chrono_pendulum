@@ -152,6 +152,14 @@ run_imu_viewer() {
 
 run_chrono_pendulum() {
     echo "--------------------------------"
+    read -p "Initial angle theta0 [deg] (+CCW, -CW) [0]: " theta0_deg
+    theta0_deg=${theta0_deg:-0}
+    if ! [[ "$theta0_deg" =~ ^[+-]?[0-9]+([.][0-9]+)?$ ]]; then
+        echo "[WARN] Invalid theta0 input '$theta0_deg'. Fallback to 0 deg."
+        theta0_deg=0
+    fi
+    echo "theta0_deg = $theta0_deg (+:CCW, -:CW)"
+    echo "--------------------------------"
     echo "Select mode:"
     echo "1) Host mode (keyboard control)"
     echo "2) Jetson mode (ROS input)"
@@ -165,13 +173,13 @@ run_chrono_pendulum() {
 
     if [ "$mode" == "1" ]; then
         echo "[INFO] chrono_pendulum (HOST mode)"
-        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode host)
+        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode host --theta0-deg "$theta0_deg")
         [ -n "$param_json" ] && cmd+=(--parameter-json "$param_json")
         [ -n "$calib_json" ] && cmd+=(--calibration-json "$calib_json" --radius-json "$calib_json")
         "${cmd[@]}"
     elif [ "$mode" == "2" ]; then
         echo "[INFO] chrono_pendulum (JETSON mode)"
-        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode jetson)
+        cmd=(python3 "$BASE_DIR/chrono_pendulum.py" --mode jetson --theta0-deg "$theta0_deg")
         [ -n "$param_json" ] && cmd+=(--parameter-json "$param_json")
         [ -n "$calib_json" ] && cmd+=(--calibration-json "$calib_json" --radius-json "$calib_json")
         "${cmd[@]}"
@@ -183,7 +191,21 @@ run_chrono_pendulum() {
 run_system_identification() {
     echo "--------------------------------"
     echo "[INFO] Calibration 시작"
-    python3 $BASE_DIR/calibration.py
+    read -p "collect free-decay data[y]/n? : " free_decay_yn
+    free_decay_yn=${free_decay_yn:-y}
+    if [[ "$free_decay_yn" =~ ^[Yy]$ ]]; then
+        read -p "arm minimum angle [deg] (default: 5.0): " arm_min_angle_deg
+        arm_min_angle_deg=${arm_min_angle_deg:-5.0}
+        if ! [[ "$arm_min_angle_deg" =~ ^[+-]?[0-9]+([.][0-9]+)?$ ]]; then
+            echo "[WARN] Invalid arm minimum angle '$arm_min_angle_deg'. Fallback to 5.0 deg."
+            arm_min_angle_deg=5.0
+        fi
+        echo "[INFO] free-decay mode 실행 (arm_min_angle_deg=${arm_min_angle_deg})"
+        python3 "$BASE_DIR/calibration.py" --mode free_decay --free-decay-arm-min-angle-deg "$arm_min_angle_deg"
+    else
+        echo "[INFO] manual CPR/r calibration 실행"
+        python3 "$BASE_DIR/calibration.py"
+    fi
 }
 
 run_plot() {
