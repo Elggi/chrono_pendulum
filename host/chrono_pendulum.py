@@ -44,6 +44,8 @@ from chrono_core.signal_filter import estimate_filtered_alpha_from_omega, Causal
 
 class RunState(str, Enum):
     STATE_WARMUP = "STATE_WARMUP"
+    STATE_FREE_DECAY_ARM = "STATE_FREE_DECAY_ARM"
+    STATE_FREE_DECAY_WAIT_RELEASE = "STATE_FREE_DECAY_WAIT_RELEASE"
     STATE_RUN = "STATE_RUN"
 
 
@@ -571,7 +573,12 @@ def main():
     ap.add_argument("--duration", type=float, default=-1.0,
                     help="Run duration in seconds. <=0 means run until user quits.")
     ap.add_argument("--step", type=float, default=0.001)
-    ap.add_argument("--theta0-deg", type=float, default=0.0)
+    ap.add_argument(
+        "--theta0-deg",
+        type=float,
+        default=0.0,
+        help="Initial angle in degrees. + is CCW, - is CW (default: 0.0).",
+    )
     ap.add_argument("--omega0", type=float, default=0.0)
     ap.add_argument("--link-mass", type=float, default=0.200)
     ap.add_argument("--link-length", type=float, default=0.285)
@@ -586,13 +593,20 @@ def main():
     ap.add_argument("--l-com", type=float, default=None, help="default: link_length/2 for fresh runs")
     ap.add_argument("--b", type=float, default=None, help="default: near-zero fresh initialization")
     ap.add_argument("--tau-c", type=float, default=None, help="default: near-zero fresh initialization")
-    ap.add_argument("--k-u", type=float, default=None, help="default: near-zero positive fresh initialization")
+    ap.add_argument("--k-i", "--k-u", dest="k_i", type=float, default=None,
+                    help="default: near-zero positive fresh initialization (motor torque constant K_i)")
     ap.add_argument("--r-imu", type=float, default=0.285, help="IMU radius from pivot [m]")
     ap.add_argument(
         "--imu-linear-accel-no-gravity-comp",
         action="store_true",
         help="Disable gravity compensation for IMU linear-accel alpha path.",
     )
+    ap.add_argument("--enable-free-decay-mode", action="store_true", help="Enable release-gated free-decay startup mode.")
+    ap.add_argument("--free-decay-arm-min-angle-deg", type=float, default=5.0)
+    ap.add_argument("--free-decay-hold-min-sec", type=float, default=2.0)
+    ap.add_argument("--free-decay-hold-gyro-threshold", type=float, default=0.15)
+    ap.add_argument("--free-decay-release-gyro-threshold", type=float, default=0.35)
+    ap.add_argument("--free-decay-release-delta-deg", type=float, default=0.25)
     args = ap.parse_args()
 
     if args.mode == "host":
@@ -612,14 +626,16 @@ def main():
     cfg.imu_mass = 0.020
     cfg.rod_length = args.link_length
     cfg.link_L = args.link_length
-    cfg.radius_m = args.link_length
+    cfg.radius_m = args.r_imu
     cfg.r_imu = args.r_imu
     cfg.l_com_init = float(args.l_com) if args.l_com is not None else (0.5 * float(args.link_length))
     cfg.b_eq_init = float(args.b) if args.b is not None else float(cfg.b_eq_init)
     cfg.tau_eq_init = float(args.tau_c) if args.tau_c is not None else float(cfg.tau_eq_init)
-    cfg.K_u_init = float(args.k_u) if args.k_u is not None else float(cfg.K_u_init)
+    cfg.K_i_init = float(args.k_i) if args.k_i is not None else float(cfg.K_i_init)
 
     calib = apply_calibration_json(cfg, args.calibration_json)
+    # Keep computation radius aligned with IMU fixed-joint radius unless explicitly overridden by radius-json.
+    cfg.radius_m = float(cfg.r_imu)
     param_data = None
     if args.parameter_json:
         with open(args.parameter_json, "r", encoding="utf-8") as pf:
@@ -657,11 +673,30 @@ def main():
         f"J_imu={model.J_imu:.6f} kg·m^2, "
         f"J_total={model.J_total:.6f} kg·m^2"
     )
+    pivot_w = model.pivot_pos_world()
+    rod_com_w = model.rod_com_pos_world()
+    imu_com_w = model.imu_com_pos_world()
+    imu_local = model.imu_local_on_rod()
+    print(
+        f"[com] pivot_world=[{pivot_w[0]:+.4f}, {pivot_w[1]:+.4f}, {pivot_w[2]:+.4f}] m | "
+        f"rod_com_world=[{rod_com_w[0]:+.4f}, {rod_com_w[1]:+.4f}, {rod_com_w[2]:+.4f}] m"
+    )
+    print(
+        f"[com] rod_COM_radius_from_pivot={model.rod_com_radius_from_pivot():.6f} m "
+        f"(computed as link_L/2 = {cfg.link_L:.6f}/2)"
+    )
+    print(
+        f"[imu-fix] imu_com_world=[{imu_com_w[0]:+.4f}, {imu_com_w[1]:+.4f}, {imu_com_w[2]:+.4f}] m | "
+        f"imu_local_on_rod=[{imu_local[0]:+.4f}, {imu_local[1]:+.4f}, {imu_local[2]:+.4f}] m "
+        f"(target local=[0.0000, {-cfg.r_imu:+.4f}, 0.0000] m)"
+    )
+    print(f"[imu-fix] imu_radius_from_pivot={model.imu_radius_from_pivot():.6f} m")
     sim_params = {
         "l_com": float(cfg.l_com_init),
         "b_eq": float(cfg.b_eq_init),
         "tau_eq": float(cfg.tau_eq_init),
-        "K_u": float(cfg.K_u_init),
+        "K_u": float(cfg.K_i_init),
+        "K_i": float(cfg.K_i_init),
     }
     model.update_identified_structure(sim_params)
     prev_u_eff = 0.0
@@ -671,6 +706,10 @@ def main():
     if cfg.enable_imu_viewer:
         viewer_topic = "/imu/data"
         viewer_proc = start_imu_viewer_process(viewer_topic, cfg.topic_hw_enc)
+        print(
+            f"[INFO] IMU viewer started (topic={viewer_topic}, enc_topic={cfg.topic_hw_enc}) "
+            f"| free_decay_mode={'on' if args.enable_free_decay_mode else 'off'}"
+        )
 
     vis = None
     if cfg.enable_render:
@@ -737,6 +776,13 @@ def main():
         theta_encoder_prev_wrapped = None
         theta_encoder_unwrapped_acc = 0.0
         run_limit_sec = float("inf") if args.duration <= 0.0 else float(args.duration)
+        free_decay_arm_start = None
+        free_decay_theta_prev = None
+        free_decay_theta_hold = None
+        free_decay_theta_prev_wrapped = None
+        free_decay_theta_unwrapped_acc = 0.0
+        free_decay_theta_filter = CausalIIRFilter(alpha=0.12)
+        free_decay_omega_filter = CausalIIRFilter(alpha=0.18)
 
         if host_controller is not None:
             host_controller.__enter__()
@@ -752,13 +798,19 @@ def main():
         if np.isfinite(cfg.cpr):
             print(f"[INFO] CPR from calibration json: {cfg.cpr:.3f} counts/rev")
         print(f"[INFO] Visual link length (--link-length): {cfg.link_L:.6f} m")
-        print(f"[INFO] Computation radius (from radius-json): {cfg.radius_m:.6f} m")
+        print(f"[INFO] Computation radius (alpha from linear accel): {cfg.radius_m:.6f} m")
+        print(f"[INFO] IMU center radius (pivot->IMU COM, fixed joint target): {cfg.r_imu:.6f} m")
         if math.isfinite(run_limit_sec):
             print(f"[INFO] run limit: {run_limit_sec:.1f}s")
         else:
             print("[INFO] run limit: none (quit with q/ESC)")
         print("[INFO] alpha_real (legacy/export) source: filtered derivative of omega")
         print("[INFO] finalized training alpha source: tangential linear acceleration / radius")
+        if args.enable_free_decay_mode:
+            print(
+                "[INFO] free-decay startup mode: enabled "
+                f"(arm_angle>={args.free_decay_arm_min_angle_deg:.2f}deg, hold>={args.free_decay_hold_min_sec:.2f}s)"
+            )
         gravity_comp_enabled = not bool(args.imu_linear_accel_no_gravity_comp)
         print(
             "[INFO] alpha from linear accel: source_frame=imu_body, projection_frame=world0_xy, "
@@ -856,8 +908,20 @@ def main():
                             f"alpha_linear_offset={alpha_linear_offset:.6f}, "
                             f"current_offset_mA={current_offset_used_mA:.6f}, number_of_valid_current_samples={valid_cur_n}"
                         )
-                        run_state = RunState.STATE_RUN
-                        wall_run_t0 = now_wall()
+                        if args.enable_free_decay_mode:
+                            run_state = RunState.STATE_FREE_DECAY_ARM
+                            wall_run_t0 = None
+                            free_decay_arm_start = None
+                            free_decay_theta_prev = None
+                            free_decay_theta_hold = None
+                            free_decay_theta_prev_wrapped = None
+                            free_decay_theta_unwrapped_acc = float(theta_offset_rad)
+                            free_decay_theta_filter.reset(None)
+                            free_decay_omega_filter.reset(None)
+                            print("[INFO] entering free-decay arming phase")
+                        else:
+                            run_state = RunState.STATE_RUN
+                            wall_run_t0 = now_wall()
                         t_prev = 0.0
                         prev_wall_elapsed = None
                         real_omega_hist.clear()
@@ -886,12 +950,98 @@ def main():
                         time.sleep(min(cfg.step, 0.01))
                     continue
 
+                if run_state in (RunState.STATE_FREE_DECAY_ARM, RunState.STATE_FREE_DECAY_WAIT_RELEASE):
+                    # Keep free-decay startup control-less regardless of host/jetson mode.
+                    ros_node.publish_host_cmd(0.0, "free_decay")
+                    theta_meas = float(model.get_theta())
+                    omega_meas = float(model.get_omega())
+                    if snap.get("imu_has_data", False):
+                        theta_wrapped_imu, _, imu_R0 = compute_theta_wrapped_from_imu_snapshot(
+                            snap=snap,
+                            imu_R0=imu_R0,
+                            radius_m=cfg.radius_m,
+                            imu_sign=imu_sign,
+                        )
+                        if theta_wrapped_imu is not None:
+                            if free_decay_theta_prev_wrapped is None:
+                                free_decay_theta_prev_wrapped = float(theta_wrapped_imu)
+                            dth_fd = float(theta_wrapped_imu - free_decay_theta_prev_wrapped)
+                            while dth_fd > math.pi:
+                                dth_fd -= 2.0 * math.pi
+                            while dth_fd < -math.pi:
+                                dth_fd += 2.0 * math.pi
+                            free_decay_theta_unwrapped_acc += dth_fd
+                            free_decay_theta_prev_wrapped = float(theta_wrapped_imu)
+                            theta_meas = float(free_decay_theta_unwrapped_acc - theta_offset_rad)
+                        omega_meas = float(imu_sign * snap["imu_w"][2])
+
+                    theta_lp = float(free_decay_theta_filter.update(theta_meas))
+                    omega_lp = float(free_decay_omega_filter.update(omega_meas))
+                    # Keep simulated pendulum synchronized to measured real pendulum pose while waiting for release.
+                    model.set_theta_kinematic(theta_lp, omega_lp)
+
+                    if run_state == RunState.STATE_FREE_DECAY_ARM:
+                        is_lifted = abs(math.degrees(theta_lp)) >= float(args.free_decay_arm_min_angle_deg)
+                        is_steady = abs(omega_lp) <= float(args.free_decay_hold_gyro_threshold)
+                        if is_lifted and is_steady:
+                            if free_decay_arm_start is None:
+                                free_decay_arm_start = wall_now
+                            if (wall_now - free_decay_arm_start) >= float(args.free_decay_hold_min_sec):
+                                free_decay_theta_hold = float(theta_lp)
+                                model.set_theta_kinematic(free_decay_theta_hold, 0.0)
+                                run_state = RunState.STATE_FREE_DECAY_WAIT_RELEASE
+                                free_decay_theta_prev = float(theta_lp)
+                                print(f"\n[INFO] armed! theta_arm={math.degrees(free_decay_theta_hold):.3f} deg")
+                        else:
+                            free_decay_arm_start = None
+                        hold_elapsed = 0.0 if free_decay_arm_start is None else (wall_now - free_decay_arm_start)
+                        terminal_status_line(
+                            f"[arming...] |theta|={abs(math.degrees(theta_lp)):6.2f}/{args.free_decay_arm_min_angle_deg:.2f} deg | "
+                            f"omega_lp={omega_lp: .4f}/{args.free_decay_hold_gyro_threshold:.4f} | "
+                            f"hold={hold_elapsed:4.2f}/{args.free_decay_hold_min_sec:.2f}s",
+                            width=cfg.terminal_status_width,
+                        )
+                    else:
+                        dtheta_deg = 0.0 if free_decay_theta_prev is None else math.degrees(theta_lp - free_decay_theta_prev)
+                        terminal_status_line(
+                            f"[armed] release 대기 | dtheta={dtheta_deg: .3f}/{args.free_decay_release_delta_deg:.3f} deg | "
+                            f"omega_lp={omega_lp: .4f}/{args.free_decay_release_gyro_threshold:.4f}",
+                            width=cfg.terminal_status_width,
+                        )
+                        if (
+                            abs(dtheta_deg) >= float(args.free_decay_release_delta_deg)
+                            or abs(omega_lp) >= float(args.free_decay_release_gyro_threshold)
+                        ):
+                            # Seed run start with release instant state for real-time sim2real alignment.
+                            model.set_theta_kinematic(theta_lp, omega_lp)
+                            print(
+                                f"\n[INFO] release 검출: t={wall_now:.6f}, "
+                                f"theta={math.degrees(theta_lp):.3f} deg, omega_lp={omega_lp:.6f} rad/s"
+                            )
+                            run_state = RunState.STATE_RUN
+                            wall_run_t0 = now_wall()
+                            t_prev = 0.0
+                            omega_prev = model.get_omega()
+                        free_decay_theta_prev = float(theta_lp)
+                    if cfg.realtime:
+                        time.sleep(min(cfg.step, 0.01))
+                    continue
+
                 cmd_u_used = cmd_u_raw
                 if wall_run_t0 is not None:
                     sim_t = wall_now - wall_run_t0
 
                 theta_before = model.get_theta()
-                model_out = compute_model_torque_and_electrics(cmd_u_used, theta_before, model.get_omega(), float("nan"), sim_params, cfg)
+                motor_input_current = float(online_state.get("ina_current_signed_mA", 0.0))
+                model_out = compute_model_torque_and_electrics(
+                    motor_input_current,
+                    theta_before,
+                    model.get_omega(),
+                    float("nan"),
+                    sim_params,
+                    cfg,
+                    cmd_u_for_duty=cmd_u_used,
+                )
                 model.apply_torque(model_out["tau_net"])
                 model.step(cfg.step)
 
@@ -1108,9 +1258,7 @@ def main():
         },
         "calibration_json": cfg.calibration_json if calib is not None else None,
         "radius_json": args.radius_json,
-        "estimated_delay_ms_final": 0.0,
         "cpr_fixed": None if not np.isfinite(cfg.cpr) else float(cfg.cpr),
-        "delay_locked": False,
         "best_eval": None,
         "ls_cost": None,
         "fit_done": False,
