@@ -308,16 +308,26 @@ run_stage1_pem_identification() {
 
 run_stage2_sindy_identification() {
     echo "--------------------------------"
-    echo "[INFO] Stage2 SINDy Identification 실행"
-    default_csv="$BASE_DIR/run_logs/chrono_run_1.finalized.csv"
-    default_meta="$BASE_DIR/run_logs/chrono_run_1.meta.json"
-    read -p "CSV 경로 [${default_csv}]: " csv_path
-    csv_path=${csv_path:-$default_csv}
-    read -p "META JSON 경로 [${default_meta}]: " meta_path
-    meta_path=${meta_path:-$default_meta}
+    echo "[INFO] Stage2 Greybox Residual-Torque SINDy 실행"
+    mapfile -t selected_csvs < <(select_csv_files_multi)
+    if [ "${#selected_csvs[@]}" -eq 0 ]; then
+        echo "[ERROR] 선택된 CSV가 없습니다." >&2
+        return
+    fi
+    default_model_param="$BASE_DIR/model_parameter.json"
+    if [ ! -f "$default_model_param" ]; then
+        default_model_param="$BASE_DIR/model_parameter.template.json"
+    fi
+    read -p "Model Parameter JSON [${default_model_param}]: " model_param_json
+    model_param_json=${model_param_json:-$default_model_param}
     read -p "출력 폴더 [${BASE_DIR}/../reports/SINDy_stage2]: " outdir
     outdir=${outdir:-$BASE_DIR/../reports/SINDy_stage2}
-    cmd=(python3 "$BASE_DIR/stage2_sindy_entry.py" --csv "$csv_path" --meta "$meta_path" --outdir "$outdir")
+    read -p "sparsity threshold [1e-4]: " threshold
+    threshold=${threshold:-1e-4}
+    read -p "feature set (comma-separated) [1,theta,omega,sin_theta,cos_theta,theta2,omega2,motor_input]: " feature_set
+    feature_set=${feature_set:-1,theta,omega,sin_theta,cos_theta,theta2,omega2,motor_input}
+    local csv_args=("${selected_csvs[@]}")
+    cmd=(python3 "$BASE_DIR/stage2_sindy_entry.py" --csv "${csv_args[@]}" --model-parameter-json "$model_param_json" --outdir "$outdir" --threshold "$threshold" --features "$feature_set")
     echo "[INFO] command: ${cmd[*]}"
     "${cmd[@]}"
 }

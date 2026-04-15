@@ -8,64 +8,46 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
-import numpy as np
+from stage2_feature_map import DEFAULT_FEATURES
+from stage2_sindy import run_stage2, save_stage2_summary
 
-import offline_id_pem_sindy_ppo as bench
+
+def _parse_features(raw: str) -> list[str]:
+    items = [s.strip() for s in raw.split(",")]
+    return [s for s in items if s]
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Stage2 SINDy standalone entrypoint")
-    ap.add_argument("--csv", type=Path, required=True)
-    ap.add_argument("--meta", type=Path, required=True)
+    ap = argparse.ArgumentParser(description="Stage2 greybox residual-torque SINDy entrypoint")
+    ap.add_argument("--csv", type=Path, nargs="+", required=True, help="finalized trajectory CSVs (multi trajectory allowed)")
+    ap.add_argument(
+        "--model-parameter-json",
+        type=Path,
+        default=Path("host/model_parameter.json"),
+        help="canonical model registry json to read/update",
+    )
     ap.add_argument("--outdir", type=Path, required=True)
-    ap.add_argument("--train-ratio", type=float, default=0.75)
-    ap.add_argument("--fit-lcom", action="store_true")
-    ap.add_argument("--w-theta", type=float, default=5.0)
-    ap.add_argument("--w-omega", type=float, default=2.5)
-    ap.add_argument("--w-alpha", type=float, default=0.7)
+    ap.add_argument("--threshold", type=float, default=1.0e-4, help="sparsification threshold")
+    ap.add_argument(
+        "--features",
+        type=str,
+        default=",".join(DEFAULT_FEATURES),
+        help="comma-separated candidate features (runtime-compatible names)",
+    )
     args = ap.parse_args()
 
-    bench.ensure_dir(args.outdir)
-    run = bench.load_run(args.csv)
-    cfg = bench.infer_physical_config(args.meta)
-    run_train, run_val = bench.split_run(run, train_ratio=args.train_ratio)
-    meta = bench._load_json(args.meta)
-    cfg_meta = meta.get("config", {})
-    init_params = {
-        "K_i": float(cfg_meta.get("K_i_init", 1e-5)),
-        "b_eq": float(cfg_meta.get("b_eq_init", 0.02)),
-        "tau_eq": float(cfg_meta.get("tau_eq_init", 0.01)),
-        "l_com": float(cfg_meta.get("l_com_init", 0.1425)),
-    }
-    weights = {"theta": args.w_theta, "omega": args.w_omega, "alpha": args.w_alpha}
-    lo = np.array([1e-9, 0.0, 0.0, 0.03] if args.fit_lcom else [1e-9, 0.0, 0.0], dtype=float)
-    hi = np.array([1.0, 10.0, 10.0, 0.45] if args.fit_lcom else [1.0, 10.0, 10.0], dtype=float)
-    stage1 = bench.fit_stage1_pem(
-        run_train=run_train,
-        run_val=run_val,
-        cfg=cfg,
-        init_params=init_params,
-        bounds=(lo, hi),
-        weights=weights,
-        fit_lcom=args.fit_lcom,
+    features = _parse_features(args.features)
+    result = run_stage2(
+        csv_paths=list(args.csv),
+        model_parameter_json=args.model_parameter_json,
         outdir=args.outdir,
+        features=features,
+        threshold=float(args.threshold),
     )
-    stage2, _ = bench.fit_stage2_sindy(
-        run_train=run_train,
-        run_val=run_val,
-        cfg=cfg,
-        stage1=stage1,
-        weights=weights,
-        seeds=[11, 22, 33],
-        outdir=args.outdir,
-    )
-    (args.outdir / "stage1_result.json").write_text(json.dumps(asdict(stage1), indent=2), encoding="utf-8")
-    (args.outdir / "stage2_result.json").write_text(json.dumps(asdict(stage2), indent=2), encoding="utf-8")
-    (args.outdir / "config_used.json").write_text(
-        json.dumps({"stage": 2, "csv": str(args.csv), "meta": str(args.meta), "weights": weights}, indent=2),
-        encoding="utf-8",
-    )
-    print(f"[DONE] Stage2 SINDy artifacts: {args.outdir}")
+    summary_path = save_stage2_summary(result, args.outdir)
+    (args.outdir / "stage2_result.json").write_text(json.dumps(asdict(result), indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"[DONE] Stage2 summary: {summary_path}")
+    print(f"[DONE] Updated model parameter json: {args.model_parameter_json}")
 
 
 if __name__ == "__main__":
