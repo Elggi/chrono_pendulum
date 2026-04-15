@@ -113,7 +113,6 @@ def rollout_loss_for_candidate(
     base_params: dict[str, Any],
     w_theta: float,
     w_omega: float,
-    max_substep: float,
 ) -> tuple[float, np.ndarray, np.ndarray]:
     cfg = BridgeConfig(**cfg_dict)
     model = PendulumModel(cfg)
@@ -133,23 +132,19 @@ def rollout_loss_for_candidate(
     theta_sim[0] = model.get_theta()
     omega_sim[0] = model.get_omega()
 
-    max_h = max(float(max_substep), 1e-5)
     for k in range(1, len(t)):
         dt = float(max(t[k] - t[k - 1], cfg.step))
-        n_sub = max(1, int(math.ceil(dt / max_h)))
-        h = dt / float(n_sub)
-        for _ in range(n_sub):
-            out = compute_model_torque_and_electrics(
-                motor_input=0.0,  # free-decay: no active motor current
-                theta=model.get_theta(),
-                omega=model.get_omega(),
-                bus_v=float("nan"),
-                p=p,
-                cfg=cfg,
-                cmd_u_for_duty=0.0,
-            )
-            model.apply_torque(out["tau_net"])
-            model.step(h)
+        out = compute_model_torque_and_electrics(
+            motor_input=0.0,  # free-decay: no active motor current
+            theta=model.get_theta(),
+            omega=model.get_omega(),
+            bus_v=float("nan"),
+            p=p,
+            cfg=cfg,
+            cmd_u_for_duty=0.0,
+        )
+        model.apply_torque(out["tau_net"])
+        model.step(dt)
         theta_sim[k] = model.get_theta()
         omega_sim[k] = model.get_omega()
 
@@ -160,7 +155,7 @@ def rollout_loss_for_candidate(
 
 
 def _worker(args):
-    cand, datasets, cfg_dict, base_params, w_theta, w_omega, max_substep = args
+    cand, datasets, cfg_dict, base_params, w_theta, w_omega = args
     losses = []
     for ds in datasets:
         loss, _, _ = rollout_loss_for_candidate(
@@ -170,7 +165,6 @@ def _worker(args):
             base_params=base_params,
             w_theta=w_theta,
             w_omega=w_omega,
-            max_substep=max_substep,
         )
         losses.append(float(loss))
     return float(np.mean(losses)) if losses else float("inf")
@@ -249,7 +243,6 @@ def main():
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--w-theta", type=float, default=1.0)
     ap.add_argument("--w-omega", type=float, default=0.1)
-    ap.add_argument("--max-substep", type=float, default=0.002, help="internal Chrono integration substep [s]")
     ap.add_argument("--b-min", type=float, default=0.0)
     ap.add_argument("--b-max", type=float, default=5.0)
     ap.add_argument("--tau-min", type=float, default=0.0)
@@ -306,7 +299,6 @@ def main():
                 base_params,
                 float(args.w_theta),
                 float(args.w_omega),
-                float(args.max_substep),
             )
             for x in candidates
         ]
@@ -350,7 +342,6 @@ def main():
         base_params=base_params,
         w_theta=float(args.w_theta),
         w_omega=float(args.w_omega),
-        max_substep=float(args.max_substep),
     )
     if len(theta_sim) >= 2 and len(primary_ds["t"]) >= 2:
         theta0 = float(theta_sim[0])
@@ -471,7 +462,6 @@ def main():
                 "headless_chrono": True,
                 "loss_type": "weighted_rmse",
                 "loss_weights": {"w_theta": float(args.w_theta), "w_omega": float(args.w_omega)},
-                "integrator": {"max_substep": float(args.max_substep)},
                 "preprocess": {
                     "tail_theta_abs_deg": float(args.tail_theta_abs_deg),
                     "tail_omega_abs": float(args.tail_omega_abs),
