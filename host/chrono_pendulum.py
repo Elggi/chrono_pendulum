@@ -506,7 +506,7 @@ def quat_to_rotmat(w: float, x: float, y: float, z: float):
     )
 
 
-def compute_theta_wrapped_from_imu_snapshot(snap: dict, imu_R0: np.ndarray | None, radius_m: float, imu_sign: float):
+def compute_theta_wrapped_from_imu_snapshot(snap: dict, imu_R0: np.ndarray | None, radius: float, imu_sign: float):
     """Return wrapped theta [rad], body->world0 rotation, and imu_R0."""
     if not snap.get("imu_has_data", False):
         return None, None, imu_R0
@@ -515,7 +515,7 @@ def compute_theta_wrapped_from_imu_snapshot(snap: dict, imu_R0: np.ndarray | Non
     if imu_R0 is None:
         imu_R0 = R_abs.copy()
     R_rel = imu_R0.T @ R_abs
-    tip_vec = R_rel @ np.array([0.0, -radius_m, 0.0], dtype=float)
+    tip_vec = R_rel @ np.array([0.0, -radius, 0.0], dtype=float)
     theta_wrapped = float(imu_sign * math.atan2(float(tip_vec[1]), float(tip_vec[0])))
     return theta_wrapped, R_rel, imu_R0
 
@@ -593,7 +593,8 @@ def main():
     ap.add_argument("--l-com", type=float, default=None, help="default: link_length/2 for fresh runs")
     ap.add_argument("--b", type=float, default=None, help="default: near-zero fresh initialization")
     ap.add_argument("--tau-c", type=float, default=None, help="default: near-zero fresh initialization")
-    ap.add_argument("--k-u", type=float, default=None, help="default: near-zero positive fresh initialization")
+    ap.add_argument("--k-i", "--k-u", dest="k_i", type=float, default=None,
+                    help="default: near-zero positive fresh initialization (motor torque constant K_i)")
     ap.add_argument("--r-imu", type=float, default=0.285, help="IMU radius from pivot [m]")
     ap.add_argument(
         "--imu-linear-accel-no-gravity-comp",
@@ -625,12 +626,12 @@ def main():
     cfg.imu_mass = 0.020
     cfg.rod_length = args.link_length
     cfg.link_L = args.link_length
-    cfg.radius_m = args.link_length
     cfg.r_imu = args.r_imu
-    cfg.l_com_init = float(args.l_com) if args.l_com is not None else (0.5 * float(args.link_length))
+    if args.l_com is not None:
+        print("[WARN] --l-com is deprecated and ignored. l_com is now computed from Chrono body COM.")
     cfg.b_eq_init = float(args.b) if args.b is not None else float(cfg.b_eq_init)
     cfg.tau_eq_init = float(args.tau_c) if args.tau_c is not None else float(cfg.tau_eq_init)
-    cfg.K_u_init = float(args.k_u) if args.k_u is not None else float(cfg.K_u_init)
+    cfg.K_i_init = float(args.k_i) if args.k_i is not None else float(cfg.K_i_init)
 
     calib = apply_calibration_json(cfg, args.calibration_json)
     param_data = None
@@ -650,7 +651,6 @@ def main():
                 break
     radius_measured = extract_radius_from_json(args.radius_json)
     if radius_measured is not None:
-        cfg.radius_m = float(radius_measured)
         cfg.r_imu = float(radius_measured)
 
     log_csv = make_numbered_path(cfg.log_dir, cfg.log_prefix, ".csv")
@@ -670,11 +670,33 @@ def main():
         f"J_imu={model.J_imu:.6f} kg·m^2, "
         f"J_total={model.J_total:.6f} kg·m^2"
     )
+    pivot_w = model.pivot_pos_world()
+    rod_com_w = model.rod_com_pos_world()
+    imu_com_w = model.imu_com_pos_world()
+    total_com_w = model.total_com_pos_world()
+    imu_local = model.imu_local_on_rod()
+    print(
+        f"[com] pivot_world=[{pivot_w[0]:+.4f}, {pivot_w[1]:+.4f}, {pivot_w[2]:+.4f}] m | "
+        f"rod_com_world=[{rod_com_w[0]:+.4f}, {rod_com_w[1]:+.4f}, {rod_com_w[2]:+.4f}] m"
+    )
+    print(
+        f"[com] rod_COM_radius_from_pivot={model.rod_com_radius_from_pivot():.6f} m "
+        f"(computed as link_L/2 = {cfg.link_L:.6f}/2)"
+    )
+    print(
+        f"[com] total_com_world=[{total_com_w[0]:+.4f}, {total_com_w[1]:+.4f}, {total_com_w[2]:+.4f}] m | "
+        f"total_l_com_from_pivot={model.total_l_com_from_pivot():.6f} m"
+    )
+    print(
+        f"[imu-fix] imu_com_world=[{imu_com_w[0]:+.4f}, {imu_com_w[1]:+.4f}, {imu_com_w[2]:+.4f}] m | "
+        f"imu_local_on_rod=[{imu_local[0]:+.4f}, {imu_local[1]:+.4f}, {imu_local[2]:+.4f}] m "
+        f"(target local=[0.0000, {-cfg.r_imu:+.4f}, 0.0000] m)"
+    )
+    print(f"[imu-fix] imu_radius_from_pivot={model.imu_radius_from_pivot():.6f} m")
     sim_params = {
-        "l_com": float(cfg.l_com_init),
         "b_eq": float(cfg.b_eq_init),
         "tau_eq": float(cfg.tau_eq_init),
-        "K_u": float(cfg.K_u_init),
+        "K_i": float(cfg.K_i_init),
     }
     model.update_identified_structure(sim_params)
     prev_u_eff = 0.0
@@ -775,9 +797,8 @@ def main():
             print(f"[INFO] Loaded radius json: {args.radius_json}")
         if np.isfinite(cfg.cpr):
             print(f"[INFO] CPR from calibration json: {cfg.cpr:.3f} counts/rev")
-        print(f"[INFO] Visual link length (--link-length): {cfg.link_L:.6f} m")
-        print(f"[INFO] Computation radius (from radius-json): {cfg.radius_m:.6f} m")
-        print(f"[INFO] IMU center radius (pivot->IMU COM): {cfg.r_imu:.6f} m")
+        print(f"[INFO] Chrono rod box length (--link-length): {cfg.link_L:.6f} m")
+        print(f"[INFO] Unified physical radius (pivot->IMU COM): {cfg.r_imu:.6f} m")
         if math.isfinite(run_limit_sec):
             print(f"[INFO] run limit: {run_limit_sec:.1f}s")
         else:
@@ -792,7 +813,7 @@ def main():
         gravity_comp_enabled = not bool(args.imu_linear_accel_no_gravity_comp)
         print(
             "[INFO] alpha from linear accel: source_frame=imu_body, projection_frame=world0_xy, "
-            f"radius_m={cfg.radius_m:.6f}, gravity_mps2={cfg.gravity:.6f}, "
+            f"radius_m={cfg.r_imu:.6f}, gravity_mps2={cfg.gravity:.6f}, "
             f"gravity_compensation={'on' if gravity_comp_enabled else 'off'}"
         )
         g0 = gravity_world0_from_imu_anchor(imu_R0=imu_R0, gravity_mps2=cfg.gravity)
@@ -841,7 +862,7 @@ def main():
                         theta_wrapped_imu, R_rel, imu_R0 = compute_theta_wrapped_from_imu_snapshot(
                             snap=snap,
                             imu_R0=imu_R0,
-                            radius_m=cfg.radius_m,
+                            radius=cfg.r_imu,
                             imu_sign=imu_sign,
                         )
                         if theta_wrapped_imu is not None:
@@ -853,8 +874,8 @@ def main():
                             acc_world0 = acc_world0 - gravity_world0_from_imu_anchor(imu_R0=imu_R0, gravity_mps2=cfg.gravity)
                         tangent_warm = np.array([-math.sin(theta_warm), math.cos(theta_warm), 0.0], dtype=float)
                         a_t_warm = float(np.dot(acc_world0, tangent_warm))
-                        if np.isfinite(cfg.radius_m) and cfg.radius_m > 1e-6:
-                            warmup_alpha_linear_samples.append(float(a_t_warm / float(cfg.radius_m)))
+                        if np.isfinite(cfg.r_imu) and cfg.r_imu > 1e-6:
+                            warmup_alpha_linear_samples.append(float(a_t_warm / float(cfg.r_imu)))
                     warmup_theta_samples.append(theta_warm)
                     warmup_omega_samples.append(omega_warm)
                     warmup_current_samples.append(float(snap["current_mA"]))
@@ -907,7 +928,7 @@ def main():
                         theta_imu_prev_wrapped, _, imu_R0 = compute_theta_wrapped_from_imu_snapshot(
                             snap=snap,
                             imu_R0=imu_R0,
-                            radius_m=cfg.radius_m,
+                            radius=cfg.r_imu,
                             imu_sign=imu_sign,
                         )
                         theta_imu_unwrapped_acc = float(theta_offset_rad)
@@ -937,7 +958,7 @@ def main():
                         theta_wrapped_imu, _, imu_R0 = compute_theta_wrapped_from_imu_snapshot(
                             snap=snap,
                             imu_R0=imu_R0,
-                            radius_m=cfg.radius_m,
+                            radius=cfg.r_imu,
                             imu_sign=imu_sign,
                         )
                         if theta_wrapped_imu is not None:
@@ -1046,7 +1067,7 @@ def main():
                     theta_wrapped_imu, R_rel, imu_R0 = compute_theta_wrapped_from_imu_snapshot(
                         snap=snap,
                         imu_R0=imu_R0,
-                        radius_m=cfg.radius_m,
+                        radius=cfg.r_imu,
                         imu_sign=imu_sign,
                     )
                     if theta_wrapped_imu is not None:
@@ -1116,7 +1137,7 @@ def main():
 
                 # alpha from linear acceleration (tangential component / radius)
                 alpha_linear = float(alpha_imu)
-                if np.isfinite(cfg.radius_m) and cfg.radius_m > 1e-6 and snap.get("imu_has_data", False):
+                if np.isfinite(cfg.r_imu) and cfg.r_imu > 1e-6 and snap.get("imu_has_data", False):
                     acc_body = np.asarray(snap["imu_a"], dtype=float)
                     acc_world0 = (R_rel @ acc_body) if R_rel is not None else acc_body
                     if gravity_comp_enabled:
@@ -1124,7 +1145,7 @@ def main():
                     theta_ref_abs = float(theta_meas_wrapped)
                     tangent = np.array([-math.sin(theta_ref_abs), math.cos(theta_ref_abs), 0.0], dtype=float)
                     a_t = float(np.dot(acc_world0, tangent))
-                    alpha_linear = float(a_t / float(cfg.radius_m))
+                    alpha_linear = float(a_t / float(cfg.r_imu))
                 alpha_linear = float(alpha_linear - alpha_linear_offset)
 
                 # online low-pass filter (explicit online path)
@@ -1236,9 +1257,7 @@ def main():
         },
         "calibration_json": cfg.calibration_json if calib is not None else None,
         "radius_json": args.radius_json,
-        "estimated_delay_ms_final": 0.0,
         "cpr_fixed": None if not np.isfinite(cfg.cpr) else float(cfg.cpr),
-        "delay_locked": False,
         "best_eval": None,
         "ls_cost": None,
         "fit_done": False,
@@ -1261,7 +1280,7 @@ def main():
             "alpha_linear_frame": "imu_body_to_world0_xy",
             "alpha_linear_gravity_compensated": bool(gravity_comp_enabled),
             "gravity_mps2_used": float(cfg.gravity),
-            "radius_m_used": float(cfg.radius_m),
+            "radius_m_used": float(cfg.r_imu),
         },
     }
     with open(log_meta, "w", encoding="utf-8") as mf:

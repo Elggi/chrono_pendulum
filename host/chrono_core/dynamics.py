@@ -100,6 +100,37 @@ class PendulumModel:
         self.prev_sensor_vel = np.zeros(3, dtype=float)
         self.prev_t = None
 
+    def pivot_pos_world(self):
+        return np.array([0.0, 0.0, float(self.cfg.motor_length / 2.0)], dtype=float)
+
+    def rod_com_pos_world(self):
+        p = self.link.GetPos()
+        return np.array([float(p.x), float(p.y), float(p.z)], dtype=float)
+
+    def imu_com_pos_world(self):
+        p = self.imu.GetPos()
+        return np.array([float(p.x), float(p.y), float(p.z)], dtype=float)
+
+    def imu_local_on_rod(self):
+        p_local = self.link.TransformPointParentToLocal(self.imu.GetPos())
+        return np.array([float(p_local.x), float(p_local.y), float(p_local.z)], dtype=float)
+
+    def rod_com_radius_from_pivot(self):
+        return float(self.cfg.link_L / 2.0)
+
+    def imu_radius_from_pivot(self):
+        return float(np.linalg.norm(self.imu_com_pos_world() - self.pivot_pos_world()))
+
+    def total_com_pos_world(self):
+        mr = float(self.link.GetMass())
+        mi = float(self.imu.GetMass())
+        pr = self.rod_com_pos_world()
+        pi = self.imu_com_pos_world()
+        return (mr * pr + mi * pi) / max(mr + mi, 1e-12)
+
+    def total_l_com_from_pivot(self):
+        return float(np.linalg.norm(self.total_com_pos_world() - self.pivot_pos_world()))
+
     @property
     def m_total(self):
         return float(self.link.GetMass() + self.imu.GetMass())
@@ -195,7 +226,7 @@ class PendulumModel:
 
 def compute_model_torque_and_electrics(motor_input, theta, omega, bus_v, p, cfg: BridgeConfig, cmd_u_for_duty=None):
     _ = bus_v
-    motor_gain = float(p.get("K_i", p.get("K_u", cfg.K_u_init)))
+    motor_gain = float(p.get("K_i", cfg.K_i_init))
     tau_motor = motor_gain * float(motor_input)
     tau_visc = p["b_eq"] * omega
     tau_coul = p["tau_eq"] * math.tanh(omega / max(cfg.tanh_eps, 1e-9))
@@ -211,22 +242,6 @@ def compute_model_torque_and_electrics(motor_input, theta, omega, bus_v, p, cfg:
         "tau_res": tau_res,
         "tau_gravity": tau_gravity,
         "tau_net": tau_net,
-    }
-
-
-def blend_parameters_for_sim(ekf_params: dict, cfg: BridgeConfig):
-    b_eq = float(ekf_params.get("b_eq", ekf_params.get("b", cfg.b_eq_init)))
-    tau_eq = float(ekf_params.get("tau_eq", ekf_params.get("tau_c", cfg.tau_eq_init)))
-    k_i = float(ekf_params.get("K_i", ekf_params.get("K_u", ekf_params.get("k_u", cfg.K_u_init))))
-    return {
-        "theta": float(ekf_params["theta"]),
-        "omega": float(ekf_params["omega"]),
-        "l_com": float(ekf_params.get("l_com", cfg.l_com_init)),
-        "b_eq": b_eq,
-        "tau_eq": tau_eq,
-        "K_u": k_i,
-        "K_i": k_i,
-        "delay_sec": float(ekf_params["delay_sec"]),
     }
 
 
