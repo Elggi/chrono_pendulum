@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 import json
+import traceback
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,15 +51,49 @@ def _stlsq(phi: np.ndarray, y: np.ndarray, threshold: float, max_iter: int = 12)
     return coef
 
 
-def _fit_sparse(phi: np.ndarray, y: np.ndarray, threshold: float) -> tuple[np.ndarray, str]:
+def _fit_sparse(
+    phi: np.ndarray,
+    y: np.ndarray,
+    threshold: float,
+    feature_names: list[str],
+    phi_trajs: list[np.ndarray] | None = None,
+    y_trajs: list[np.ndarray] | None = None,
+) -> tuple[np.ndarray, str]:
     try:
-        import pysindy as ps  # type: ignore
+        import pysindy as ps
 
-        opt = ps.STLSQ(threshold=float(threshold), alpha=0.0, fit_intercept=False)
-        opt.fit(phi, y)
-        coef = np.asarray(opt.coef_, dtype=float).reshape(-1)
-        return coef, "pysindy.STLSQ"
-    except Exception:
+        # Use full PySINDy model API with identity library on prebuilt greybox features.
+        # We fit a multi-output system where only output-0 carries the residual target.
+        # This allows direct sparse regression in the SINDy workflow while keeping
+        # runtime-compatible feature names.
+        model = ps.SINDy(
+            optimizer=ps.STLSQ(threshold=float(threshold), alpha=0.0, normalize_columns=True),
+            feature_library=ps.IdentityLibrary(),
+            feature_names=list(feature_names),
+        )
+        if phi_trajs and y_trajs and len(phi_trajs) == len(y_trajs):
+            x_list = []
+            xdot_list = []
+            for p, yt in zip(phi_trajs, y_trajs):
+                x_i = np.asarray(p, dtype=float)
+                xd_i = np.zeros_like(x_i, dtype=float)
+                xd_i[:, 0] = np.asarray(yt, dtype=float).reshape(-1)
+                x_list.append(x_i)
+                xdot_list.append(xd_i)
+            model.fit(x=x_list, t=1.0, x_dot=xdot_list, multiple_trajectories=True)
+        else:
+            x = np.asarray(phi, dtype=float)
+            x_dot = np.zeros_like(x, dtype=float)
+            x_dot[:, 0] = np.asarray(y, dtype=float).reshape(-1)
+            model.fit(x=x, t=1.0, x_dot=x_dot)
+        coef_mat = np.asarray(model.coefficients(), dtype=float)
+        coef = coef_mat[0, :]
+        return coef, "pysindy.SINDy(STLSQ+IdentityLibrary)"
+    except Exception as exc:
+        print("[WARN] PySINDy path failed; falling back to deterministic STLSQ.")
+        print(f"[WARN] exception: {exc}")
+        print("[WARN] traceback:")
+        print(traceback.format_exc())
         coef = _stlsq(phi, y, threshold=float(threshold), max_iter=12)
         return coef, "fallback_stlsq"
 
@@ -93,6 +128,7 @@ class Stage2Result:
     output_equation_txt: str
     output_coeff_csv: str
     output_overlay_csv: str
+    output_overlay_per_trajectory: dict[str, dict[str, str]]
 
 
 def run_stage2(
@@ -115,6 +151,7 @@ def run_stage2(
     ys = []
     per_traj = {}
     overlay_rows: list[dict[str, float | str]] = []
+    overlay_artifacts: dict[str, dict[str, str]] = {}
     for tr in trajs:
         rt = build_residual_target(tr, known)
         fm = build_feature_matrix(tr.theta, tr.omega, tr.motor_input_a, features)
@@ -129,7 +166,14 @@ def run_stage2(
 
     phi_all = np.vstack(phis)
     y_all = np.concatenate(ys)
-    coefs, optimizer_name = _fit_sparse(phi_all, y_all, threshold=float(threshold))
+    coefs, optimizer_name = _fit_sparse(
+        phi_all,
+        y_all,
+        threshold=float(threshold),
+        feature_names=names,
+        phi_trajs=phis,
+        y_trajs=ys,
+    )
     yhat_all = phi_all @ coefs
 
     metrics_per: dict[str, Stage2Metrics] = {}
@@ -138,18 +182,53 @@ def run_stage2(
         yhat = rec["phi"] @ coefs
         metrics_per[name] = Stage2Metrics(rmse=_rmse(y, yhat), r2=_r2(y, yhat))
         tr = rec["traj"]
+        traj_rows: list[dict[str, float | str]] = []
         for i in range(len(tr.t)):
-            overlay_rows.append(
-                {
-                    "trajectory": name,
-                    "t": float(tr.t[i]),
-                    "tau_residual_target": float(y[i]),
-                    "tau_residual_pred": float(yhat[i]),
-                    "theta": float(tr.theta[i]),
-                    "omega": float(tr.omega[i]),
-                    "motor_input_a": float(tr.motor_input_a[i]),
-                }
-            )
+            row = {
+                "trajectory": name,
+                "t": float(tr.t[i]),
+                "tau_residual_target": float(y[i]),
+                "tau_residual_pred": float(yhat[i]),
+                "theta": float(tr.theta[i]),
+                "omega": float(tr.omega[i]),
+                "motor_input_a": float(tr.motor_input_a[i]),
+            }
+            overlay_rows.append(row)
+            traj_rows.append(row)
+
+        per_csv = outdir / f"stage2_overlay_{name}.csv"
+        with per_csv.open("w", encoding="utf-8", newline="") as f:
+            wr = csv.DictWriter(f, fieldnames=list(traj_rows[0].keys()))
+            wr.writeheader()
+            wr.writerows(traj_rows)
+
+        per_png = outdir / f"stage2_overlay_{name}.png"
+        try:
+            import matplotlib.pyplot as plt
+
+            fig, axs = plt.subplots(2, 1, figsize=(9, 6), sharex=True)
+            axs[0].plot(tr.t, y, label="tau_residual_target")
+            axs[0].plot(tr.t, yhat, label="tau_residual_pred")
+            axs[0].set_ylabel("tau_residual [Nm]")
+            axs[0].grid(alpha=0.25)
+            axs[0].legend()
+            axs[1].plot(tr.t, tr.theta, label="theta")
+            axs[1].plot(tr.t, tr.omega, label="omega")
+            axs[1].set_xlabel("time [s]")
+            axs[1].set_ylabel("state")
+            axs[1].grid(alpha=0.25)
+            axs[1].legend()
+            fig.tight_layout()
+            fig.savefig(per_png, dpi=160)
+            plt.close(fig)
+        except Exception as exc:
+            print(f"[WARN] Failed to save overlay plot for trajectory '{name}': {exc}")
+            print(traceback.format_exc())
+
+        overlay_artifacts[name] = {
+            "overlay_csv": str(per_csv),
+            "overlay_png": str(per_png),
+        }
 
     active_terms = []
     for n, c in zip(names, coefs):
@@ -215,6 +294,7 @@ def run_stage2(
         output_equation_txt=str(eq_txt),
         output_coeff_csv=str(coeff_csv),
         output_overlay_csv=str(overlay_csv),
+        output_overlay_per_trajectory=overlay_artifacts,
     )
     return result
 
@@ -223,4 +303,3 @@ def save_stage2_summary(result: Stage2Result, outdir: Path) -> Path:
     path = outdir / "stage2_summary.json"
     path.write_text(json.dumps(asdict(result), indent=2, ensure_ascii=False), encoding="utf-8")
     return path
-
