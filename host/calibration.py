@@ -519,14 +519,30 @@ def _gyro_norm(snapshot: dict) -> float:
     return float(np.linalg.norm(g))
 
 
+def _next_free_decay_csv_path(base_dir: str) -> str:
+    os.makedirs(base_dir, exist_ok=True)
+    max_idx = 0
+    for name in os.listdir(base_dir):
+        if not name.startswith("calibration_free_decay_") or not name.endswith(".csv"):
+            continue
+        stem = name[len("calibration_free_decay_") : -len(".csv")]
+        try:
+            max_idx = max(max_idx, int(stem))
+        except ValueError:
+            continue
+    return os.path.join(base_dir, f"calibration_free_decay_{max_idx + 1}.csv")
+
+
 def run_free_decay_collection(args) -> None:
     collector = CprCollector(imu_topic=args.imu_topic, enc_topic=args.hw_enc_topic)
     viewer_proc = maybe_launch_imu_viewer(args)
     ctrl = None
 
     print("=== Free-Decay Data Collection (Option 2: model calibration) ===")
-    print("[INFO] 모터 명령은 0으로 고정합니다. 로드를 손으로 원하는 각도에 맞춰 잡아주세요.")
-    print("[INFO] 충분히 정지 상태가 확인되면 자동 arm되고, 손을 놓아 움직임이 커지는 시점을 release로 자동 검출합니다.")
+    print("[INFO] 모터 명령은 0으로 고정합니다. 손으로 로드를 원하는 각도까지 들어 올리세요 (arming...).")
+    print("[INFO] 특정 각도에서 2초 이상 정지하면 'armed!'를 출력합니다.")
+    print("[INFO] armed 이후 각도가 움직이기 시작하면 자동으로 수집 시작합니다.")
+    print("[INFO] 이후 상대각이 0 근처(기본 ±1.9deg)에서 2초간 정지하면 자동 종료합니다.")
     print("[INFO] q 키를 누르면 언제든 수집을 취소할 수 있습니다.")
 
     try:
@@ -539,15 +555,17 @@ def run_free_decay_collection(args) -> None:
         ctrl.current_u = 0.0
         ctrl.publish_state("free_decay_init")
 
-        hold_start_ts = None
+        arm_start_ts = None
         armed = False
-        theta_hold = None
-        theta_buffer = deque(maxlen=max(10, int(args.free_decay_sample_hz * 0.5)))
+        theta_arm = None
         release_ts = None
-        release_theta = None
+        stop_hold_start = None
         rows = []
         last_pub_ts = 0.0
         sample_period = 1.0 / max(float(args.free_decay_sample_hz), 1e-6)
+        theta_window = deque(maxlen=max(10, int(args.free_decay_sample_hz * max(args.free_decay_steady_window_sec, 0.2))))
+        theta_prev = None
+        release_detected = False
 
         with KeyboardReader() as kb:
             while True:
@@ -559,7 +577,7 @@ def run_free_decay_collection(args) -> None:
                 gyro_n = _gyro_norm(snap)
                 theta = float(snap.get("angle_unwrapped_rad", 0.0))
                 enc = float(snap.get("enc", 0.0))
-                theta_buffer.append(theta)
+                theta_window.append(theta)
 
                 key = kb.read_key_nonblocking(timeout=0.01)
                 if key in ("q", "Q", "ESC"):
@@ -572,43 +590,56 @@ def run_free_decay_collection(args) -> None:
                     last_pub_ts = now
 
                 if not armed:
-                    if math.isfinite(gyro_n) and gyro_n <= float(args.free_decay_hold_gyro_threshold):
-                        if hold_start_ts is None:
-                            hold_start_ts = now
-                        hold_elapsed = now - hold_start_ts
-                        if hold_elapsed >= float(args.free_decay_hold_min_sec):
+                    theta_abs_deg = abs(math.degrees(theta))
+                    is_lifted = theta_abs_deg >= float(args.free_decay_arm_min_angle_deg)
+                    theta_std = float(np.std(np.asarray(theta_window, dtype=float))) if len(theta_window) >= 3 else float("inf")
+                    is_steady = (
+                        math.isfinite(gyro_n)
+                        and gyro_n <= float(args.free_decay_hold_gyro_threshold)
+                        and theta_std <= math.radians(float(args.free_decay_hold_std_deg))
+                    )
+                    if is_lifted and is_steady:
+                        if arm_start_ts is None:
+                            arm_start_ts = now
+                        arm_elapsed = now - arm_start_ts
+                        if arm_elapsed >= float(args.free_decay_hold_min_sec):
                             armed = True
-                            theta_hold = float(np.median(np.asarray(theta_buffer, dtype=float)))
+                            theta_arm = float(np.median(np.asarray(theta_window, dtype=float)))
+                            print(f"\n[INFO] armed! theta_arm={math.degrees(theta_arm):.3f} deg")
                     else:
-                        hold_start_ts = None
+                        arm_start_ts = None
 
-                    hold_elapsed = 0.0 if hold_start_ts is None else (now - hold_start_ts)
+                    arm_elapsed = 0.0 if arm_start_ts is None else (now - arm_start_ts)
                     terminal_status_line(
-                        f"[ARM 대기] gyro_norm={gyro_n:7.4f} rad/s | "
-                        f"hold_elapsed={hold_elapsed:5.2f}/{args.free_decay_hold_min_sec:.2f}s | "
-                        f"theta_now={theta: .4f} rad"
+                        f"[arming...] |theta|={theta_abs_deg:6.2f}/{args.free_decay_arm_min_angle_deg:.2f} deg | "
+                        f"gyro={gyro_n:7.4f} | std_deg={math.degrees(theta_std):6.3f}/{args.free_decay_hold_std_deg:.3f} | "
+                        f"steady={arm_elapsed:5.2f}/{args.free_decay_hold_min_sec:.2f}s"
                     )
                     time.sleep(sample_period)
                     continue
 
-                if release_ts is None:
-                    dtheta_from_hold = abs(theta - float(theta_hold))
+                if not release_detected:
+                    dtheta = 0.0 if theta_prev is None else (theta - theta_prev)
                     if (
                         math.isfinite(gyro_n)
-                        and gyro_n >= float(args.free_decay_release_gyro_threshold)
-                        and dtheta_from_hold >= float(args.free_decay_release_theta_threshold)
+                        and (
+                            abs(dtheta) >= math.radians(float(args.free_decay_release_delta_deg))
+                            or gyro_n >= float(args.free_decay_release_gyro_threshold)
+                        )
                     ):
+                        release_detected = True
                         release_ts = now
-                        release_theta = theta
                         print(
                             f"\n[INFO] release 검출: t={release_ts:.6f}, "
-                            f"theta_release={release_theta:.6f} rad, gyro_norm={gyro_n:.6f} rad/s"
+                            f"theta={math.degrees(theta):.3f} deg, gyro_norm={gyro_n:.6f} rad/s"
                         )
                     else:
+                        dtheta_deg = math.degrees(dtheta)
                         terminal_status_line(
-                            f"[ARM 완료] release 대기 | gyro_norm={gyro_n:7.4f}/{args.free_decay_release_gyro_threshold:.4f} | "
-                            f"|theta-theta_hold|={dtheta_from_hold:7.4f}/{args.free_decay_release_theta_threshold:.4f}"
+                            f"[armed] release 대기 | dtheta={dtheta_deg:7.3f}/{args.free_decay_release_delta_deg:.3f} deg | "
+                            f"gyro={gyro_n:7.4f}/{args.free_decay_release_gyro_threshold:.4f}"
                         )
+                        theta_prev = theta
                         time.sleep(sample_period)
                         continue
 
@@ -617,39 +648,66 @@ def run_free_decay_collection(args) -> None:
                     {
                         "t_sec": t_rel,
                         "theta_raw_rad": theta,
-                        "theta_from_hold_rad": theta - float(theta_hold),
-                        "theta_from_release_rad": theta - float(release_theta),
+                        "theta_from_arm_rad": theta - float(theta_arm),
                         "omega_z_rad_s": float(np.asarray(snap.get("gyro", [0.0, 0.0, 0.0]), dtype=float)[2]),
                         "gyro_norm_rad_s": gyro_n,
                         "enc_count": enc,
                     }
                 )
                 terminal_status_line(
-                    f"[수집중] t={t_rel:6.3f}/{args.free_decay_duration_sec:.3f}s | "
+                    f"[수집중] t={t_rel:6.3f}s | "
                     f"theta={theta: .5f} rad | omega_z={rows[-1]['omega_z_rad_s']: .5f} rad/s"
                 )
-                if t_rel >= float(args.free_decay_duration_sec):
-                    break
+
+                near_zero = abs(math.degrees(theta)) <= float(args.free_decay_stop_near_zero_deg)
+                is_steady_stop = math.isfinite(gyro_n) and gyro_n <= float(args.free_decay_stop_gyro_threshold)
+                if near_zero and is_steady_stop:
+                    if stop_hold_start is None:
+                        stop_hold_start = now
+                    if (now - stop_hold_start) >= float(args.free_decay_stop_hold_sec):
+                        print(
+                            f"\n[INFO] stop condition met: |theta|<={args.free_decay_stop_near_zero_deg:.2f}deg "
+                            f"and steady for {args.free_decay_stop_hold_sec:.2f}s"
+                        )
+                        break
+                else:
+                    stop_hold_start = None
+
+                theta_prev = theta
                 time.sleep(sample_period)
         print()
 
         if not rows:
             raise RuntimeError("free decay 샘플이 비어 있습니다.")
 
-        out_dir = os.path.abspath(args.free_decay_dir)
+        out_dir = os.path.abspath(os.path.dirname(args.output_json) or ".")
         os.makedirs(out_dir, exist_ok=True)
-        stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-        out_csv = os.path.join(out_dir, f"free_decay_{stamp}.csv")
+        out_csv = _next_free_decay_csv_path(out_dir)
         with open(out_csv, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
             writer.writeheader()
             writer.writerows(rows)
 
+        result = {
+            "created_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "method": "free_decay_auto_arm_release",
+            "summary": {
+                "sample_count": int(len(rows)),
+                "theta_arm_deg": float(math.degrees(theta_arm)) if theta_arm is not None else None,
+                "stop_near_zero_deg": float(args.free_decay_stop_near_zero_deg),
+            },
+            "artifacts": {
+                "free_decay_csv": out_csv,
+            },
+        }
+        with open(args.output_json, "w", encoding="utf-8") as jf:
+            json.dump(result, jf, indent=2, ensure_ascii=False)
+
         print("\n=== Free Decay Collection Result ===")
-        print(f"release_theta(rad): {float(release_theta):.6f}")
-        print(f"hold_theta(rad)   : {float(theta_hold):.6f}")
+        print(f"theta_arm(deg)    : {float(math.degrees(theta_arm)):.6f}")
         print(f"samples           : {len(rows)}")
         print(f"saved_csv         : {out_csv}")
+        print(f"saved_json        : {args.output_json}")
 
     finally:
         if ctrl is not None:
@@ -717,13 +775,17 @@ def build_argparser():
     ap.add_argument("--hw-pwm-topic", default="/hw/pwm_applied")
     ap.add_argument("--current-sample-sec", type=float, default=3.0)
     ap.add_argument("--pwm-zero-threshold", type=float, default=1.0)
-    ap.add_argument("--free-decay-dir", default="./free_decay_data")
-    ap.add_argument("--free-decay-duration-sec", type=float, default=8.0)
     ap.add_argument("--free-decay-sample-hz", type=float, default=200.0)
-    ap.add_argument("--free-decay-hold-min-sec", type=float, default=0.8)
+    ap.add_argument("--free-decay-arm-min-angle-deg", type=float, default=5.0)
+    ap.add_argument("--free-decay-hold-min-sec", type=float, default=2.0)
+    ap.add_argument("--free-decay-steady-window-sec", type=float, default=0.6)
+    ap.add_argument("--free-decay-hold-std-deg", type=float, default=0.4)
     ap.add_argument("--free-decay-hold-gyro-threshold", type=float, default=0.15)
     ap.add_argument("--free-decay-release-gyro-threshold", type=float, default=0.35)
-    ap.add_argument("--free-decay-release-theta-threshold", type=float, default=0.01)
+    ap.add_argument("--free-decay-release-delta-deg", type=float, default=0.25)
+    ap.add_argument("--free-decay-stop-near-zero-deg", type=float, default=1.9)
+    ap.add_argument("--free-decay-stop-hold-sec", type=float, default=2.0)
+    ap.add_argument("--free-decay-stop-gyro-threshold", type=float, default=0.12)
     return ap
 
 
