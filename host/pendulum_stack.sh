@@ -191,7 +191,21 @@ run_chrono_pendulum() {
 run_system_identification() {
     echo "--------------------------------"
     echo "[INFO] Calibration 시작"
-    python3 $BASE_DIR/calibration.py
+    read -p "collect free-decay data[y]/n? : " free_decay_yn
+    free_decay_yn=${free_decay_yn:-y}
+    if [[ "$free_decay_yn" =~ ^[Yy]$ ]]; then
+        read -p "arm minimum angle [deg] (default: 5.0): " arm_min_angle_deg
+        arm_min_angle_deg=${arm_min_angle_deg:-5.0}
+        if ! [[ "$arm_min_angle_deg" =~ ^[+-]?[0-9]+([.][0-9]+)?$ ]]; then
+            echo "[WARN] Invalid arm minimum angle '$arm_min_angle_deg'. Fallback to 5.0 deg."
+            arm_min_angle_deg=5.0
+        fi
+        echo "[INFO] free-decay mode 실행 (arm_min_angle_deg=${arm_min_angle_deg})"
+        python3 "$BASE_DIR/calibration.py" --mode free_decay --free-decay-arm-min-angle-deg "$arm_min_angle_deg"
+    else
+        echo "[INFO] manual CPR/r calibration 실행"
+        python3 "$BASE_DIR/calibration.py"
+    fi
 }
 
 run_plot() {
