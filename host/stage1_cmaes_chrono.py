@@ -92,22 +92,6 @@ def trim_long_tail(
     return trimmed, {"trimmed": 1.0, "n_before": float(n), "n_after": float(len(trimmed["t"]))}
 
 
-def estimate_initial_omega(t: np.ndarray, theta: np.ndarray, omega_meas: np.ndarray, n_window: int = 5) -> float:
-    n = len(theta)
-    if n < 2:
-        return float(omega_meas[0]) if n == 1 else 0.0
-    t_num = np.asarray(t, dtype=float)
-    theta_num = np.asarray(theta, dtype=float)
-    omega_num = np.asarray(omega_meas, dtype=float)
-    omega_dtheta = np.gradient(theta_num, np.maximum(t_num, 1e-6), edge_order=1)
-    k = max(2, min(int(n_window), n))
-    d_est = float(np.nanmedian(omega_dtheta[:k]))
-    m_est = float(np.nanmedian(omega_num[:k]))
-    if np.isfinite(d_est) and np.isfinite(m_est) and np.sign(d_est) != np.sign(m_est) and abs(m_est) > 0.25:
-        return d_est
-    return m_est if np.isfinite(m_est) else (d_est if np.isfinite(d_est) else 0.0)
-
-
 def build_cfg(calibration_json: str, parameter_json: str) -> tuple[BridgeConfig, dict[str, Any], dict[str, Any]]:
     cfg = BridgeConfig()
     cfg.enable_render = False
@@ -137,7 +121,7 @@ def rollout_loss_for_candidate(
     theta_real = dataset["theta"]
     omega_real = dataset["omega"]
     theta0 = float(theta_real[0])
-    omega0 = float(estimate_initial_omega(t, theta_real, omega_real))
+    omega0 = 0.0
     model.set_theta_kinematic(theta0, omega0)
 
     p = dict(base_params)
@@ -164,9 +148,9 @@ def rollout_loss_for_candidate(
         theta_sim[k] = model.get_theta()
         omega_sim[k] = model.get_omega()
 
-    mse_theta = float(np.nanmean((theta_sim - theta_real) ** 2))
-    mse_omega = float(np.nanmean((omega_sim - omega_real) ** 2))
-    loss = float(w_theta * mse_theta + w_omega * mse_omega)
+    rmse_theta = float(np.sqrt(np.nanmean((theta_sim - theta_real) ** 2)))
+    rmse_omega = float(np.sqrt(np.nanmean((omega_sim - omega_real) ** 2)))
+    loss = float(w_theta * rmse_theta + w_omega * rmse_omega)
     return loss, theta_sim, omega_sim
 
 
@@ -304,6 +288,7 @@ def main():
 
     best_loss = float("inf")
     best_x = np.array([b0, tau0], dtype=float)
+    progress_rows: list[dict[str, float]] = []
     for gen in range(int(args.max_generations)):
         candidates = [optimizer.ask() for _ in range(optimizer.population_size)]
         payloads = [
@@ -318,10 +303,28 @@ def main():
         if losses[gen_best_i] < best_loss:
             best_loss = float(losses[gen_best_i])
             best_x = np.asarray(candidates[gen_best_i], dtype=float)
+        progress_rows.append(
+            {
+                "gen": float(gen),
+                "best_loss": float(np.min(losses)),
+                "mean_loss": float(np.mean(losses)),
+                "best_b_eq_so_far": float(best_x[0]),
+                "best_tau_eq_so_far": float(best_x[1]),
+            }
+        )
         print(
             f"[gen {gen:03d}] best={min(losses):.6f} mean={float(np.mean(losses)):.6f} "
             f"| best_params(b_eq={best_x[0]:.6f}, tau_eq={best_x[1]:.6f})"
         )
+
+    progress_csv = args.outdir / "stage1_cmaes_progress.csv"
+    with progress_csv.open("w", encoding="utf-8", newline="") as f:
+        wr = csv.DictWriter(
+            f,
+            fieldnames=["gen", "best_loss", "mean_loss", "best_b_eq_so_far", "best_tau_eq_so_far"],
+        )
+        wr.writeheader()
+        wr.writerows(progress_rows)
 
     # Evaluate best candidate on first trajectory for replay/visual artifact output.
     primary_ds = datasets[0]
@@ -402,6 +405,29 @@ def main():
         fig.tight_layout()
         fig.savefig(args.outdir / "stage1_cmaes_overlay.png", dpi=160)
         plt.close(fig)
+
+        if progress_rows:
+            pg = np.asarray([r["gen"] for r in progress_rows], dtype=float)
+            pb = np.asarray([r["best_loss"] for r in progress_rows], dtype=float)
+            pm = np.asarray([r["mean_loss"] for r in progress_rows], dtype=float)
+            pbeq = np.asarray([r["best_b_eq_so_far"] for r in progress_rows], dtype=float)
+            ptau = np.asarray([r["best_tau_eq_so_far"] for r in progress_rows], dtype=float)
+
+            fig2, axs2 = plt.subplots(2, 1, figsize=(9, 6), sharex=True)
+            axs2[0].plot(pg, pb, label="best_loss")
+            axs2[0].plot(pg, pm, label="mean_loss")
+            axs2[0].set_ylabel("loss (weighted RMSE)")
+            axs2[0].grid(alpha=0.25)
+            axs2[0].legend()
+            axs2[1].plot(pg, pbeq, label="best_b_eq_so_far")
+            axs2[1].plot(pg, ptau, label="best_tau_eq_so_far")
+            axs2[1].set_ylabel("parameter value")
+            axs2[1].set_xlabel("generation")
+            axs2[1].grid(alpha=0.25)
+            axs2[1].legend()
+            fig2.tight_layout()
+            fig2.savefig(args.outdir / "stage1_cmaes_progress.png", dpi=160)
+            plt.close(fig2)
     except Exception:
         pass
 
@@ -418,12 +444,16 @@ def main():
                 "num_trajectories": int(len(datasets)),
                 "parallel_workers": int(args.workers),
                 "headless_chrono": True,
+                "loss_type": "weighted_rmse",
+                "loss_weights": {"w_theta": float(args.w_theta), "w_omega": float(args.w_omega)},
                 "preprocess": {
                     "tail_theta_abs_deg": float(args.tail_theta_abs_deg),
                     "tail_omega_abs": float(args.tail_omega_abs),
                     "tail_hold_sec": float(args.tail_hold_sec),
                 },
                 "output_rollout_csv": str(out_csv),
+                "output_progress_csv": str(progress_csv),
+                "output_progress_png": str(args.outdir / "stage1_cmaes_progress.png"),
             },
             indent=2,
             ensure_ascii=False,

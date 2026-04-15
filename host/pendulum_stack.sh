@@ -295,8 +295,13 @@ run_stage1_pem_identification() {
     gens=${gens:-30}
     read -p "병렬 worker 수 [8]: " workers
     workers=${workers:-8}
+    read -p "theta RMSE weight (w_theta) [default: 1.0]: " w_theta
+    w_theta=${w_theta:-1.0}
+    read -p "omega RMSE weight (w_omega) [default: 0.1]: " w_omega
+    w_omega=${w_omega:-0.1}
+    echo "[INFO] Stage1 weighted RMSE loss: w_theta=${w_theta}, w_omega=${w_omega}"
     local csv_args=("${selected_csvs[@]}")
-    cmd=(python3 "$BASE_DIR/stage1_cmaes_chrono.py" --csv "${csv_args[@]}" --calibration-json "$calib_json" --model-parameter-json "$model_param_json" --outdir "$outdir" --max-generations "$gens" --workers "$workers")
+    cmd=(python3 "$BASE_DIR/stage1_cmaes_chrono.py" --csv "${csv_args[@]}" --calibration-json "$calib_json" --model-parameter-json "$model_param_json" --outdir "$outdir" --max-generations "$gens" --workers "$workers" --w-theta "$w_theta" --w-omega "$w_omega")
     echo "[INFO] command: ${cmd[*]}"
     "${cmd[@]}"
 }
