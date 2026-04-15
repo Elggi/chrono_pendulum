@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
@@ -47,6 +48,66 @@ def load_free_decay_csv(path: Path) -> dict[str, np.ndarray]:
     return {"t": t, "theta": theta, "omega": omega}
 
 
+def _first_hold_start(mask: np.ndarray, min_len: int) -> int | None:
+    if min_len <= 1:
+        idx = np.flatnonzero(mask)
+        return int(idx[0]) if idx.size > 0 else None
+    run = 0
+    for i, ok in enumerate(mask):
+        run = run + 1 if bool(ok) else 0
+        if run >= min_len:
+            return int(i - min_len + 1)
+    return None
+
+
+def trim_long_tail(
+    dataset: dict[str, np.ndarray],
+    *,
+    tail_theta_abs_deg: float,
+    tail_omega_abs: float,
+    tail_hold_sec: float,
+) -> tuple[dict[str, np.ndarray], dict[str, float]]:
+    t = np.asarray(dataset["t"], dtype=float)
+    theta = np.asarray(dataset["theta"], dtype=float)
+    omega = np.asarray(dataset["omega"], dtype=float)
+    n = len(t)
+    if n < 4:
+        return {"t": t, "theta": theta, "omega": omega}, {"trimmed": 0.0, "n_before": float(n), "n_after": float(n)}
+
+    theta_eps = math.radians(max(float(tail_theta_abs_deg), 0.0))
+    omega_eps = max(float(tail_omega_abs), 0.0)
+    dt_med = float(np.nanmedian(np.diff(t)))
+    if not np.isfinite(dt_med) or dt_med <= 0.0:
+        dt_med = 1e-2
+    min_len = max(2, int(round(max(float(tail_hold_sec), 0.0) / dt_med)))
+
+    quiet = np.isfinite(theta) & np.isfinite(omega) & (np.abs(theta) <= theta_eps) & (np.abs(omega) <= omega_eps)
+    cut_start = _first_hold_start(quiet, min_len=min_len)
+    if cut_start is None:
+        return {"t": t, "theta": theta, "omega": omega}, {"trimmed": 0.0, "n_before": float(n), "n_after": float(n)}
+    if cut_start <= 2:
+        return {"t": t, "theta": theta, "omega": omega}, {"trimmed": 0.0, "n_before": float(n), "n_after": float(n)}
+
+    trimmed = {"t": t[:cut_start], "theta": theta[:cut_start], "omega": omega[:cut_start]}
+    return trimmed, {"trimmed": 1.0, "n_before": float(n), "n_after": float(len(trimmed["t"]))}
+
+
+def estimate_initial_omega(t: np.ndarray, theta: np.ndarray, omega_meas: np.ndarray, n_window: int = 5) -> float:
+    n = len(theta)
+    if n < 2:
+        return float(omega_meas[0]) if n == 1 else 0.0
+    t_num = np.asarray(t, dtype=float)
+    theta_num = np.asarray(theta, dtype=float)
+    omega_num = np.asarray(omega_meas, dtype=float)
+    omega_dtheta = np.gradient(theta_num, np.maximum(t_num, 1e-6), edge_order=1)
+    k = max(2, min(int(n_window), n))
+    d_est = float(np.nanmedian(omega_dtheta[:k]))
+    m_est = float(np.nanmedian(omega_num[:k]))
+    if np.isfinite(d_est) and np.isfinite(m_est) and np.sign(d_est) != np.sign(m_est) and abs(m_est) > 0.25:
+        return d_est
+    return m_est if np.isfinite(m_est) else (d_est if np.isfinite(d_est) else 0.0)
+
+
 def build_cfg(calibration_json: str, parameter_json: str) -> tuple[BridgeConfig, dict[str, Any], dict[str, Any]]:
     cfg = BridgeConfig()
     cfg.enable_render = False
@@ -76,7 +137,7 @@ def rollout_loss_for_candidate(
     theta_real = dataset["theta"]
     omega_real = dataset["omega"]
     theta0 = float(theta_real[0])
-    omega0 = float(omega_real[0])
+    omega0 = float(estimate_initial_omega(t, theta_real, omega_real))
     model.set_theta_kinematic(theta0, omega0)
 
     p = dict(base_params)
@@ -202,10 +263,28 @@ def main():
     ap.add_argument("--b-max", type=float, default=5.0)
     ap.add_argument("--tau-min", type=float, default=0.0)
     ap.add_argument("--tau-max", type=float, default=2.0)
+    ap.add_argument("--tail-theta-abs-deg", type=float, default=0.8, help="tail trim threshold for |theta| [deg]")
+    ap.add_argument("--tail-omega-abs", type=float, default=0.25, help="tail trim threshold for |omega| [rad/s]")
+    ap.add_argument("--tail-hold-sec", type=float, default=0.8, help="required hold duration for tail trimming [s]")
     args = ap.parse_args()
 
     args.outdir.mkdir(parents=True, exist_ok=True)
-    datasets = [load_free_decay_csv(p) for p in args.csv]
+    raw_datasets = [load_free_decay_csv(p) for p in args.csv]
+    datasets = []
+    for i, ds in enumerate(raw_datasets):
+        trimmed, info = trim_long_tail(
+            ds,
+            tail_theta_abs_deg=float(args.tail_theta_abs_deg),
+            tail_omega_abs=float(args.tail_omega_abs),
+            tail_hold_sec=float(args.tail_hold_sec),
+        )
+        datasets.append(trimmed)
+        print(
+            f"[dataset {i}] tail_trim={bool(int(info['trimmed']))} "
+            f"n_before={int(info['n_before'])} n_after={int(info['n_after'])}"
+        )
+        if len(trimmed["t"]) < 4:
+            raise ValueError(f"Dataset too short after preprocessing: idx={i}, samples={len(trimmed['t'])}")
     cfg, _, runtime = build_cfg(args.calibration_json, str(args.model_parameter_json))
     cfg_dict = asdict(cfg)
 
@@ -339,6 +418,11 @@ def main():
                 "num_trajectories": int(len(datasets)),
                 "parallel_workers": int(args.workers),
                 "headless_chrono": True,
+                "preprocess": {
+                    "tail_theta_abs_deg": float(args.tail_theta_abs_deg),
+                    "tail_omega_abs": float(args.tail_omega_abs),
+                    "tail_hold_sec": float(args.tail_hold_sec),
+                },
                 "output_rollout_csv": str(out_csv),
             },
             indent=2,
