@@ -577,7 +577,7 @@ def run_free_decay_collection(args) -> None:
                     raise RuntimeError("IMU viewer가 종료되어 free decay 수집을 중단합니다.")
 
                 snap = collector.snapshot()
-                now = time.time()
+                now = time.monotonic()
                 gyro_n = _gyro_norm(snap)
                 theta = float(snap.get("angle_unwrapped_rad", 0.0))
                 enc = float(snap.get("enc", 0.0))
@@ -671,15 +671,36 @@ def run_free_decay_collection(args) -> None:
 
                 theta_stop_std = float(np.std(np.asarray(theta_stop_window, dtype=float))) if len(theta_stop_window) >= 3 else float("inf")
                 near_zero = abs(math.degrees(theta_lp)) <= float(args.free_decay_stop_near_zero_deg)
-                is_steady_stop = math.isfinite(omega_lp) and abs(omega_lp) <= float(args.free_decay_stop_gyro_threshold)
-                if near_zero and is_steady_stop:
+                # Bias-robust steady test: use theta trend slope + residual spread
+                slope_rad_s = float("inf")
+                theta_resid_std = float("inf")
+                if len(rows) >= 8:
+                    w = min(len(rows), int(max(10, args.free_decay_sample_hz * args.free_decay_stop_hold_sec)))
+                    t_w = np.asarray([r["t_sec"] for r in rows[-w:]], dtype=float)
+                    th_w = np.asarray([r["theta_filtered_rad"] for r in rows[-w:]], dtype=float)
+                    t0 = t_w[0]
+                    tt = t_w - t0
+                    A = np.vstack([tt, np.ones_like(tt)]).T
+                    coef, _, _, _ = np.linalg.lstsq(A, th_w, rcond=None)
+                    slope_rad_s = float(coef[0])
+                    th_fit = A @ coef
+                    theta_resid_std = float(np.std(th_w - th_fit))
+                is_steady_stop = (
+                    math.isfinite(omega_lp)
+                    and abs(omega_lp) <= float(args.free_decay_stop_gyro_threshold)
+                    and abs(math.degrees(slope_rad_s)) <= float(args.free_decay_stop_slope_deg_s)
+                    and math.degrees(theta_resid_std) <= float(args.free_decay_stop_resid_std_deg)
+                )
+                if near_zero and is_steady_stop and theta_stop_std <= math.radians(float(args.free_decay_stop_std_deg)):
                     if stop_hold_start is None:
                         stop_hold_start = now
-                    if (now - stop_hold_start) >= float(args.free_decay_stop_hold_sec) and theta_stop_std <= math.radians(float(args.free_decay_stop_std_deg)):
+                    if (now - stop_hold_start) >= float(args.free_decay_stop_hold_sec):
                         print(
                             f"\n[INFO] stop condition met: |theta|<={args.free_decay_stop_near_zero_deg:.2f}deg "
                             f"and steady for {args.free_decay_stop_hold_sec:.2f}s "
-                            f"(theta_std_deg={math.degrees(theta_stop_std):.4f})"
+                            f"(theta_std_deg={math.degrees(theta_stop_std):.4f}, "
+                            f"slope_deg_s={math.degrees(slope_rad_s):.5f}, "
+                            f"resid_std_deg={math.degrees(theta_resid_std):.5f})"
                         )
                         break
                 else:
@@ -835,6 +856,8 @@ def build_argparser():
     ap.add_argument("--free-decay-stop-hold-sec", type=float, default=2.0)
     ap.add_argument("--free-decay-stop-gyro-threshold", type=float, default=0.12)
     ap.add_argument("--free-decay-stop-std-deg", type=float, default=0.08)
+    ap.add_argument("--free-decay-stop-slope-deg-s", type=float, default=0.02)
+    ap.add_argument("--free-decay-stop-resid-std-deg", type=float, default=0.05)
     return ap
 
 
