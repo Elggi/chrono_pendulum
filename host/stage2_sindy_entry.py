@@ -23,11 +23,17 @@ def main() -> None:
     ap.add_argument(
         "--model-parameter-json",
         type=Path,
-        default=Path("host/model_parameter.json"),
+        default=Path("host/model_parameter.latest.json"),
         help="canonical model registry json to read/update",
     )
+    ap.add_argument(
+        "--latest-model-parameter-json",
+        type=Path,
+        default=Path("host/model_parameter.latest.json"),
+        help="path to keep synchronized with the newest Stage1/Stage2 parameters",
+    )
     ap.add_argument("--outdir", type=Path, required=True)
-    ap.add_argument("--threshold", type=float, default=1.0e-4, help="sparsification threshold")
+    ap.add_argument("--threshold", type=float, default=1.0e-4, help="base sparsification threshold (grid: [x/10, x, x*10])")
     ap.add_argument(
         "--features",
         type=str,
@@ -46,6 +52,7 @@ def main() -> None:
     result = run_stage2(
         csv_paths=list(args.csv),
         model_parameter_json=args.model_parameter_json,
+        latest_model_parameter_json=args.latest_model_parameter_json,
         outdir=args.outdir,
         features=features,
         threshold=float(args.threshold),
@@ -54,6 +61,7 @@ def main() -> None:
     (args.outdir / "stage2_result.json").write_text(json.dumps(asdict(result), indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"[DONE] Stage2 summary: {summary_path}")
     print(f"[DONE] Updated model parameter json: {args.model_parameter_json}")
+    print(f"[DONE] Synchronized latest model parameter json: {args.latest_model_parameter_json}")
     print("[DONE] Next steps:")
     print(f"  1) Inspect equation text: {result.output_equation_txt}")
     print(f"  2) Inspect coefficient table: {result.output_coeff_csv}")
