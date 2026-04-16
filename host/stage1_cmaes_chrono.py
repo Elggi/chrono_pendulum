@@ -28,6 +28,19 @@ def _pick_col(cols: dict[str, np.ndarray], candidates: list[str]) -> np.ndarray:
     raise KeyError(f"Missing required columns. tried={candidates}, have={list(cols.keys())}")
 
 
+def _unwrap_series(x: np.ndarray) -> np.ndarray:
+    arr = np.asarray(x, dtype=float).reshape(-1)
+    out = arr.copy()
+    m = np.isfinite(out)
+    if int(np.sum(m)) < 2:
+        return out
+    u = np.unwrap(out[m])
+    # Preserve original first finite anchor.
+    u = u + (out[m][0] - u[0])
+    out[m] = u
+    return out
+
+
 def load_free_decay_csv(path: Path) -> dict[str, np.ndarray]:
     with path.open("r", encoding="utf-8", newline="") as f:
         rd = csv.DictReader(f)
@@ -44,6 +57,7 @@ def load_free_decay_csv(path: Path) -> dict[str, np.ndarray]:
     arr = {k: np.asarray(v, dtype=float) for k, v in cols.items()}
     t = _pick_col(arr, ["wall_elapsed", "t", "time", "time_sec"])
     theta = _pick_col(arr, ["theta_imu_filtered_unwrapped", "theta", "theta_imu"])
+    theta = _unwrap_series(theta)
     omega = _pick_col(arr, ["omega_imu_filtered", "omega", "omega_imu"])
     current_ma = np.zeros_like(t, dtype=float)
     for c in ["ina_current_signed_online_mA", "I_filtered_mA", "ina_current_corr_mA", "ina_current_raw_mA", "current_mA"]:
