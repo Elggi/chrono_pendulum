@@ -23,7 +23,7 @@ def main() -> None:
     ap.add_argument(
         "--model-parameter-json",
         type=Path,
-        default=Path("host/model_parameter.json"),
+        default=Path("host/model_parameter.latest.json"),
         help="canonical model registry json to read/update",
     )
     ap.add_argument("--outdir", type=Path, required=True)

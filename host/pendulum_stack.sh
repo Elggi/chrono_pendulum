@@ -342,7 +342,7 @@ run_stage1_pem_identification() {
         return
     fi
     default_calib="$BASE_DIR/run_logs/calibration_latest.json"
-    default_model_param="$BASE_DIR/model_parameter.json"
+    default_model_param="$BASE_DIR/model_parameter.latest.json"
     if [ ! -f "$default_model_param" ]; then
         default_model_param="$BASE_DIR/model_parameter.template.json"
     fi
@@ -376,7 +376,7 @@ run_stage2_sindy_identification() {
         echo "[ERROR] 선택된 CSV가 없습니다." >&2
         return
     fi
-    default_model_param="$BASE_DIR/model_parameter.json"
+    default_model_param="$BASE_DIR/model_parameter.latest.json"
     if [ ! -f "$default_model_param" ]; then
         default_model_param="$BASE_DIR/model_parameter.template.json"
     fi
@@ -659,8 +659,8 @@ run_replay_validation() {
         param_json="$BASE_DIR/rl_results/latest/final_params_rl.json"
     elif [ -f "$BASE_DIR/rl_results/latest/best_params.json" ]; then
         param_json="$BASE_DIR/rl_results/latest/best_params.json"
-    elif [ -f "$BASE_DIR/model_parameter.json" ]; then
-        param_json="$BASE_DIR/model_parameter.json"
+    elif [ -f "$BASE_DIR/model_parameter.latest.json" ]; then
+        param_json="$BASE_DIR/model_parameter.latest.json"
     elif [ -f "$BASE_DIR/model_parameter.template.json" ]; then
         param_json="$BASE_DIR/model_parameter.template.json"
     fi

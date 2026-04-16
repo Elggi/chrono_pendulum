@@ -35,23 +35,6 @@ def _r2(y: np.ndarray, yhat: np.ndarray) -> float:
     return float(1.0 - (num / den))
 
 
-def _stlsq(phi: np.ndarray, y: np.ndarray, threshold: float, max_iter: int = 12) -> np.ndarray:
-    coef = np.linalg.lstsq(phi, y, rcond=None)[0]
-    active = np.abs(coef) >= float(threshold)
-    for _ in range(max_iter):
-        if not np.any(active):
-            return np.zeros_like(coef)
-        coef_active = np.linalg.lstsq(phi[:, active], y, rcond=None)[0]
-        coef_new = np.zeros_like(coef)
-        coef_new[active] = coef_active
-        active_new = np.abs(coef_new) >= float(threshold)
-        coef = coef_new
-        if np.array_equal(active, active_new):
-            break
-        active = active_new
-    return coef
-
-
 def _fit_sparse(
     phi: np.ndarray,
     y: np.ndarray,
@@ -96,12 +79,11 @@ def _fit_sparse(
         coef = coef_mat[0, :]
         return coef, "pysindy.SINDy(STLSQ+IdentityLibrary)"
     except Exception as exc:
-        print("[WARN] PySINDy path failed; falling back to deterministic STLSQ.")
-        print(f"[WARN] exception: {exc}")
-        print("[WARN] traceback:")
+        print("[ERROR] PySINDy fitting failed.")
+        print(f"[ERROR] exception: {exc}")
+        print("[ERROR] traceback:")
         print(traceback.format_exc())
-        coef = _stlsq(phi, y, threshold=float(threshold), max_iter=12)
-        return coef, "fallback_stlsq"
+        raise RuntimeError("Stage2 requires a working PySINDy installation (expected version: 2.1.0).") from exc
 
 
 def _equation_string(names: list[str], coefs: np.ndarray, precision: int = 6) -> str:

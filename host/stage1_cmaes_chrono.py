@@ -262,7 +262,7 @@ def main():
     ap = argparse.ArgumentParser(description="Stage1 CMA-ES on headless Chrono free-decay replay (fit b_eq, tau_eq)")
     ap.add_argument("--csv", type=Path, nargs="+", required=True, help="free-decay training csv (multi trajectory allowed)")
     ap.add_argument("--calibration-json", type=str, default="host/run_logs/calibration_latest.json")
-    ap.add_argument("--model-parameter-json", type=Path, default=Path("host/model_parameter.template.json"))
+    ap.add_argument("--model-parameter-json", type=Path, default=Path("host/model_parameter.latest.json"))
     ap.add_argument("--outdir", type=Path, required=True)
     ap.add_argument("--max-generations", type=int, default=30)
     ap.add_argument("--sigma", type=float, default=0.03)

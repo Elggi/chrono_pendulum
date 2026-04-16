@@ -14,10 +14,7 @@ def load_model_parameter_json(json_path: str | None) -> dict[str, Any] | None:
 
 def extract_runtime_overrides(data: dict[str, Any] | None, cfg: BridgeConfig) -> dict[str, Any]:
     """
-    Parse model parameter JSON and return runtime overrides for Chrono execution.
-    Supports both:
-      - new schema (`known`, `torque_model`)
-      - legacy schema (`model_init`, `best_params`, flat keys)
+    Parse canonical model parameter JSON and return runtime overrides for Chrono execution.
     """
     if not isinstance(data, dict):
         return {}
@@ -44,17 +41,6 @@ def extract_runtime_overrides(data: dict[str, Any] | None, cfg: BridgeConfig) ->
         out["tau_eq"] = float(res_params["tau_eq"])
     if isinstance(torque_model.get("residual_terms"), list):
         out["residual_terms"] = list(torque_model["residual_terms"])
-
-    legacy = data.get("model_init", data.get("best_params", data))
-    if isinstance(legacy, dict):
-        if "K_i" in legacy and "K_i" not in out:
-            out["K_i"] = float(legacy["K_i"])
-        if "b_eq" in legacy and "b_eq" not in out:
-            out["b_eq"] = float(legacy["b_eq"])
-        if "tau_eq" in legacy and "tau_eq" not in out:
-            out["tau_eq"] = float(legacy["tau_eq"])
-        if "r_imu" in legacy and "r_imu" not in out:
-            out["r_imu"] = float(legacy["r_imu"])
 
     # defaults
     out.setdefault("K_i", float(cfg.K_i_init))
