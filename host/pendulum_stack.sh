@@ -326,6 +326,16 @@ run_system_identification() {
 run_stage1_pem_identification() {
     echo "--------------------------------"
     echo "[INFO] Stage1 Identification 실행 (CMA-ES + Headless Chrono)"
+    read -p "motor input(K_i)까지 함께 학습할까요? (y/n) [n]: " fit_ki_yn
+    fit_ki_yn=${fit_ki_yn:-n}
+    stage1_extra_args=()
+    if [[ "$fit_ki_yn" =~ ^[Yy]$ ]]; then
+        echo "[INFO] actuation data(전류 입력 포함 finalized CSV)를 선택하세요."
+        stage1_extra_args+=(--fit-ki-with-motor-input)
+    else
+        echo "[INFO] free decay data 기반 passive 파라미터(b_eq, tau_eq)만 학습합니다."
+    fi
+
     mapfile -t selected_csvs < <(select_csv_files_multi)
     if [ "${#selected_csvs[@]}" -eq 0 ]; then
         echo "[ERROR] 선택된 CSV가 없습니다." >&2
@@ -353,6 +363,7 @@ run_stage1_pem_identification() {
     echo "[INFO] Stage1 weighted RMSE loss: w_theta=${w_theta}, w_omega=${w_omega}"
     local csv_args=("${selected_csvs[@]}")
     cmd=(python3 "$BASE_DIR/stage1_cmaes_chrono.py" --csv "${csv_args[@]}" --calibration-json "$calib_json" --model-parameter-json "$model_param_json" --outdir "$outdir" --max-generations "$gens" --workers "$workers" --w-theta "$w_theta" --w-omega "$w_omega")
+    cmd+=("${stage1_extra_args[@]}")
     echo "[INFO] command: ${cmd[*]}"
     "${cmd[@]}"
 }

@@ -45,7 +45,16 @@ def load_free_decay_csv(path: Path) -> dict[str, np.ndarray]:
     t = _pick_col(arr, ["wall_elapsed", "t", "time", "time_sec"])
     theta = _pick_col(arr, ["theta_imu_filtered_unwrapped", "theta", "theta_imu"])
     omega = _pick_col(arr, ["omega_imu_filtered", "omega", "omega_imu"])
-    return {"t": t, "theta": theta, "omega": omega}
+    n = len(t)
+    i_ma = None
+    for c in ["I_filtered_mA", "ina_current_corr_mA", "ina_current_raw_mA", "current_mA", "ina_current_signed_online_mA"]:
+        if c in arr:
+            i_ma = np.asarray(arr[c], dtype=float)
+            break
+    if i_ma is None:
+        i_ma = np.zeros(n, dtype=float)
+    motor_input = i_ma / 1000.0  # A
+    return {"t": t, "theta": theta, "omega": omega, "motor_input": motor_input}
 
 
 def _first_hold_start(mask: np.ndarray, min_len: int) -> int | None:
@@ -113,6 +122,7 @@ def rollout_loss_for_candidate(
     base_params: dict[str, Any],
     w_theta: float,
     w_omega: float,
+    fit_ki_with_motor_input: bool,
 ) -> tuple[float, np.ndarray, np.ndarray]:
     cfg = BridgeConfig(**cfg_dict)
     model = PendulumModel(cfg)
@@ -125,8 +135,14 @@ def rollout_loss_for_candidate(
     model.set_theta_kinematic(theta0, omega0)
 
     p = dict(base_params)
-    p["b_eq"] = float(candidate[0])
-    p["tau_eq"] = float(candidate[1])
+    if fit_ki_with_motor_input:
+        p["K_i"] = float(candidate[0])
+        p["b_eq"] = float(candidate[1])
+        p["tau_eq"] = float(candidate[2])
+    else:
+        p["b_eq"] = float(candidate[0])
+        p["tau_eq"] = float(candidate[1])
+    motor_input_arr = np.asarray(dataset.get("motor_input", np.zeros_like(theta_real)), dtype=float)
     theta_sim = np.zeros_like(theta_real)
     omega_sim = np.zeros_like(omega_real)
     theta_sim[0] = model.get_theta()
@@ -135,7 +151,7 @@ def rollout_loss_for_candidate(
     for k in range(1, len(t)):
         dt = float(max(t[k] - t[k - 1], cfg.step))
         out = compute_model_torque_and_electrics(
-            motor_input=0.0,  # free-decay: no active motor current
+            motor_input=float(motor_input_arr[k - 1]),
             theta=model.get_theta(),
             omega=model.get_omega(),
             bus_v=float("nan"),
@@ -155,7 +171,7 @@ def rollout_loss_for_candidate(
 
 
 def _worker(args):
-    cand, datasets, cfg_dict, base_params, w_theta, w_omega = args
+    cand, datasets, cfg_dict, base_params, w_theta, w_omega, fit_ki_with_motor_input = args
     losses = []
     for ds in datasets:
         loss, _, _ = rollout_loss_for_candidate(
@@ -165,6 +181,7 @@ def _worker(args):
             base_params=base_params,
             w_theta=w_theta,
             w_omega=w_omega,
+            fit_ki_with_motor_input=fit_ki_with_motor_input,
         )
         losses.append(float(loss))
     return float(np.mean(losses)) if losses else float("inf")
@@ -175,10 +192,12 @@ def update_model_parameter_json(
     cfg: BridgeConfig,
     best_b: float,
     best_tau: float,
+    best_ki: float | None,
     best_loss: float,
     generations: int,
     popsize: int,
     input_csvs: list[str],
+    fit_ki_with_motor_input: bool,
 ):
     if path.exists():
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -205,7 +224,10 @@ def update_model_parameter_json(
         tm["motor"] = {"enabled": True, "equation": "tau_motor = K_i * I_filtered_A", "params": {}}
     if not isinstance(tm["motor"].get("params"), dict):
         tm["motor"]["params"] = {}
-    tm["motor"]["params"]["K_i"] = float(tm["motor"]["params"].get("K_i", cfg.K_i_init))
+    if fit_ki_with_motor_input and best_ki is not None:
+        tm["motor"]["params"]["K_i"] = float(best_ki)
+    else:
+        tm["motor"]["params"]["K_i"] = float(tm["motor"]["params"].get("K_i", cfg.K_i_init))
     if not isinstance(tm.get("resistance"), dict):
         tm["resistance"] = {"enabled": True, "equation": "tau_res = b_eq*omega + tau_eq*tanh(omega/eps)", "params": {}}
     if not isinstance(tm["resistance"].get("params"), dict):
@@ -220,8 +242,13 @@ def update_model_parameter_json(
         data["stage_outputs"] = {}
     data["stage_outputs"]["stage1"] = {
         "method": "cmaes_chrono_headless",
+        "mode": "actuation_with_K_i_fit" if fit_ki_with_motor_input else "free_decay_passive_fit",
         "best_loss": float(best_loss),
-        "best_params": {"b_eq": float(best_b), "tau_eq": float(best_tau)},
+        "best_params": (
+            {"K_i": float(best_ki), "b_eq": float(best_b), "tau_eq": float(best_tau)}
+            if (fit_ki_with_motor_input and best_ki is not None)
+            else {"b_eq": float(best_b), "tau_eq": float(best_tau)}
+        ),
         "generations": int(generations),
         "population_size": int(popsize),
         "input_csvs": list(input_csvs),
@@ -250,6 +277,9 @@ def main():
     ap.add_argument("--tail-theta-abs-deg", type=float, default=0.8, help="tail trim threshold for |theta| [deg]")
     ap.add_argument("--tail-omega-abs", type=float, default=0.25, help="tail trim threshold for |omega| [rad/s]")
     ap.add_argument("--tail-hold-sec", type=float, default=0.8, help="required hold duration for tail trimming [s]")
+    ap.add_argument("--fit-ki-with-motor-input", action="store_true", help="fit K_i together with b_eq/tau_eq using current input from CSV")
+    ap.add_argument("--ki-min", type=float, default=1e-7)
+    ap.add_argument("--ki-max", type=float, default=5e-3)
     args = ap.parse_args()
 
     args.outdir.mkdir(parents=True, exist_ok=True)
@@ -272,6 +302,7 @@ def main():
     cfg, _, runtime = build_cfg(args.calibration_json, str(args.model_parameter_json))
     cfg_dict = asdict(cfg)
 
+    ki0 = float(runtime.get("K_i", cfg.K_i_init))
     b0 = float(runtime.get("b_eq", cfg.b_eq_init))
     tau0 = float(runtime.get("tau_eq", cfg.tau_eq_init))
     base_params = {
@@ -279,15 +310,27 @@ def main():
         "residual_terms": list(runtime.get("residual_terms", [])),
     }
 
-    optimizer = CMA(
-        mean=np.array([b0, tau0], dtype=float),
-        sigma=float(args.sigma),
-        bounds=np.array([[args.b_min, args.b_max], [args.tau_min, args.tau_max]], dtype=float),
-        population_size=int(args.popsize),
-    )
+    if args.fit_ki_with_motor_input:
+        optimizer = CMA(
+            mean=np.array([ki0, b0, tau0], dtype=float),
+            sigma=float(args.sigma),
+            bounds=np.array(
+                [[args.ki_min, args.ki_max], [args.b_min, args.b_max], [args.tau_min, args.tau_max]],
+                dtype=float,
+            ),
+            population_size=int(args.popsize),
+        )
+        best_x = np.array([ki0, b0, tau0], dtype=float)
+    else:
+        optimizer = CMA(
+            mean=np.array([b0, tau0], dtype=float),
+            sigma=float(args.sigma),
+            bounds=np.array([[args.b_min, args.b_max], [args.tau_min, args.tau_max]], dtype=float),
+            population_size=int(args.popsize),
+        )
+        best_x = np.array([b0, tau0], dtype=float)
 
     best_loss = float("inf")
-    best_x = np.array([b0, tau0], dtype=float)
     progress_rows: list[dict[str, float]] = []
     for gen in range(int(args.max_generations)):
         candidates = [optimizer.ask() for _ in range(optimizer.population_size)]
@@ -299,6 +342,7 @@ def main():
                 base_params,
                 float(args.w_theta),
                 float(args.w_omega),
+                bool(args.fit_ki_with_motor_input),
             )
             for x in candidates
         ]
@@ -310,26 +354,32 @@ def main():
         if losses[gen_best_i] < best_loss:
             best_loss = float(losses[gen_best_i])
             best_x = np.asarray(candidates[gen_best_i], dtype=float)
-        progress_rows.append(
-            {
-                "gen": float(gen),
-                "best_loss": float(np.min(losses)),
-                "mean_loss": float(np.mean(losses)),
-                "best_b_eq_so_far": float(best_x[0]),
-                "best_tau_eq_so_far": float(best_x[1]),
-            }
-        )
-        print(
-            f"[gen {gen:03d}] best={min(losses):.6f} mean={float(np.mean(losses)):.6f} "
-            f"| best_params(b_eq={best_x[0]:.6f}, tau_eq={best_x[1]:.6f})"
-        )
+        row = {"gen": float(gen), "best_loss": float(np.min(losses)), "mean_loss": float(np.mean(losses))}
+        if args.fit_ki_with_motor_input:
+            row["best_K_i_so_far"] = float(best_x[0])
+            row["best_b_eq_so_far"] = float(best_x[1])
+            row["best_tau_eq_so_far"] = float(best_x[2])
+            print(
+                f"[gen {gen:03d}] best={min(losses):.6f} mean={float(np.mean(losses)):.6f} "
+                f"| best_params(K_i={best_x[0]:.8f}, b_eq={best_x[1]:.6f}, tau_eq={best_x[2]:.6f})"
+            )
+        else:
+            row["best_b_eq_so_far"] = float(best_x[0])
+            row["best_tau_eq_so_far"] = float(best_x[1])
+            print(
+                f"[gen {gen:03d}] best={min(losses):.6f} mean={float(np.mean(losses)):.6f} "
+                f"| best_params(b_eq={best_x[0]:.6f}, tau_eq={best_x[1]:.6f})"
+            )
+        progress_rows.append(row)
 
     progress_csv = args.outdir / "stage1_cmaes_progress.csv"
     with progress_csv.open("w", encoding="utf-8", newline="") as f:
-        wr = csv.DictWriter(
-            f,
-            fieldnames=["gen", "best_loss", "mean_loss", "best_b_eq_so_far", "best_tau_eq_so_far"],
-        )
+        fieldnames = ["gen", "best_loss", "mean_loss"]
+        if args.fit_ki_with_motor_input:
+            fieldnames += ["best_K_i_so_far", "best_b_eq_so_far", "best_tau_eq_so_far"]
+        else:
+            fieldnames += ["best_b_eq_so_far", "best_tau_eq_so_far"]
+        wr = csv.DictWriter(f, fieldnames=fieldnames)
         wr.writeheader()
         wr.writerows(progress_rows)
 
@@ -342,6 +392,7 @@ def main():
         base_params=base_params,
         w_theta=float(args.w_theta),
         w_omega=float(args.w_omega),
+        fit_ki_with_motor_input=bool(args.fit_ki_with_motor_input),
     )
     if len(theta_sim) >= 2 and len(primary_ds["t"]) >= 2:
         theta0 = float(theta_sim[0])
@@ -382,6 +433,7 @@ def main():
             ]
         )
         for i in range(len(primary_ds["t"])):
+            mi_a = float(np.asarray(primary_ds.get("motor_input", np.zeros_like(primary_ds["t"])), dtype=float)[i])
             wr.writerow(
                 [
                     primary_ds["t"][i],
@@ -395,8 +447,8 @@ def main():
                     alpha_sim[i],
                     0.0,
                     0.0,
-                    0.0,
-                    0.0,
+                    mi_a * 1000.0,
+                    mi_a * 1000.0,
                     0.0,
                     0.0,
                 ]
@@ -453,7 +505,12 @@ def main():
             {
                 "method": "cmaes_chrono_headless",
                 "best_loss": float(best_loss),
-                "best_params": {"b_eq": float(best_x[0]), "tau_eq": float(best_x[1])},
+                "mode": "actuation_with_K_i_fit" if args.fit_ki_with_motor_input else "free_decay_passive_fit",
+                "best_params": (
+                    {"K_i": float(best_x[0]), "b_eq": float(best_x[1]), "tau_eq": float(best_x[2])}
+                    if args.fit_ki_with_motor_input
+                    else {"b_eq": float(best_x[0]), "tau_eq": float(best_x[1])}
+                ),
                 "population_size": int(args.popsize),
                 "max_generations": int(args.max_generations),
                 "input_csvs": [str(p) for p in args.csv],
@@ -480,14 +537,19 @@ def main():
     update_model_parameter_json(
         path=args.model_parameter_json,
         cfg=cfg,
-        best_b=float(best_x[0]),
-        best_tau=float(best_x[1]),
+        best_b=float(best_x[1]) if args.fit_ki_with_motor_input else float(best_x[0]),
+        best_tau=float(best_x[2]) if args.fit_ki_with_motor_input else float(best_x[1]),
+        best_ki=float(best_x[0]) if args.fit_ki_with_motor_input else None,
         best_loss=float(best_loss),
         generations=int(args.max_generations),
         popsize=int(args.popsize),
         input_csvs=[str(p) for p in args.csv],
+        fit_ki_with_motor_input=bool(args.fit_ki_with_motor_input),
     )
-    print(f"[DONE] best b_eq={best_x[0]:.6f}, tau_eq={best_x[1]:.6f}, loss={best_loss:.6f}")
+    if args.fit_ki_with_motor_input:
+        print(f"[DONE] best K_i={best_x[0]:.8f}, b_eq={best_x[1]:.6f}, tau_eq={best_x[2]:.6f}, loss={best_loss:.6f}")
+    else:
+        print(f"[DONE] best b_eq={best_x[0]:.6f}, tau_eq={best_x[1]:.6f}, loss={best_loss:.6f}")
     print(f"[DONE] saved rollout: {out_csv}")
     print(f"[DONE] updated model-parameter json: {args.model_parameter_json}")
 
