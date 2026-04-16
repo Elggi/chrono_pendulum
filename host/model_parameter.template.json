@@ -1,0 +1,149 @@
+{
+  "version": 1,
+  "known": {
+    "mass_total_kg": 0.22,
+    "inertia_total_kgm2": 0.00666293085698,
+    "l_com_total_m": 0.15225390909090908,
+    "gravity_mps2": 9.81,
+    "r_imu_m": 0.249793
+  },
+  "torque_model": {
+    "motor": {
+      "enabled": true,
+      "equation": "tau_motor = K_i * I_filtered_A",
+      "params": {
+        "K_i": 1e-05
+      }
+    },
+    "resistance": {
+      "enabled": true,
+      "equation": "tau_res = b_eq*omega + tau_eq*tanh(omega/eps)",
+      "params": {
+        "b_eq": 0.01922636540411224,
+        "tau_eq": 0.014448922020706325,
+        "eps": 0.0005
+      }
+    },
+    "residual_terms": [
+      {
+        "feature": "1",
+        "coeff": 0.22808432755591324
+      },
+      {
+        "feature": "theta",
+        "coeff": 0.0021465993153691114
+      },
+      {
+        "feature": "omega",
+        "coeff": -0.019836563737018174
+      },
+      {
+        "feature": "sin_theta",
+        "coeff": -0.10321631763014008
+      },
+      {
+        "feature": "cos_theta",
+        "coeff": -0.2160034494715391
+      },
+      {
+        "feature": "theta2",
+        "coeff": 0.0001619245561325735
+      },
+      {
+        "feature": "omega2",
+        "coeff": 0.00018540923360411382
+      },
+      {
+        "feature": "motor_input",
+        "coeff": -0.025759684112668397
+      }
+    ]
+  },
+  "stage_outputs": {
+    "stage1": {
+      "method": "cmaes_chrono_headless",
+      "best_loss": 0.2968294914409915,
+      "best_params": {
+        "b_eq": 0.01922636540411224,
+        "tau_eq": 0.014448922020706325
+      },
+      "generations": 30,
+      "population_size": 16,
+      "input_csvs": [
+        "/home/kyudev/Documents/PEM/chrono_pendulum/host/run_logs/calibration_free_decay_1.csv",
+        "/home/kyudev/Documents/PEM/chrono_pendulum/host/run_logs/calibration_free_decay_2.csv",
+        "/home/kyudev/Documents/PEM/chrono_pendulum/host/run_logs/calibration_free_decay_3.csv",
+        "/home/kyudev/Documents/PEM/chrono_pendulum/host/run_logs/calibration_free_decay_4.csv"
+      ]
+    },
+    "stage2": {
+      "method": "greybox_residual_torque_sindy",
+      "source_csvs": [
+        "/home/kyudev/Desktop/chrono_pendulum_SINDy_FAIL/host/run_logs/chrono_run_1.finalized.csv",
+        "/home/kyudev/Desktop/chrono_pendulum_SINDy_FAIL/host/run_logs/chrono_run_2.finalized.csv"
+      ],
+      "feature_library": [
+        "1",
+        "theta",
+        "omega",
+        "sin_theta",
+        "cos_theta",
+        "theta2",
+        "omega2",
+        "motor_input"
+      ],
+      "optimizer": "pysindy.SINDy(STLSQ+IdentityLibrary)",
+      "equation": "tau_residual = 0.22808433*1 + 0.0021465993*theta + -0.019836564*omega + -0.10321632*sin_theta + -0.21600345*cos_theta + 0.00016192456*theta2 + 0.00018540923*omega2 + -0.025759684*motor_input",
+      "active_terms": [
+        {
+          "feature": "1",
+          "coeff": 0.22808432755591324
+        },
+        {
+          "feature": "theta",
+          "coeff": 0.0021465993153691114
+        },
+        {
+          "feature": "omega",
+          "coeff": -0.019836563737018174
+        },
+        {
+          "feature": "sin_theta",
+          "coeff": -0.10321631763014008
+        },
+        {
+          "feature": "cos_theta",
+          "coeff": -0.2160034494715391
+        },
+        {
+          "feature": "theta2",
+          "coeff": 0.0001619245561325735
+        },
+        {
+          "feature": "omega2",
+          "coeff": 0.00018540923360411382
+        },
+        {
+          "feature": "motor_input",
+          "coeff": -0.025759684112668397
+        }
+      ],
+      "metrics_overall": {
+        "rmse": 0.08377693932607574,
+        "r2": 0.7787640104035564
+      },
+      "metrics_per_trajectory": {
+        "chrono_run_1.finalized": {
+          "rmse": 0.11876184885023865,
+          "r2": 0.7551501547837131
+        },
+        "chrono_run_2.finalized": {
+          "rmse": 0.03121223117881965,
+          "r2": 0.5245875529764336
+        }
+      },
+      "timestamp_utc": "2026-04-16T06:05:55.335602+00:00"
+    },
+    "stage3": null
+  }
+}

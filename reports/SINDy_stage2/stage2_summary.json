@@ -1,0 +1,82 @@
+{
+  "method": "greybox_residual_torque_sindy",
+  "timestamp_utc": "2026-04-16T06:05:55.335786+00:00",
+  "source_csvs": [
+    "/home/kyudev/Desktop/chrono_pendulum_SINDy_FAIL/host/run_logs/chrono_run_1.finalized.csv",
+    "/home/kyudev/Desktop/chrono_pendulum_SINDy_FAIL/host/run_logs/chrono_run_2.finalized.csv"
+  ],
+  "feature_library": [
+    "1",
+    "theta",
+    "omega",
+    "sin_theta",
+    "cos_theta",
+    "theta2",
+    "omega2",
+    "motor_input"
+  ],
+  "optimizer": "pysindy.SINDy(STLSQ+IdentityLibrary)",
+  "active_terms": [
+    {
+      "feature": "1",
+      "coeff": 0.22808432755591324
+    },
+    {
+      "feature": "theta",
+      "coeff": 0.0021465993153691114
+    },
+    {
+      "feature": "omega",
+      "coeff": -0.019836563737018174
+    },
+    {
+      "feature": "sin_theta",
+      "coeff": -0.10321631763014008
+    },
+    {
+      "feature": "cos_theta",
+      "coeff": -0.2160034494715391
+    },
+    {
+      "feature": "theta2",
+      "coeff": 0.0001619245561325735
+    },
+    {
+      "feature": "omega2",
+      "coeff": 0.00018540923360411382
+    },
+    {
+      "feature": "motor_input",
+      "coeff": -0.025759684112668397
+    }
+  ],
+  "equation": "tau_residual = 0.22808433*1 + 0.0021465993*theta + -0.019836564*omega + -0.10321632*sin_theta + -0.21600345*cos_theta + 0.00016192456*theta2 + 0.00018540923*omega2 + -0.025759684*motor_input",
+  "metrics_overall": {
+    "rmse": 0.08377693932607574,
+    "r2": 0.7787640104035564
+  },
+  "metrics_per_trajectory": {
+    "chrono_run_1.finalized": {
+      "rmse": 0.11876184885023865,
+      "r2": 0.7551501547837131
+    },
+    "chrono_run_2.finalized": {
+      "rmse": 0.03121223117881965,
+      "r2": 0.5245875529764336
+    }
+  },
+  "model_parameter_json": "/home/kyudev/Desktop/chrono_pendulum_SINDy_FAIL/host/model_parameter.template.json",
+  "output_equation_txt": "/home/kyudev/Desktop/chrono_pendulum_SINDy_FAIL/host/../reports/SINDy_stage2/stage2_equation.txt",
+  "output_coeff_csv": "/home/kyudev/Desktop/chrono_pendulum_SINDy_FAIL/host/../reports/SINDy_stage2/stage2_coefficients.csv",
+  "output_overlay_csv": "/home/kyudev/Desktop/chrono_pendulum_SINDy_FAIL/host/../reports/SINDy_stage2/stage2_overlay.csv",
+  "output_overlay_per_trajectory": {
+    "chrono_run_1.finalized": {
+      "overlay_csv": "/home/kyudev/Desktop/chrono_pendulum_SINDy_FAIL/host/../reports/SINDy_stage2/stage2_overlay_chrono_run_1.finalized.csv",
+      "overlay_png": "/home/kyudev/Desktop/chrono_pendulum_SINDy_FAIL/host/../reports/SINDy_stage2/stage2_overlay_chrono_run_1.finalized.png"
+    },
+    "chrono_run_2.finalized": {
+      "overlay_csv": "/home/kyudev/Desktop/chrono_pendulum_SINDy_FAIL/host/../reports/SINDy_stage2/stage2_overlay_chrono_run_2.finalized.csv",
+      "overlay_png": "/home/kyudev/Desktop/chrono_pendulum_SINDy_FAIL/host/../reports/SINDy_stage2/stage2_overlay_chrono_run_2.finalized.png"
+    }
+  }
+}

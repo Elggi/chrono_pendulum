@@ -1,0 +1,32 @@
+{
+  "method": "cmaes_chrono_headless",
+  "best_loss": 0.2968294914409915,
+  "best_params": {
+    "b_eq": 0.01922636540411224,
+    "tau_eq": 0.014448922020706325
+  },
+  "population_size": 16,
+  "max_generations": 30,
+  "input_csvs": [
+    "/home/kyudev/Documents/PEM/chrono_pendulum/host/run_logs/calibration_free_decay_1.csv",
+    "/home/kyudev/Documents/PEM/chrono_pendulum/host/run_logs/calibration_free_decay_2.csv",
+    "/home/kyudev/Documents/PEM/chrono_pendulum/host/run_logs/calibration_free_decay_3.csv",
+    "/home/kyudev/Documents/PEM/chrono_pendulum/host/run_logs/calibration_free_decay_4.csv"
+  ],
+  "num_trajectories": 4,
+  "parallel_workers": 8,
+  "headless_chrono": true,
+  "loss_type": "weighted_rmse",
+  "loss_weights": {
+    "w_theta": 1.0,
+    "w_omega": 0.1
+  },
+  "preprocess": {
+    "tail_theta_abs_deg": 0.8,
+    "tail_omega_abs": 0.25,
+    "tail_hold_sec": 0.8
+  },
+  "output_rollout_csv": "/home/kyudev/Documents/PEM/chrono_pendulum/host/../reports/Stage1_CMAES/stage1_cmaes_rollout.csv",
+  "output_progress_csv": "/home/kyudev/Documents/PEM/chrono_pendulum/host/../reports/Stage1_CMAES/stage1_cmaes_progress.csv",
+  "output_progress_png": "/home/kyudev/Documents/PEM/chrono_pendulum/host/../reports/Stage1_CMAES/stage1_cmaes_progress.png"
+}
