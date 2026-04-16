@@ -63,12 +63,15 @@ def known_params_from_model_json(model_data: dict[str, Any] | None, cfg: BridgeC
 
 @dataclass
 class ResidualTarget:
+    alpha_measured: np.ndarray
+    alpha_known: np.ndarray
+    alpha_residual_target: np.ndarray
     tau_total_target: np.ndarray
     tau_motor: np.ndarray
     tau_gravity: np.ndarray
     tau_visc: np.ndarray
     tau_coul: np.ndarray
-    tau_residual_target: np.ndarray
+    tau_residual_target_equiv: np.ndarray
 
 
 def build_residual_target(traj: Stage2Trajectory, p: KnownParams) -> ResidualTarget:
@@ -82,14 +85,20 @@ def build_residual_target(traj: Stage2Trajectory, p: KnownParams) -> ResidualTar
     tau_gravity = float(p.m_total * p.g * p.l_com) * np.sin(theta)
     tau_visc = float(p.b_eq) * omega
     tau_coul = float(p.tau_eq) * np.tanh(omega / float(p.eps))
-    tau_residual_target = tau_motor - tau_gravity - tau_visc - tau_coul - tau_total
+    alpha_known = (tau_motor - tau_gravity - tau_visc - tau_coul) / max(float(p.j_total), 1e-12)
+    alpha_residual_target = alpha - alpha_known
+    # With J*alpha = ... - tau_residual, residual-acceleration maps to torque as:
+    # tau_residual = -J * alpha_residual.
+    tau_residual_target_equiv = -float(p.j_total) * alpha_residual_target
 
     return ResidualTarget(
+        alpha_measured=alpha,
+        alpha_known=alpha_known,
+        alpha_residual_target=alpha_residual_target,
         tau_total_target=tau_total,
         tau_motor=tau_motor,
         tau_gravity=tau_gravity,
         tau_visc=tau_visc,
         tau_coul=tau_coul,
-        tau_residual_target=tau_residual_target,
+        tau_residual_target_equiv=tau_residual_target_equiv,
     )
-

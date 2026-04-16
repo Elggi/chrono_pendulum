@@ -75,7 +75,8 @@ FEATURE_REGISTRY: dict[str, FeatureFn] = {
     "motor_input": _motor_input,
 }
 
-DEFAULT_FEATURES = ["1", "theta", "omega", "sin_theta", "cos_theta", "theta2", "omega2", "motor_input"]
+# Conservative default library for rollout-safe Stage2 (derivative-based residual dynamics).
+DEFAULT_FEATURES = ["omega", "motor_input", "omega2", "theta"]
 
 
 @dataclass
@@ -103,4 +104,3 @@ def build_feature_matrix(
         raise ValueError("No feature columns selected")
     phi = np.column_stack(cols).astype(float)
     return FeatureMatrix(names=names, phi=phi)
-

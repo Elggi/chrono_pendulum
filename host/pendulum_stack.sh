@@ -12,6 +12,7 @@ export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 BASE_DIR="$SCRIPT_DIR"
 CSV_DIR="$BASE_DIR/run_logs"
 REPORTS_STAGE1_DIR="$BASE_DIR/../reports/Stage1_CMAES"
+REPORTS_STAGE2_DIR="$BASE_DIR/../reports/SINDy_stage2"
 
 # ======================================================
 # 유틸
@@ -25,7 +26,7 @@ select_csv_file() {
     echo "--------------------------------" >&2
     echo "[INFO] CSV 파일 선택" >&2
 
-    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results" "$REPORTS_STAGE1_DIR")
+    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results" "$REPORTS_STAGE1_DIR" "$REPORTS_STAGE2_DIR")
     local files=()
     local d
     for d in "${search_dirs[@]}"; do
@@ -59,7 +60,7 @@ select_csv_files_multi() {
     echo "--------------------------------" >&2
     echo "[INFO] 학습용 CSV 파일들 선택 (복수 선택 가능)" >&2
 
-    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results" "$REPORTS_STAGE1_DIR")
+    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results" "$REPORTS_STAGE1_DIR" "$REPORTS_STAGE2_DIR")
     local files=()
     local d
     for d in "${search_dirs[@]}"; do
@@ -158,7 +159,7 @@ select_plot_csv_file() {
     echo "--------------------------------" >&2
     echo "[INFO] Plot 가능한 CSV 선택 (chrono/replay 형식만 표시)" >&2
 
-    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results" "$REPORTS_STAGE1_DIR")
+    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results" "$REPORTS_STAGE1_DIR" "$REPORTS_STAGE2_DIR")
     local files=()
     local d
     for d in "${search_dirs[@]}"; do
@@ -374,8 +375,8 @@ run_stage2_sindy_identification() {
     outdir=${outdir:-$BASE_DIR/../reports/SINDy_stage2}
     read -p "sparsity threshold [1e-4]: " threshold
     threshold=${threshold:-1e-4}
-    read -p "feature set (comma-separated) [1,theta,omega,sin_theta,cos_theta,theta2,omega2,motor_input]: " feature_set
-    feature_set=${feature_set:-1,theta,omega,sin_theta,cos_theta,theta2,omega2,motor_input}
+    read -p "feature set (comma-separated) [omega,motor_input,omega2,theta]: " feature_set
+    feature_set=${feature_set:-omega,motor_input,omega2,theta}
     local csv_args=("${selected_csvs[@]}")
     cmd=(python3 "$BASE_DIR/stage2_sindy_entry.py" --csv "${csv_args[@]}" --model-parameter-json "$model_param_json" --outdir "$outdir" --threshold "$threshold" --features "$feature_set")
     echo "[INFO] command: ${cmd[*]}"
