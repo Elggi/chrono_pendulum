@@ -226,7 +226,7 @@ def parameter_bounds(cfg: BridgeConfig) -> dict[str, tuple[float, float]]:
 
 def build_param_tensors(cfg: BridgeConfig) -> dict[str, torch.nn.Parameter]:
     return {
-        "K_u": torch.nn.Parameter(torch.tensor(float(cfg.K_u_init), dtype=torch.float64)),
+        "K_u": torch.nn.Parameter(torch.tensor(float(cfg.K_i_init), dtype=torch.float64)),
         "l_com": torch.nn.Parameter(torch.tensor(float(cfg.l_com_init), dtype=torch.float64)),
         "b_eq": torch.nn.Parameter(torch.tensor(float(cfg.b_eq_init), dtype=torch.float64)),
         "tau_eq": torch.nn.Parameter(torch.tensor(float(cfg.tau_eq_init), dtype=torch.float64)),
