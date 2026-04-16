@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "known": {},
+  "torque_model": {
+    "motor": {
+      "enabled": true,
+      "equation": "tau_motor = K_i * I_filtered_A",
+      "params": {}
+    },
+    "resistance": {
+      "enabled": true,
+      "equation": "tau_res = b_eq*omega + tau_eq*tanh(omega/eps)",
+      "params": {}
+    },
+    "residual_terms": []
+  },
+  "stage_outputs": {
+    "stage1": null,
+    "stage2": null,
+    "stage3": null
+  }
+}
