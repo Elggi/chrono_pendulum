@@ -82,7 +82,7 @@ def build_residual_target(traj: Stage2Trajectory, p: KnownParams) -> ResidualTar
     tau_gravity = float(p.m_total * p.g * p.l_com) * np.sin(theta)
     tau_visc = float(p.b_eq) * omega
     tau_coul = float(p.tau_eq) * np.tanh(omega / float(p.eps))
-    tau_residual_target = tau_motor - tau_gravity - tau_visc - tau_coul - tau_total
+    tau_residual_target = tau_total + tau_gravity + tau_visc + tau_coul - tau_motor
 
     return ResidualTarget(
         tau_total_target=tau_total,
@@ -92,4 +92,3 @@ def build_residual_target(traj: Stage2Trajectory, p: KnownParams) -> ResidualTar
         tau_coul=tau_coul,
         tau_residual_target=tau_residual_target,
     )
-
