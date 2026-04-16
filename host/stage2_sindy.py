@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 
 from chrono_core.config import BridgeConfig
+from chrono_core.dynamics import PendulumModel, compute_model_torque_and_electrics
 from chrono_core.model_parameter_io import load_model_parameter_json
 from stage2_dataset import Stage2Trajectory, load_trajectories
 from stage2_feature_map import DEFAULT_FEATURES, build_feature_matrix
@@ -112,6 +113,34 @@ def _equation_string(names: list[str], coefs: np.ndarray, precision: int = 6) ->
     return "tau_residual = " + (" + ".join(terms) if terms else "0")
 
 
+def evaluate_residual_torque(theta: float, omega: float, motor_input: float, active_terms: list[dict[str, float]], eps: float) -> float:
+    th = float(theta)
+    om = float(omega)
+    mi = float(motor_input)
+    teps = max(float(eps), 1e-9)
+    out = 0.0
+    for term in active_terms:
+        feat = str(term.get("feature", ""))
+        c = float(term.get("coeff", 0.0))
+        if feat == "motor_input":
+            out += c * mi
+        elif feat == "theta":
+            out += c * th
+        elif feat == "omega":
+            out += c * om
+        elif feat == "theta2":
+            out += c * (th ** 2)
+        elif feat == "omega2":
+            out += c * (om ** 2)
+        elif feat == "sin_theta":
+            out += c * float(np.sin(th))
+        elif feat == "tanh_omega_eps":
+            out += c * float(np.tanh(om / teps))
+        elif feat == "motor_input_omega":
+            out += c * (mi * om)
+    return float(out)
+
+
 @dataclass
 class Stage2Metrics:
     rmse: float
@@ -136,10 +165,77 @@ class Stage2Result:
     output_overlay_per_trajectory: dict[str, dict[str, str]]
 
 
+def _rollout_identified_trajectory(
+    tr: Stage2Trajectory,
+    *,
+    cfg: BridgeConfig,
+    known: Any,
+    residual_terms: list[dict[str, float]],
+) -> dict[str, np.ndarray]:
+    n = len(tr.t)
+    model = PendulumModel(cfg)
+    model.set_theta_kinematic(float(tr.theta[0]), float(tr.omega[0]))
+    p = {
+        "K_i": float(known.K_i),
+        "b_eq": float(known.b_eq),
+        "tau_eq": float(known.tau_eq),
+        "residual_terms": list(residual_terms),
+    }
+    theta_sim = np.zeros(n, dtype=float)
+    omega_sim = np.zeros(n, dtype=float)
+    tau_motor_sim = np.zeros(n, dtype=float)
+    tau_visc_sim = np.zeros(n, dtype=float)
+    tau_coul_sim = np.zeros(n, dtype=float)
+    tau_residual_sim = np.zeros(n, dtype=float)
+    tau_res_sim = np.zeros(n, dtype=float)
+    tau_net_sim = np.zeros(n, dtype=float)
+
+    for k in range(n):
+        out = compute_model_torque_and_electrics(
+            motor_input=float(tr.motor_input_a[k]),
+            theta=model.get_theta(),
+            omega=model.get_omega(),
+            bus_v=float("nan"),
+            p=p,
+            cfg=cfg,
+            cmd_u_for_duty=0.0,
+        )
+        theta_sim[k] = float(model.get_theta())
+        omega_sim[k] = float(model.get_omega())
+        tau_motor_sim[k] = float(out["tau_motor"])
+        tau_visc_sim[k] = float(out["tau_visc"])
+        tau_coul_sim[k] = float(out["tau_coul"])
+        tau_residual_sim[k] = float(out["tau_residual"])
+        tau_res_sim[k] = float(out["tau_res"])
+        tau_net_sim[k] = float(out["tau_net"])
+        if k < n - 1:
+            dt = float(max(tr.t[k + 1] - tr.t[k], cfg.step))
+            model.apply_torque(out["tau_net"])
+            model.step(dt)
+
+    dt = np.diff(tr.t, prepend=tr.t[0])
+    if len(dt) > 1:
+        dt[0] = dt[1]
+    dt = np.maximum(dt, 1e-6)
+    alpha_sim = np.gradient(omega_sim, dt)
+    return {
+        "theta_sim": theta_sim,
+        "omega_sim": omega_sim,
+        "alpha_sim": alpha_sim,
+        "tau_motor_sim": tau_motor_sim,
+        "tau_visc_sim": tau_visc_sim,
+        "tau_coul_sim": tau_coul_sim,
+        "tau_residual_sim": tau_residual_sim,
+        "tau_res_sim": tau_res_sim,
+        "tau_net_sim": tau_net_sim,
+    }
+
+
 def run_stage2(
     *,
     csv_paths: list[Path],
     model_parameter_json: Path,
+    latest_model_parameter_json: Path,
     outdir: Path,
     features: list[str],
     threshold: float,
@@ -160,6 +256,14 @@ def run_stage2(
         model_data = {}
     cfg = BridgeConfig()
     known = known_params_from_model_json(model_data, cfg)
+    print("[Stage2] residual target torque model:")
+    print("[Stage2]   tau_residual_target = tau_total + tau_gravity + tau_visc + tau_coul - tau_motor")
+    print(f"[Stage2]   tau_motor = K_i * I_filtered_A, K_i={known.K_i:.9g}")
+    print(f"[Stage2]   tau_gravity = m_total * g * l_com * sin(theta), m_total={known.m_total:.9g}, g={known.g:.9g}, l_com={known.l_com:.9g}")
+    print(f"[Stage2]   tau_visc = b_eq * omega, b_eq={known.b_eq:.9g}")
+    print(f"[Stage2]   tau_coul = tau_eq * tanh(omega/eps), tau_eq={known.tau_eq:.9g}, eps={known.eps:.9g}")
+    print(f"[Stage2]   tau_total = J_total * alpha, J_total={known.j_total:.9g}")
+    print("[Stage2]   NOTE: feature 'motor_input' means measured input current [A].")
 
     phis = []
     ys = []
@@ -168,7 +272,7 @@ def run_stage2(
     overlay_artifacts: dict[str, dict[str, str]] = {}
     for tr in trajs:
         rt = build_residual_target(tr, known)
-        fm = build_feature_matrix(tr.theta, tr.omega, tr.motor_input_a, features)
+        fm = build_feature_matrix(tr.theta, tr.omega, tr.motor_input_a, features, eps=known.eps)
         phis.append(fm.phi)
         ys.append(rt.tau_residual_target)
         per_traj[tr.name] = {
@@ -180,16 +284,42 @@ def run_stage2(
 
     phi_all = np.vstack(phis)
     y_all = np.concatenate(ys)
-    coefs, optimizer_name = _fit_sparse(
-        phi_all,
-        y_all,
-        threshold=float(threshold),
-        feature_names=names,
-        phi_trajs=phis,
-        y_trajs=ys,
-    )
+    if any(str(f).strip() == "1" for f in names):
+        raise ValueError("Stage2 disallows constant feature '1'. Remove it from --features.")
+    n_all = len(y_all)
+    idx = np.arange(n_all, dtype=int)
+    tr_idx = idx[idx % 2 == 0]
+    va_idx = idx[idx % 2 == 1]
+    if len(va_idx) < 4:
+        tr_idx = idx
+        va_idx = idx
+    threshold_grid = sorted(set([max(float(threshold) / 10.0, 1e-8), float(threshold), float(threshold) * 10.0]))
+    candidate_rows: list[dict[str, float | int | str]] = []
+    best = None
+    for th in threshold_grid:
+        coef_i, opt_i = _fit_sparse(phi_all[tr_idx], y_all[tr_idx], threshold=th, feature_names=names)
+        yhat_va = phi_all[va_idx] @ coef_i
+        rmse_va = _rmse(y_all[va_idx], yhat_va)
+        active_n = int(np.sum(np.abs(coef_i) >= 1e-12))
+        rank_key = (rmse_va, active_n)
+        candidate_rows.append(
+            {
+                "threshold": float(th),
+                "optimizer": str(opt_i),
+                "rmse_validation": float(rmse_va),
+                "active_terms": int(active_n),
+            }
+        )
+        if best is None or rank_key < best["rank_key"]:
+            best = {"rank_key": rank_key, "coef": coef_i, "optimizer": opt_i, "threshold": float(th)}
+    assert best is not None
+    coefs = np.asarray(best["coef"], dtype=float)
+    optimizer_name = str(best["optimizer"])
+    selected_threshold = float(best["threshold"])
     yhat_all = phi_all @ coefs
     print(f"[Stage2] optimizer_used: {optimizer_name}")
+    print(f"[Stage2] selected_threshold: {selected_threshold}")
+    identified_terms = [{"feature": str(n), "coeff": float(c)} for n, c in zip(names, coefs) if abs(float(c)) >= 1e-12]
 
     metrics_per: dict[str, Stage2Metrics] = {}
     for name, rec in per_traj.items():
@@ -197,6 +327,12 @@ def run_stage2(
         yhat = rec["phi"] @ coefs
         metrics_per[name] = Stage2Metrics(rmse=_rmse(y, yhat), r2=_r2(y, yhat))
         tr = rec["traj"]
+        sim_rollout = _rollout_identified_trajectory(
+            tr,
+            cfg=cfg,
+            known=known,
+            residual_terms=identified_terms,
+        )
         traj_rows: list[dict[str, float | str]] = []
         for i in range(len(tr.t)):
             row = {
@@ -204,9 +340,19 @@ def run_stage2(
                 "t": float(tr.t[i]),
                 "tau_residual_target": float(y[i]),
                 "tau_residual_pred": float(yhat[i]),
-                "theta": float(tr.theta[i]),
-                "omega": float(tr.omega[i]),
+                "theta_real": float(tr.theta[i]),
+                "theta_sim": float(sim_rollout["theta_sim"][i]),
+                "omega_real": float(tr.omega[i]),
+                "omega_sim": float(sim_rollout["omega_sim"][i]),
+                "alpha_real": float(tr.alpha[i]),
+                "alpha_sim": float(sim_rollout["alpha_sim"][i]),
                 "motor_input_a": float(tr.motor_input_a[i]),
+                "tau_motor_sim": float(sim_rollout["tau_motor_sim"][i]),
+                "tau_visc_sim": float(sim_rollout["tau_visc_sim"][i]),
+                "tau_coul_sim": float(sim_rollout["tau_coul_sim"][i]),
+                "tau_residual_sim": float(sim_rollout["tau_residual_sim"][i]),
+                "tau_res_sim": float(sim_rollout["tau_res_sim"][i]),
+                "tau_net_sim": float(sim_rollout["tau_net_sim"][i]),
             }
             overlay_rows.append(row)
             traj_rows.append(row)
@@ -221,18 +367,23 @@ def run_stage2(
         try:
             import matplotlib.pyplot as plt
 
-            fig, axs = plt.subplots(2, 1, figsize=(9, 6), sharex=True)
+            fig, axs = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
             axs[0].plot(tr.t, y, label="tau_residual_target")
             axs[0].plot(tr.t, yhat, label="tau_residual_pred")
             axs[0].set_ylabel("tau_residual [Nm]")
             axs[0].grid(alpha=0.25)
             axs[0].legend()
-            axs[1].plot(tr.t, tr.theta, label="theta")
-            axs[1].plot(tr.t, tr.omega, label="omega")
-            axs[1].set_xlabel("time [s]")
-            axs[1].set_ylabel("state")
+            axs[1].plot(tr.t, tr.theta, label="theta_real")
+            axs[1].plot(tr.t, sim_rollout["theta_sim"], label="theta_sim")
+            axs[1].set_ylabel("theta [rad]")
             axs[1].grid(alpha=0.25)
             axs[1].legend()
+            axs[2].plot(tr.t, tr.omega, label="omega_real")
+            axs[2].plot(tr.t, sim_rollout["omega_sim"], label="omega_sim")
+            axs[2].set_xlabel("time [s]")
+            axs[2].set_ylabel("omega [rad/s]")
+            axs[2].grid(alpha=0.25)
+            axs[2].legend()
             fig.tight_layout()
             fig.savefig(per_png, dpi=160)
             plt.close(fig)
@@ -245,10 +396,7 @@ def run_stage2(
             "overlay_png": str(per_png),
         }
 
-    active_terms = []
-    for n, c in zip(names, coefs):
-        if abs(float(c)) >= 1e-12:
-            active_terms.append({"feature": str(n), "coeff": float(c)})
+    active_terms = list(identified_terms)
 
     eq = _equation_string(names, coefs, precision=8)
     overall = Stage2Metrics(rmse=_rmse(y_all, yhat_all), r2=_r2(y_all, yhat_all))
@@ -264,6 +412,12 @@ def run_stage2(
         for n, c in zip(names, coefs):
             wr.writerow([n, float(c), int(abs(float(c)) >= 1e-12)])
 
+    candidate_csv = outdir / "stage2_candidate_models.csv"
+    with candidate_csv.open("w", encoding="utf-8", newline="") as f:
+        wr = csv.DictWriter(f, fieldnames=["threshold", "optimizer", "rmse_validation", "active_terms"])
+        wr.writeheader()
+        wr.writerows(candidate_rows)
+
     overlay_csv = outdir / "stage2_overlay.csv"
     with overlay_csv.open("w", encoding="utf-8", newline="") as f:
         wr = csv.DictWriter(f, fieldnames=list(overlay_rows[0].keys()))
@@ -272,6 +426,38 @@ def run_stage2(
 
     eq_txt = outdir / "stage2_equation.txt"
     eq_txt.write_text(eq + "\n", encoding="utf-8")
+    residual_eq_txt = outdir / "residual_torque_equation.txt"
+    residual_eq_txt.write_text(eq + "\n", encoding="utf-8")
+
+    feature_ranges: dict[str, dict[str, float]] = {}
+    torque_contribution_ranges: dict[str, dict[str, float]] = {}
+    for j, name in enumerate(names):
+        col = phi_all[:, j]
+        feature_ranges[name] = {"min": float(np.nanmin(col)), "max": float(np.nanmax(col))}
+        contrib = float(coefs[j]) * col
+        torque_contribution_ranges[name] = {
+            "min": float(np.nanmin(contrib)),
+            "max": float(np.nanmax(contrib)),
+            "max_abs": float(np.nanmax(np.abs(contrib))),
+        }
+    active_abs = [v["max_abs"] for k, v in torque_contribution_ranges.items() if abs(float(dict(zip(names, coefs))[k])) >= 1e-12]
+    med_abs = float(np.median(active_abs)) if active_abs else 0.0
+    dominance_warnings = []
+    if med_abs > 0.0:
+        for n, v in torque_contribution_ranges.items():
+            if v["max_abs"] > 5.0 * med_abs:
+                msg = f"term '{n}' dominates: max_abs={v['max_abs']:.6g} (>5x median {med_abs:.6g})"
+                dominance_warnings.append(msg)
+                print(f"[Stage2][WARN] {msg}")
+
+    residual_fit_csv = outdir / "residual_torque_fit.csv"
+    with residual_fit_csv.open("w", encoding="utf-8", newline="") as f:
+        wr = csv.DictWriter(f, fieldnames=list(overlay_rows[0].keys()))
+        wr.writeheader()
+        wr.writerows(overlay_rows)
+
+    residual_model_json = outdir / "residual_torque_model.json"
+    residual_diag_json = outdir / "residual_torque_diagnostics.json"
 
     # Update model_parameter.json as canonical registry
     model_data.setdefault("version", 1)
@@ -289,18 +475,24 @@ def run_stage2(
         "source_csvs": [str(p) for p in csv_paths],
         "feature_library": list(features),
         "optimizer": optimizer_name,
+        "threshold": float(selected_threshold),
         "equation": eq,
         "active_terms": active_terms,
         "metrics_overall": asdict(overall),
         "metrics_per_trajectory": {k: asdict(v) for k, v in metrics_per.items()},
+        "feature_ranges": feature_ranges,
+        "torque_contribution_ranges": torque_contribution_ranges,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
     }
     model_data["stage_outputs"].setdefault("stage1", None)
     model_data["stage_outputs"].setdefault("stage3", None)
-    model_parameter_json.write_text(json.dumps(model_data, indent=2, ensure_ascii=False), encoding="utf-8")
+    payload = json.dumps(model_data, indent=2, ensure_ascii=False)
+    model_parameter_json.write_text(payload, encoding="utf-8")
+    latest_model_parameter_json.write_text(payload, encoding="utf-8")
     print("[Stage2] updated model_parameter.json:")
     print(f"[Stage2]   torque_model.residual_terms <- {active_terms}")
     print(f"[Stage2]   stage_outputs.stage2.method <- greybox_residual_torque_sindy")
+    print(f"[Stage2]   latest synchronized <- {latest_model_parameter_json}")
 
     result = Stage2Result(
         method="greybox_residual_torque_sindy",
@@ -322,10 +514,42 @@ def run_stage2(
     print(f"[Stage2]   equation_txt: {eq_txt}")
     print(f"[Stage2]   coefficients_csv: {coeff_csv}")
     print(f"[Stage2]   overlay_csv_combined: {overlay_csv}")
+    print(f"[Stage2]   candidate_models_csv: {candidate_csv}")
+    print(f"[Stage2]   residual_model_json: {residual_model_json}")
+    print(f"[Stage2]   residual_diagnostics_json: {residual_diag_json}")
     for name, paths in overlay_artifacts.items():
         print(f"[Stage2]   overlay[{name}].csv: {paths.get('overlay_csv', '')}")
         print(f"[Stage2]   overlay[{name}].png: {paths.get('overlay_png', '')}")
     print("[Stage2] ===============================================")
+
+    residual_payload = {
+        "feature_library": list(features),
+        "optimizer": optimizer_name,
+        "threshold": float(selected_threshold),
+        "active_terms": active_terms,
+        "equation": eq,
+        "metrics_overall": asdict(overall),
+        "metrics_per_trajectory": {k: asdict(v) for k, v in metrics_per.items()},
+        "feature_ranges": feature_ranges,
+        "torque_contribution_ranges": torque_contribution_ranges,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    residual_model_json.write_text(json.dumps(residual_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    residual_diag_json.write_text(
+        json.dumps(
+            {
+                "candidate_models": candidate_rows,
+                "dominance_warnings": dominance_warnings,
+                "sanity_report": {
+                    "median_active_term_max_abs_torque": med_abs,
+                    "num_warnings": len(dominance_warnings),
+                },
+            },
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     return result
 
 
