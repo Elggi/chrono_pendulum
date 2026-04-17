@@ -19,21 +19,224 @@
       "enabled": true,
       "equation": "tau_res = b_eq*omega + tau_eq*tanh(omega/eps)",
       "params": {
-        "b_eq": 0.0,
-        "tau_eq": 0.0,
-        "eps": 0.0005
+        "b_eq": 0.027845782677776282,
+        "tau_eq": 0.00044179169191864464,
+        "eps": 1e-09
       }
     },
     "residual_terms": [
       {
         "feature": "motor_input",
-        "coeff": 0.0
+        "coeff": -0.6630732280144563
+      },
+      {
+        "feature": "theta",
+        "coeff": 0.01070782316050836
+      },
+      {
+        "feature": "omega",
+        "coeff": 0.031548970971800525
+      },
+      {
+        "feature": "theta2",
+        "coeff": 0.0008923259002158205
+      },
+      {
+        "feature": "omega2",
+        "coeff": 0.000478115378306101
+      },
+      {
+        "feature": "sin_theta",
+        "coeff": 0.24495947151313627
+      },
+      {
+        "feature": "tanh_omega_eps",
+        "coeff": -0.029386175076257525
+      },
+      {
+        "feature": "motor_input_omega",
+        "coeff": -0.033139272660682347
       }
     ]
   },
   "stage_outputs": {
-    "stage1": null,
-    "stage2": null,
+    "stage1": {
+      "method": "cmaes_chrono_headless",
+      "best_loss": 0.5159496978450074,
+      "best_params": {
+        "b_eq": 0.027845782677776282,
+        "tau_eq": 0.00044179169191864464
+      },
+      "generations": 30,
+      "population_size": 16,
+      "input_csvs": [
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_10.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_11.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_12.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_13.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_14.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_15.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_16.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_17.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_18.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_19.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_1.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_20.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_21.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_22.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_23.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_24.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_2.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_3.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_4.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_5.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_6.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_7.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_8.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_9.csv"
+      ]
+    },
+    "stage2": {
+      "method": "greybox_residual_torque_sindy",
+      "target_mode": "greybox",
+      "source_csvs": [
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/chrono_run_1.finalized.csv"
+      ],
+      "feature_library": [
+        "motor_input",
+        "theta",
+        "omega",
+        "theta2",
+        "omega2",
+        "sin_theta",
+        "tanh_omega_eps",
+        "motor_input_omega"
+      ],
+      "optimizer": "pysindy.SINDy(STLSQ+IdentityLibrary)",
+      "threshold": 1e-05,
+      "equation": "tau_residual = -0.66307323*motor_input + 0.010707823*theta + 0.031548971*omega + 0.0008923259*theta2 + 0.00047811538*omega2 + 0.24495947*sin_theta + -0.029386175*tanh_omega_eps + -0.033139273*motor_input_omega",
+      "active_terms": [
+        {
+          "feature": "motor_input",
+          "coeff": -0.6630732280144563
+        },
+        {
+          "feature": "theta",
+          "coeff": 0.01070782316050836
+        },
+        {
+          "feature": "omega",
+          "coeff": 0.031548970971800525
+        },
+        {
+          "feature": "theta2",
+          "coeff": 0.0008923259002158205
+        },
+        {
+          "feature": "omega2",
+          "coeff": 0.000478115378306101
+        },
+        {
+          "feature": "sin_theta",
+          "coeff": 0.24495947151313627
+        },
+        {
+          "feature": "tanh_omega_eps",
+          "coeff": -0.029386175076257525
+        },
+        {
+          "feature": "motor_input_omega",
+          "coeff": -0.033139272660682347
+        }
+      ],
+      "metrics_overall": {
+        "rmse": 0.1115507778581357,
+        "r2": 0.8779733193237961
+      },
+      "metrics_per_trajectory": {
+        "chrono_run_1.finalized": {
+          "rmse": 0.1115507778581357,
+          "r2": 0.8779733193237961
+        }
+      },
+      "feature_ranges": {
+        "motor_input": {
+          "min": 0.0,
+          "max": 1.0992224852925694
+        },
+        "theta": {
+          "min": -18.722338214150312,
+          "max": 1.571515574793929
+        },
+        "omega": {
+          "min": -17.595263016282523,
+          "max": 8.219294417873996
+        },
+        "theta2": {
+          "min": 0.0019960755331205225,
+          "max": 350.5259482050331
+        },
+        "omega2": {
+          "min": 2.2493708860698866e-06,
+          "max": 309.59328061215956
+        },
+        "sin_theta": {
+          "min": -0.9999366132133152,
+          "max": 0.9999999191929496
+        },
+        "tanh_omega_eps": {
+          "min": -1.0,
+          "max": 1.0
+        },
+        "motor_input_omega": {
+          "min": -12.768786293308231,
+          "max": 3.0309112165962075e-06
+        }
+      },
+      "torque_contribution_ranges": {
+        "motor_input": {
+          "min": -0.7288650016290172,
+          "max": -0.0,
+          "max_abs": 0.7288650016290172
+        },
+        "theta": {
+          "min": -0.20047548674834945,
+          "max": 0.01682751086887804,
+          "max_abs": 0.20047548674834945
+        },
+        "omega": {
+          "min": -0.5551124421418927,
+          "max": 0.2593102809981888,
+          "max_abs": 0.5551124421418927
+        },
+        "theta2": {
+          "min": 1.7811498969905442e-06,
+          "max": 0.31278338228106023,
+          "max_abs": 0.31278338228106023
+        },
+        "omega2": {
+          "min": 1.0754588121440335e-09,
+          "max": 0.14802130848090955,
+          "max_abs": 0.14802130848090955
+        },
+        "sin_theta": {
+          "min": -0.24494394431936903,
+          "max": 0.2449594517186839,
+          "max_abs": 0.2449594517186839
+        },
+        "tanh_omega_eps": {
+          "min": -0.029386175076257525,
+          "max": 0.029386175076257525,
+          "max_abs": 0.029386175076257525
+        },
+        "motor_input_omega": {
+          "min": -1.0044219321710217e-07,
+          "max": 0.423148290519925,
+          "max_abs": 0.423148290519925
+        }
+      },
+      "timestamp_utc": "2026-04-17T15:08:32.141852+00:00"
+    },
     "stage3": null
   }
 }

@@ -21,7 +21,7 @@
       "params": {
         "b_eq": 0.0,
         "tau_eq": 0.0,
-        "eps": 0.0005
+        "eps": 1e-9
       }
     },
     "residual_terms": [
