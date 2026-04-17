@@ -105,24 +105,35 @@ class PendulumModel:
         self._theta_prev_wrapped = float(theta0_wrapped)
         self._theta_unwrapped = float(theta0)
 
+    # Sign convention (single source of truth):
+    # - world frame: +x right, +y up, +z out-of-plane
+    # - pivot at (0, 0, motor_length/2)
+    # - theta = 0 : rod points straight down (-y)
+    # - theta > 0 : counter-clockwise rotation (+z right-hand rule), rod moves toward +x
+    # Therefore a radius-vector from pivot is:
+    #   r(theta) = [ +sin(theta)*R, -cos(theta)*R, 0 ]
+    # and restoring gravity torque sign is proportional to -sin(theta).
+
+    @staticmethod
+    def _radius_vector_xy_from_theta(theta_rad: float, radius_m: float) -> np.ndarray:
+        th = float(theta_rad)
+        r = float(radius_m)
+        return np.array([math.sin(th) * r, -math.cos(th) * r, 0.0], dtype=float)
+
     def pivot_pos_world(self):
         return np.array([0.0, 0.0, float(self.cfg.motor_length / 2.0)], dtype=float)
 
     def _link_com_world_from_theta(self, theta_rad: float):
         half_l = 0.5 * float(self.cfg.link_L)
-        return ch.ChVector3d(
-            -math.sin(float(theta_rad)) * half_l,
-            -math.cos(float(theta_rad)) * half_l,
-            float(self.cfg.motor_length / 2.0),
-        )
+        pivot = self.pivot_pos_world()
+        r = self._radius_vector_xy_from_theta(theta_rad, half_l)
+        return ch.ChVector3d(float(pivot[0] + r[0]), float(pivot[1] + r[1]), float(pivot[2] + r[2]))
 
     def _imu_com_world_from_theta(self, theta_rad: float):
         # Place IMU center directly from pivot using calibrated pivot->IMU radius.
-        return ch.ChVector3d(
-            -math.sin(float(theta_rad)) * float(self.cfg.r_imu),
-            -math.cos(float(theta_rad)) * float(self.cfg.r_imu),
-            float(self.cfg.motor_length / 2.0),
-        )
+        pivot = self.pivot_pos_world()
+        r = self._radius_vector_xy_from_theta(theta_rad, float(self.cfg.r_imu))
+        return ch.ChVector3d(float(pivot[0] + r[0]), float(pivot[1] + r[1]), float(pivot[2] + r[2]))
 
     def rod_com_pos_world(self):
         p = self.link.GetPos()
@@ -210,7 +221,7 @@ class PendulumModel:
         omega_z = float(omega_rad_s)
         q_link = ch.QuatFromAngleZ(theta)
         com_w = self._link_com_world_from_theta(theta)
-        pivot_w = np.array([0.0, 0.0, float(self.cfg.motor_length / 2.0)], dtype=float)
+        pivot_w = self.pivot_pos_world()
         r_link = np.array([float(com_w.x), float(com_w.y), float(com_w.z)], dtype=float) - pivot_w
         v_link = np.cross(np.array([0.0, 0.0, omega_z], dtype=float), r_link)
         # This SetPos is the COM position implied by pure rotation about fixed
@@ -231,6 +242,23 @@ class PendulumModel:
         theta_wrapped = math.atan2(math.sin(theta), math.cos(theta))
         self._theta_prev_wrapped = float(theta_wrapped)
         self._theta_unwrapped = float(theta)
+
+    def sign_convention_diagnostic(self, theta_rad: float) -> dict[str, float]:
+        """Return geometric/torque-sign diagnostics for a given theta."""
+        th = float(theta_rad)
+        pivot = self.pivot_pos_world()
+        com = self._link_com_world_from_theta(th)
+        rx = float(com.x) - float(pivot[0])
+        ry = float(com.y) - float(pivot[1])
+        # tau_z = r x F, F=[0,-m g,0] -> tau_z = -m g * r_x
+        tau_g_sign_proxy = -math.sin(th)
+        return {
+            "theta": th,
+            "com_rx": rx,
+            "com_ry": ry,
+            "expected_rx_from_theta": math.sin(th) * self.rod_com_radius_from_pivot(),
+            "gravity_torque_sign_proxy": tau_g_sign_proxy,
+        }
 
     def get_sensor_kinematics(self, cur_t, step):
         pos_w = self.imu.GetPos()
