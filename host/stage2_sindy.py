@@ -241,10 +241,10 @@ def run_stage2(
     known = known_params_from_model_json(model_data)
     print("[Stage2] residual target torque model:")
     if str(target_mode).strip().lower() == "blackbox":
-        print("[Stage2]   tau_target = tau_total = J_total * alpha")
+        print("[Stage2]   tau_target = tau_total + tau_gravity")
     else:
-        print("[Stage2]   tau_target = tau_total + tau_visc + tau_coul - tau_motor")
-    print("[Stage2]   gravity term m*g*l*sin(theta) is ALWAYS excluded from target.")
+        print("[Stage2]   tau_target = tau_total + tau_visc + tau_coul + tau_gravity - tau_motor")
+    print("[Stage2]   gravity term is explicitly added to cancel measured gravity effect for Chrono injection.")
     print(f"[Stage2]   tau_motor = K_i * I_filtered_A, K_i={known.K_i:.9g}")
     print(f"[Stage2]   tau_gravity = m_total * g * l_com * sin(theta), m_total={known.m_total:.9g}, g={known.g:.9g}, l_com={known.l_com:.9g}")
     print(f"[Stage2]   tau_visc = b_eq * omega, b_eq={known.b_eq:.9g}")

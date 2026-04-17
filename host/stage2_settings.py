@@ -141,14 +141,13 @@ def compute_residual_target(
     tau_visc = float(p.b_eq) * om
     tau_coul = float(p.tau_eq) * np.tanh(om / float(p.eps))
     mode = str(target_mode).strip().lower()
-    # NOTE: gravity term is always excluded from Stage2 SINDy target to avoid
-    # double-counting with Chrono internal gravity dynamics.
     if mode == "blackbox":
-        # Identify torque-like map directly from J*alpha.
-        tau_residual_target = tau_total
+        # Identify external torque required to reproduce measured acceleration,
+        # with gravity explicitly canceled for Chrono torque-injection usage.
+        tau_residual_target = tau_total + tau_gravity
     elif mode == "greybox":
-        # Subtract Stage1 nominal (motor + friction), keep gravity excluded.
-        tau_residual_target = tau_total + tau_visc + tau_coul - tau_motor
+        # Subtract Stage1 nominal (motor + friction), with gravity canceled.
+        tau_residual_target = tau_total + tau_visc + tau_coul + tau_gravity - tau_motor
     else:
         raise ValueError(f"Unknown target_mode='{target_mode}'. allowed=['greybox','blackbox']")
     return ResidualTarget(
