@@ -1,4 +1,0 @@
-threshold,optimizer,rmse_validation,active_terms
-1e-05,pysindy.SINDy(STLSQ+IdentityLibrary),0.11127749687141808,8
-0.0001,pysindy.SINDy(STLSQ+IdentityLibrary),0.11127749687141808,8
-0.001,pysindy.SINDy(STLSQ+IdentityLibrary),0.11127749687141808,8

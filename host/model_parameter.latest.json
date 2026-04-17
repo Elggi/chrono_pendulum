@@ -19,8 +19,8 @@
       "enabled": true,
       "equation": "tau_res = b_eq*omega + tau_eq*tanh(omega/eps)",
       "params": {
-        "b_eq": 0.0,
-        "tau_eq": 0.0,
+        "b_eq": 0.01120567918734419,
+        "tau_eq": 0.04424557467529165,
         "eps": 0.0005
       }
     },
@@ -32,7 +32,32 @@
     ]
   },
   "stage_outputs": {
-    "stage1": null,
+    "stage1": {
+      "method": "cmaes_chrono_headless",
+      "best_loss": 0.40783877100672555,
+      "best_params": {
+        "b_eq": 0.01120567918734419,
+        "tau_eq": 0.04424557467529165
+      },
+      "generations": 30,
+      "population_size": 16,
+      "input_csvs": [
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_10.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_12.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_14.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_16.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_18.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_19.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_20.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_21.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_23.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_5.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_6.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_7.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_8.csv",
+        "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_9.csv"
+      ]
+    },
     "stage2": null,
     "stage3": null
   }

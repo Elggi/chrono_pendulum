@@ -1,1 +1,0 @@
-tau_residual = -0.66307323*motor_input + 0.010707823*theta + 0.031548971*omega + 0.0008923259*theta2 + 0.00047811538*omega2 + 0.24495947*sin_theta + -0.029386175*tanh_omega_eps + -0.033139273*motor_input_omega
