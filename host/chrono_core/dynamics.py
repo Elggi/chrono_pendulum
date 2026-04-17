@@ -189,21 +189,27 @@ class PendulumModel:
 
     def set_theta_kinematic(self, theta_rad: float, omega_rad_s: float = 0.0):
         theta = float(theta_rad)
+        omega_z = float(omega_rad_s)
         q_link = ch.QuatFromAngleZ(theta)
         com_w = self._link_com_world_from_theta(theta)
+        pivot_w = np.array([0.0, 0.0, float(self.cfg.motor_length / 2.0)], dtype=float)
+        r_link = np.array([float(com_w.x), float(com_w.y), float(com_w.z)], dtype=float) - pivot_w
+        v_link = np.cross(np.array([0.0, 0.0, omega_z], dtype=float), r_link)
         # This SetPos is the COM position implied by pure rotation about fixed
         # pivot. It is not translational tracking of measured hand movement.
         self.link.SetRot(q_link)
         self.link.SetPos(com_w)
-        self.link.SetPosDt(ch.ChVector3d(0.0, 0.0, 0.0))
-        self.link.SetAngVelLocal(ch.ChVector3d(0.0, 0.0, float(omega_rad_s)))
+        self.link.SetPosDt(ch.ChVector3d(float(v_link[0]), float(v_link[1]), float(v_link[2])))
+        self.link.SetAngVelLocal(ch.ChVector3d(0.0, 0.0, omega_z))
         # Free-decay sync is rotation-only and IMU center is directly placed at
         # pivot + r_imu for the same theta.
         imu_abs = self._imu_com_world_from_theta(theta)
+        r_imu = np.array([float(imu_abs.x), float(imu_abs.y), float(imu_abs.z)], dtype=float) - pivot_w
+        v_imu = np.cross(np.array([0.0, 0.0, omega_z], dtype=float), r_imu)
         self.imu.SetPos(imu_abs)
         self.imu.SetRot(q_link)
-        self.imu.SetPosDt(ch.ChVector3d(0.0, 0.0, 0.0))
-        self.imu.SetAngVelLocal(ch.ChVector3d(0.0, 0.0, float(omega_rad_s)))
+        self.imu.SetPosDt(ch.ChVector3d(float(v_imu[0]), float(v_imu[1]), float(v_imu[2])))
+        self.imu.SetAngVelLocal(ch.ChVector3d(0.0, 0.0, omega_z))
 
     def get_sensor_kinematics(self, cur_t, step):
         pos_w = self.imu.GetPos()
@@ -247,29 +253,33 @@ def compute_model_torque_and_electrics(motor_input, theta, omega, bus_v, p, cfg:
     tau_visc = p["b_eq"] * omega
     tau_coul = p["tau_eq"] * math.tanh(omega / max(cfg.tanh_eps, 1e-9))
     tau_residual = 0.0
-    for term in p.get("residual_terms", []):
-        if not isinstance(term, dict):
-            continue
-        coeff = float(term.get("coeff", 0.0))
-        feat = str(term.get("feature", ""))
-        if feat == "1":
-            tau_residual += coeff
-        elif feat == "theta":
-            tau_residual += coeff * float(theta)
-        elif feat == "omega":
-            tau_residual += coeff * float(omega)
-        elif feat == "sin_theta":
-            tau_residual += coeff * math.sin(float(theta))
-        elif feat == "cos_theta":
-            tau_residual += coeff * math.cos(float(theta))
-        elif feat == "theta2":
-            tau_residual += coeff * (float(theta) ** 2)
-        elif feat == "omega2":
-            tau_residual += coeff * (float(omega) ** 2)
-        elif feat == "sign_omega":
-            tau_residual += coeff * math.copysign(1.0, float(omega)) if abs(float(omega)) > 1e-12 else 0.0
-        elif feat == "motor_input":
-            tau_residual += coeff * float(motor_input)
+    terms = p.get("residual_terms", [])
+    try:
+        from stage2_settings import evaluate_residual_from_terms  # type: ignore
+
+        tau_residual = float(evaluate_residual_from_terms(theta, omega, motor_input, terms, cfg.tanh_eps))
+    except Exception:
+        for term in terms:
+            if not isinstance(term, dict):
+                continue
+            coeff = float(term.get("coeff", 0.0))
+            feat = str(term.get("feature", ""))
+            if feat == "theta":
+                tau_residual += coeff * float(theta)
+            elif feat == "omega":
+                tau_residual += coeff * float(omega)
+            elif feat == "sin_theta":
+                tau_residual += coeff * math.sin(float(theta))
+            elif feat == "theta2":
+                tau_residual += coeff * (float(theta) ** 2)
+            elif feat == "omega2":
+                tau_residual += coeff * (float(omega) ** 2)
+            elif feat == "tanh_omega_eps":
+                tau_residual += coeff * math.tanh(float(omega) / max(cfg.tanh_eps, 1e-9))
+            elif feat == "motor_input":
+                tau_residual += coeff * float(motor_input)
+            elif feat == "motor_input_omega":
+                tau_residual += coeff * float(motor_input) * float(omega)
     tau_res = tau_visc + tau_coul + tau_residual
     tau_gravity = 0.0
     tau_net = tau_motor - tau_res

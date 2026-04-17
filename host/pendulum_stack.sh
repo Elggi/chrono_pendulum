@@ -331,7 +331,7 @@ run_stage1_pem_identification() {
         return
     fi
     default_calib="$BASE_DIR/run_logs/calibration_latest.json"
-    default_model_param="$BASE_DIR/model_parameter.json"
+    default_model_param="$BASE_DIR/model_parameter.latest.json"
     if [ ! -f "$default_model_param" ]; then
         default_model_param="$BASE_DIR/model_parameter.template.json"
     fi
@@ -349,9 +349,14 @@ run_stage1_pem_identification() {
     w_theta=${w_theta:-1.0}
     read -p "omega RMSE weight (w_omega) [default: 0.1]: " w_omega
     w_omega=${w_omega:-0.1}
+    read -p "Optimize K_i using motor input current as well? (y/n) [n]: " optimize_ki_yn
+    optimize_ki_yn=${optimize_ki_yn:-n}
     echo "[INFO] Stage1 weighted RMSE loss: w_theta=${w_theta}, w_omega=${w_omega}"
     local csv_args=("${selected_csvs[@]}")
     cmd=(python3 "$BASE_DIR/stage1_cmaes_chrono.py" --csv "${csv_args[@]}" --calibration-json "$calib_json" --model-parameter-json "$model_param_json" --outdir "$outdir" --max-generations "$gens" --workers "$workers" --w-theta "$w_theta" --w-omega "$w_omega")
+    if [[ "$optimize_ki_yn" =~ ^[Yy]$ ]]; then
+        cmd+=(--optimize-ki)
+    fi
     echo "[INFO] command: ${cmd[*]}"
     "${cmd[@]}"
 }
@@ -364,7 +369,7 @@ run_stage2_sindy_identification() {
         echo "[ERROR] 선택된 CSV가 없습니다." >&2
         return
     fi
-    default_model_param="$BASE_DIR/model_parameter.json"
+    default_model_param="$BASE_DIR/model_parameter.latest.json"
     if [ ! -f "$default_model_param" ]; then
         default_model_param="$BASE_DIR/model_parameter.template.json"
     fi
@@ -374,10 +379,19 @@ run_stage2_sindy_identification() {
     outdir=${outdir:-$BASE_DIR/../reports/SINDy_stage2}
     read -p "sparsity threshold [1e-4]: " threshold
     threshold=${threshold:-1e-4}
-    read -p "feature set (comma-separated) [1,theta,omega,sin_theta,cos_theta,theta2,omega2,motor_input]: " feature_set
-    feature_set=${feature_set:-1,theta,omega,sin_theta,cos_theta,theta2,omega2,motor_input}
+    read -p "target mode (greybox/blackbox) [greybox]: " target_mode
+    target_mode=${target_mode:-greybox}
+    default_feature_set=$(python3 - <<'PY'
+import os, sys
+sys.path.insert(0, os.path.dirname(__file__))
+from stage2_settings import DEFAULT_FEATURES
+print(",".join(DEFAULT_FEATURES))
+PY
+)
+    read -p "feature set (comma-separated) [${default_feature_set}]: " feature_set
+    feature_set=${feature_set:-$default_feature_set}
     local csv_args=("${selected_csvs[@]}")
-    cmd=(python3 "$BASE_DIR/stage2_sindy_entry.py" --csv "${csv_args[@]}" --model-parameter-json "$model_param_json" --outdir "$outdir" --threshold "$threshold" --features "$feature_set")
+    cmd=(python3 "$BASE_DIR/stage2_sindy_entry.py" --csv "${csv_args[@]}" --model-parameter-json "$model_param_json" --outdir "$outdir" --threshold "$threshold" --target-mode "$target_mode" --features "$feature_set")
     echo "[INFO] command: ${cmd[*]}"
     "${cmd[@]}"
 }
@@ -647,8 +661,8 @@ run_replay_validation() {
         param_json="$BASE_DIR/rl_results/latest/final_params_rl.json"
     elif [ -f "$BASE_DIR/rl_results/latest/best_params.json" ]; then
         param_json="$BASE_DIR/rl_results/latest/best_params.json"
-    elif [ -f "$BASE_DIR/model_parameter.json" ]; then
-        param_json="$BASE_DIR/model_parameter.json"
+    elif [ -f "$BASE_DIR/model_parameter.latest.json" ]; then
+        param_json="$BASE_DIR/model_parameter.latest.json"
     elif [ -f "$BASE_DIR/model_parameter.template.json" ]; then
         param_json="$BASE_DIR/model_parameter.template.json"
     fi
