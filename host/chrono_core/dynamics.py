@@ -101,25 +101,39 @@ class PendulumModel:
 
         self.prev_sensor_vel = np.zeros(3, dtype=float)
         self.prev_t = None
+        theta0_wrapped = math.atan2(math.sin(theta0), math.cos(theta0))
+        self._theta_prev_wrapped = float(theta0_wrapped)
+        self._theta_unwrapped = float(theta0)
+
+    # Sign convention (single source of truth):
+    # - world frame: +x right, +y up, +z out-of-plane
+    # - pivot at (0, 0, motor_length/2)
+    # - theta = 0 : rod points straight down (-y)
+    # - theta > 0 : counter-clockwise rotation (+z right-hand rule), rod moves toward +x
+    # Therefore a radius-vector from pivot is:
+    #   r(theta) = [ +sin(theta)*R, -cos(theta)*R, 0 ]
+    # and restoring gravity torque sign is proportional to -sin(theta).
+
+    @staticmethod
+    def _radius_vector_xy_from_theta(theta_rad: float, radius_m: float) -> np.ndarray:
+        th = float(theta_rad)
+        r = float(radius_m)
+        return np.array([math.sin(th) * r, -math.cos(th) * r, 0.0], dtype=float)
 
     def pivot_pos_world(self):
         return np.array([0.0, 0.0, float(self.cfg.motor_length / 2.0)], dtype=float)
 
     def _link_com_world_from_theta(self, theta_rad: float):
         half_l = 0.5 * float(self.cfg.link_L)
-        return ch.ChVector3d(
-            -math.sin(float(theta_rad)) * half_l,
-            -math.cos(float(theta_rad)) * half_l,
-            float(self.cfg.motor_length / 2.0),
-        )
+        pivot = self.pivot_pos_world()
+        r = self._radius_vector_xy_from_theta(theta_rad, half_l)
+        return ch.ChVector3d(float(pivot[0] + r[0]), float(pivot[1] + r[1]), float(pivot[2] + r[2]))
 
     def _imu_com_world_from_theta(self, theta_rad: float):
         # Place IMU center directly from pivot using calibrated pivot->IMU radius.
-        return ch.ChVector3d(
-            -math.sin(float(theta_rad)) * float(self.cfg.r_imu),
-            -math.cos(float(theta_rad)) * float(self.cfg.r_imu),
-            float(self.cfg.motor_length / 2.0),
-        )
+        pivot = self.pivot_pos_world()
+        r = self._radius_vector_xy_from_theta(theta_rad, float(self.cfg.r_imu))
+        return ch.ChVector3d(float(pivot[0] + r[0]), float(pivot[1] + r[1]), float(pivot[2] + r[2]))
 
     def rod_com_pos_world(self):
         p = self.link.GetPos()
@@ -180,30 +194,71 @@ class PendulumModel:
         _ = params
         # Mass/COM/inertia are derived from geometry+density via ChBodyEasyBox.
 
-    def get_theta(self):
+    def get_theta_wrapped(self):
         d = self.link.TransformDirectionLocalToParent(ch.ChVector3d(0.0, -1.0, 0.0))
         return math.atan2(float(d.x), -float(d.y))
+
+    def get_theta(self):
+        theta_wrapped = float(self.get_theta_wrapped())
+        if self._theta_prev_wrapped is None:
+            self._theta_prev_wrapped = theta_wrapped
+            self._theta_unwrapped = theta_wrapped
+            return float(self._theta_unwrapped)
+        dth = float(theta_wrapped - float(self._theta_prev_wrapped))
+        while dth > math.pi:
+            dth -= 2.0 * math.pi
+        while dth < -math.pi:
+            dth += 2.0 * math.pi
+        self._theta_unwrapped = float(self._theta_unwrapped + dth)
+        self._theta_prev_wrapped = theta_wrapped
+        return float(self._theta_unwrapped)
 
     def get_omega(self):
         return float(self.link.GetAngVelLocal().z)
 
     def set_theta_kinematic(self, theta_rad: float, omega_rad_s: float = 0.0):
         theta = float(theta_rad)
+        omega_z = float(omega_rad_s)
         q_link = ch.QuatFromAngleZ(theta)
         com_w = self._link_com_world_from_theta(theta)
+        pivot_w = self.pivot_pos_world()
+        r_link = np.array([float(com_w.x), float(com_w.y), float(com_w.z)], dtype=float) - pivot_w
+        v_link = np.cross(np.array([0.0, 0.0, omega_z], dtype=float), r_link)
         # This SetPos is the COM position implied by pure rotation about fixed
         # pivot. It is not translational tracking of measured hand movement.
         self.link.SetRot(q_link)
         self.link.SetPos(com_w)
-        self.link.SetPosDt(ch.ChVector3d(0.0, 0.0, 0.0))
-        self.link.SetAngVelLocal(ch.ChVector3d(0.0, 0.0, float(omega_rad_s)))
+        self.link.SetPosDt(ch.ChVector3d(float(v_link[0]), float(v_link[1]), float(v_link[2])))
+        self.link.SetAngVelLocal(ch.ChVector3d(0.0, 0.0, omega_z))
         # Free-decay sync is rotation-only and IMU center is directly placed at
         # pivot + r_imu for the same theta.
         imu_abs = self._imu_com_world_from_theta(theta)
+        r_imu = np.array([float(imu_abs.x), float(imu_abs.y), float(imu_abs.z)], dtype=float) - pivot_w
+        v_imu = np.cross(np.array([0.0, 0.0, omega_z], dtype=float), r_imu)
         self.imu.SetPos(imu_abs)
         self.imu.SetRot(q_link)
-        self.imu.SetPosDt(ch.ChVector3d(0.0, 0.0, 0.0))
-        self.imu.SetAngVelLocal(ch.ChVector3d(0.0, 0.0, float(omega_rad_s)))
+        self.imu.SetPosDt(ch.ChVector3d(float(v_imu[0]), float(v_imu[1]), float(v_imu[2])))
+        self.imu.SetAngVelLocal(ch.ChVector3d(0.0, 0.0, omega_z))
+        theta_wrapped = math.atan2(math.sin(theta), math.cos(theta))
+        self._theta_prev_wrapped = float(theta_wrapped)
+        self._theta_unwrapped = float(theta)
+
+    def sign_convention_diagnostic(self, theta_rad: float) -> dict[str, float]:
+        """Return geometric/torque-sign diagnostics for a given theta."""
+        th = float(theta_rad)
+        pivot = self.pivot_pos_world()
+        com = self._link_com_world_from_theta(th)
+        rx = float(com.x) - float(pivot[0])
+        ry = float(com.y) - float(pivot[1])
+        # tau_z = r x F, F=[0,-m g,0] -> tau_z = -m g * r_x
+        tau_g_sign_proxy = -math.sin(th)
+        return {
+            "theta": th,
+            "com_rx": rx,
+            "com_ry": ry,
+            "expected_rx_from_theta": math.sin(th) * self.rod_com_radius_from_pivot(),
+            "gravity_torque_sign_proxy": tau_g_sign_proxy,
+        }
 
     def get_sensor_kinematics(self, cur_t, step):
         pos_w = self.imu.GetPos()
@@ -247,29 +302,33 @@ def compute_model_torque_and_electrics(motor_input, theta, omega, bus_v, p, cfg:
     tau_visc = p["b_eq"] * omega
     tau_coul = p["tau_eq"] * math.tanh(omega / max(cfg.tanh_eps, 1e-9))
     tau_residual = 0.0
-    for term in p.get("residual_terms", []):
-        if not isinstance(term, dict):
-            continue
-        coeff = float(term.get("coeff", 0.0))
-        feat = str(term.get("feature", ""))
-        if feat == "1":
-            tau_residual += coeff
-        elif feat == "theta":
-            tau_residual += coeff * float(theta)
-        elif feat == "omega":
-            tau_residual += coeff * float(omega)
-        elif feat == "sin_theta":
-            tau_residual += coeff * math.sin(float(theta))
-        elif feat == "cos_theta":
-            tau_residual += coeff * math.cos(float(theta))
-        elif feat == "theta2":
-            tau_residual += coeff * (float(theta) ** 2)
-        elif feat == "omega2":
-            tau_residual += coeff * (float(omega) ** 2)
-        elif feat == "sign_omega":
-            tau_residual += coeff * math.copysign(1.0, float(omega)) if abs(float(omega)) > 1e-12 else 0.0
-        elif feat == "motor_input":
-            tau_residual += coeff * float(motor_input)
+    terms = p.get("residual_terms", [])
+    try:
+        from stage2_settings import evaluate_residual_from_terms  # type: ignore
+
+        tau_residual = float(evaluate_residual_from_terms(theta, omega, motor_input, terms, cfg.tanh_eps))
+    except Exception:
+        for term in terms:
+            if not isinstance(term, dict):
+                continue
+            coeff = float(term.get("coeff", 0.0))
+            feat = str(term.get("feature", ""))
+            if feat == "theta":
+                tau_residual += coeff * float(theta)
+            elif feat == "omega":
+                tau_residual += coeff * float(omega)
+            elif feat == "sin_theta":
+                tau_residual += coeff * math.sin(float(theta))
+            elif feat == "theta2":
+                tau_residual += coeff * (float(theta) ** 2)
+            elif feat == "omega2":
+                tau_residual += coeff * (float(omega) ** 2)
+            elif feat == "tanh_omega_eps":
+                tau_residual += coeff * math.tanh(float(omega) / max(cfg.tanh_eps, 1e-9))
+            elif feat == "motor_input":
+                tau_residual += coeff * float(motor_input)
+            elif feat == "motor_input_omega":
+                tau_residual += coeff * float(motor_input) * float(omega)
     tau_res = tau_visc + tau_coul + tau_residual
     tau_gravity = 0.0
     tau_net = tau_motor - tau_res
