@@ -46,7 +46,7 @@ class ResidualTarget:
     tau_residual_target: np.ndarray
 
 
-def known_params_from_model_json(model_data: dict[str, Any] | None) -> KnownParams:
+def known_params_from_model_json_with_trace(model_data: dict[str, Any] | None) -> tuple[KnownParams, dict[str, str]]:
     data = model_data if isinstance(model_data, dict) else {}
     known = data.get("known", {}) if isinstance(data.get("known"), dict) else {}
     tm = data.get("torque_model", {}) if isinstance(data.get("torque_model"), dict) else {}
@@ -55,16 +55,43 @@ def known_params_from_model_json(model_data: dict[str, Any] | None) -> KnownPara
     mp = motor.get("params", {}) if isinstance(motor.get("params"), dict) else {}
     rp = resistance.get("params", {}) if isinstance(resistance.get("params"), dict) else {}
 
-    return KnownParams(
-        m_total=float(known.get("mass_total_kg", 0.22)),
-        j_total=float(known.get("inertia_total_kgm2", 0.00666293085698)),
-        l_com=float(known.get("l_com_total_m", 0.15225390909090908)),
-        g=float(known.get("gravity_mps2", 9.81)),
-        K_i=float(mp.get("K_i", 0.0)),
-        b_eq=float(rp.get("b_eq", 0.01922636540411224)),
-        tau_eq=float(rp.get("tau_eq", 0.014448922020706325)),
-        eps=max(float(rp.get("eps", 0.0005)), 1e-9),
-    )
+    defaults = {
+        "m_total": 0.22,
+        "j_total": 0.00666293085698,
+        "l_com": 0.15225390909090908,
+        "g": 9.81,
+        "K_i": 0.0,
+        "b_eq": 0.01922636540411224,
+        "tau_eq": 0.014448922020706325,
+        "eps": 0.0005,
+    }
+    values = {
+        "m_total": float(known.get("mass_total_kg", defaults["m_total"])),
+        "j_total": float(known.get("inertia_total_kgm2", defaults["j_total"])),
+        "l_com": float(known.get("l_com_total_m", defaults["l_com"])),
+        "g": float(known.get("gravity_mps2", defaults["g"])),
+        "K_i": float(mp.get("K_i", defaults["K_i"])),
+        "b_eq": float(rp.get("b_eq", defaults["b_eq"])),
+        "tau_eq": float(rp.get("tau_eq", defaults["tau_eq"])),
+        "eps": max(float(rp.get("eps", defaults["eps"])), 1e-9),
+    }
+    trace = {
+        "m_total": "known.mass_total_kg" if "mass_total_kg" in known else "default",
+        "j_total": "known.inertia_total_kgm2" if "inertia_total_kgm2" in known else "default",
+        "l_com": "known.l_com_total_m" if "l_com_total_m" in known else "default",
+        "g": "known.gravity_mps2" if "gravity_mps2" in known else "default",
+        "K_i": "torque_model.motor.params.K_i" if "K_i" in mp else "default",
+        "b_eq": "torque_model.resistance.params.b_eq" if "b_eq" in rp else "default",
+        "tau_eq": "torque_model.resistance.params.tau_eq" if "tau_eq" in rp else "default",
+        "eps": "torque_model.resistance.params.eps" if "eps" in rp else "default",
+    }
+
+    return KnownParams(**values), trace
+
+
+def known_params_from_model_json(model_data: dict[str, Any] | None) -> KnownParams:
+    params, _ = known_params_from_model_json_with_trace(model_data)
+    return params
 
 
 def parse_feature_list(raw_features: list[str]) -> tuple[list[str], list[str]]:

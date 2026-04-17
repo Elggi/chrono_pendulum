@@ -10,8 +10,10 @@ export ROS_DOMAIN_ID=7
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
 BASE_DIR="$SCRIPT_DIR"
+export PYTHONPATH="$BASE_DIR:${PYTHONPATH}"
 CSV_DIR="$BASE_DIR/run_logs"
 REPORTS_STAGE1_DIR="$BASE_DIR/../reports/Stage1_CMAES"
+REPORTS_STAGE2_DIR="$BASE_DIR/../reports/SINDy_stage2"
 
 # ======================================================
 # 유틸
@@ -25,7 +27,7 @@ select_csv_file() {
     echo "--------------------------------" >&2
     echo "[INFO] CSV 파일 선택" >&2
 
-    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results" "$REPORTS_STAGE1_DIR")
+    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results" "$REPORTS_STAGE1_DIR" "$REPORTS_STAGE2_DIR")
     local files=()
     local d
     for d in "${search_dirs[@]}"; do
@@ -59,7 +61,7 @@ select_csv_files_multi() {
     echo "--------------------------------" >&2
     echo "[INFO] 학습용 CSV 파일들 선택 (복수 선택 가능)" >&2
 
-    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results" "$REPORTS_STAGE1_DIR")
+    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results" "$REPORTS_STAGE1_DIR" "$REPORTS_STAGE2_DIR")
     local files=()
     local d
     for d in "${search_dirs[@]}"; do
@@ -158,7 +160,7 @@ select_plot_csv_file() {
     echo "--------------------------------" >&2
     echo "[INFO] Plot 가능한 CSV 선택 (chrono/replay 형식만 표시)" >&2
 
-    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results" "$REPORTS_STAGE1_DIR")
+    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results" "$REPORTS_STAGE1_DIR" "$REPORTS_STAGE2_DIR")
     local files=()
     local d
     for d in "${search_dirs[@]}"; do
@@ -200,7 +202,7 @@ select_json_file() {
     echo "[INFO] ${label} 선택" >&2
 
     local valid=()
-    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results" "$REPORTS_STAGE1_DIR")
+    local search_dirs=("$BASE_DIR" "$BASE_DIR/run_logs" "$BASE_DIR/rl_results" "$REPORTS_STAGE1_DIR" "$REPORTS_STAGE2_DIR")
     local d
     for d in "${search_dirs[@]}"; do
         if [ ! -d "$d" ]; then
@@ -353,7 +355,8 @@ run_stage1_pem_identification() {
     optimize_ki_yn=${optimize_ki_yn:-n}
     echo "[INFO] Stage1 weighted RMSE loss: w_theta=${w_theta}, w_omega=${w_omega}"
     local csv_args=("${selected_csvs[@]}")
-    cmd=(python3 "$BASE_DIR/stage1_cmaes_chrono.py" --csv "${csv_args[@]}" --calibration-json "$calib_json" --model-parameter-json "$model_param_json" --outdir "$outdir" --max-generations "$gens" --workers "$workers" --w-theta "$w_theta" --w-omega "$w_omega")
+    cmd=(python3 "$BASE_DIR/backend/stage1/cmaes_chrono.py" --csv "${csv_args[@]}" --calibration-json "$calib_json" --model-parameter-json "$model_param_json" --outdir "$outdir" --max-generations "$gens" --workers "$workers" --w-theta "$w_theta" --w-omega "$w_omega")
+
     if [[ "$optimize_ki_yn" =~ ^[Yy]$ ]]; then
         cmd+=(--optimize-ki)
     fi
@@ -381,9 +384,16 @@ run_stage2_sindy_identification() {
     threshold=${threshold:-1e-4}
     read -p "target mode (greybox/blackbox) [greybox]: " target_mode
     target_mode=${target_mode:-greybox}
+    default_feature_set=$(BASE_DIR="$BASE_DIR" python3 - <<'PY'
+import os, sys
+base_dir = os.environ.get('BASE_DIR', '')
+if base_dir:
+    sys.path.insert(0, base_dir)
+=======
     default_feature_set=$(python3 - <<'PY'
 import os, sys
 sys.path.insert(0, os.path.dirname(__file__))
+>>>>>>> desktop
 from stage2_settings import DEFAULT_FEATURES
 print(",".join(DEFAULT_FEATURES))
 PY
@@ -391,7 +401,7 @@ PY
     read -p "feature set (comma-separated) [${default_feature_set}]: " feature_set
     feature_set=${feature_set:-$default_feature_set}
     local csv_args=("${selected_csvs[@]}")
-    cmd=(python3 "$BASE_DIR/stage2_sindy_entry.py" --csv "${csv_args[@]}" --model-parameter-json "$model_param_json" --outdir "$outdir" --threshold "$threshold" --target-mode "$target_mode" --features "$feature_set")
+    cmd=(python3 "$BASE_DIR/backend/stage2/entry.py" --csv "${csv_args[@]}" --model-parameter-json "$model_param_json" --outdir "$outdir" --threshold "$threshold" --target-mode "$target_mode" --features "$feature_set")
     echo "[INFO] command: ${cmd[*]}"
     "${cmd[@]}"
 }
@@ -409,7 +419,7 @@ run_stage3_ppo_identification() {
     outdir=${outdir:-$BASE_DIR/../reports/PPO_stage3}
     read -p "PPO timesteps [12000]: " ppo_steps
     ppo_steps=${ppo_steps:-12000}
-    cmd=(python3 "$BASE_DIR/stage3_ppo_entry.py" --csv "$csv_path" --meta "$meta_path" --outdir "$outdir" --ppo-steps "$ppo_steps")
+    cmd=(python3 "$BASE_DIR/backend/stage3/ppo_entry.py" --csv "$csv_path" --meta "$meta_path" --outdir "$outdir" --ppo-steps "$ppo_steps")
     echo "[INFO] command: ${cmd[*]}"
     "${cmd[@]}"
 }
@@ -452,7 +462,7 @@ run_rl_fitting() {
     param_json=$(select_json_file "Parameter JSON (optional)")
 
     echo "--------------------------------"
-    echo "[INFO] Parameter Finetuning (Reinforcement Learning) 실행 (train_pendulum_rl.py)"
+    echo "[INFO] Parameter Finetuning (Reinforcement Learning) 실행 (backend/stage3/train_pendulum_rl.py)"
     read -p "num_episodes [1000]: " num_episodes
     num_episodes=${num_episodes:-1000}
     read -p "batch_size [20]: " batch_size
@@ -472,7 +482,7 @@ run_rl_fitting() {
     run_outdir="$BASE_DIR/rl_results/runs/$run_id"
     latest_link="$BASE_DIR/rl_results/latest"
 
-    cmd=(python3 "$BASE_DIR/train_pendulum_rl.py" --calibration_json "$calib_json" --outdir "$run_outdir" --num_episodes "$num_episodes" --batch_size "$batch_size" --seed "$seed")
+    cmd=(python3 "$BASE_DIR/backend/stage3/train_pendulum_rl.py" --calibration_json "$calib_json" --outdir "$run_outdir" --num_episodes "$num_episodes" --batch_size "$batch_size" --seed "$seed")
     if [ "$use_csv_dir" == "1" ]; then
         cmd+=(--csv_dir "$CSV_DIR")
     else
@@ -618,7 +628,7 @@ run_offline_benchmark_pem_sindy_ppo() {
     read -p "PPO timesteps [12000]: " ppo_steps
     ppo_steps=${ppo_steps:-12000}
 
-    cmd=(python3 "$BASE_DIR/offline_id_pem_sindy_ppo.py" --csv "$csv_path" --meta "$meta_path" --outdir "$outdir" --train-ratio "$train_ratio" --ppo-steps "$ppo_steps")
+    cmd=(python3 "$BASE_DIR/backend/stage3/offline_id_pem_sindy_ppo.py" --csv "$csv_path" --meta "$meta_path" --outdir "$outdir" --train-ratio "$train_ratio" --ppo-steps "$ppo_steps")
     if [[ "$fit_lcom_yn" =~ ^[Yy]$ ]]; then
         cmd+=(--fit-lcom)
     fi

@@ -16,6 +16,13 @@ import json
 import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
+
+import sys
+
+HOST_DIR = Path(__file__).resolve().parents[2]
+if str(HOST_DIR) not in sys.path:
+    sys.path.insert(0, str(HOST_DIR))
+
 from typing import Callable
 
 try:

@@ -23,9 +23,17 @@ except Exception:
 
 
 def find_latest_csv(folder: str):
-    csvs = [os.path.join(folder, x) for x in os.listdir(folder) if x.endswith(".csv")]
+    search_dirs = [folder, os.path.join(os.path.dirname(__file__), "..", "reports", "SINDy_stage2")]
+    csvs = []
+    for d in search_dirs:
+        d_abs = os.path.abspath(d)
+        if not os.path.isdir(d_abs):
+            continue
+        for x in os.listdir(d_abs):
+            if x.endswith(".csv"):
+                csvs.append(os.path.join(d_abs, x))
     if not csvs:
-        raise FileNotFoundError(f"No csv files in {folder}")
+        raise FileNotFoundError(f"No csv files in search dirs: {search_dirs}")
     csvs.sort(key=os.path.getmtime)
     return csvs[-1]
 

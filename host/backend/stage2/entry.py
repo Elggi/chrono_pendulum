@@ -8,8 +8,14 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
+import sys
+
+HOST_DIR = Path(__file__).resolve().parents[2]
+if str(HOST_DIR) not in sys.path:
+    sys.path.insert(0, str(HOST_DIR))
+
 from stage2_settings import DEFAULT_FEATURES, parse_feature_list
-from stage2_sindy import run_stage2, save_stage2_summary
+from backend.stage2.sindy import run_stage2, save_stage2_summary
 
 
 def _parse_features(raw: str) -> list[str]:

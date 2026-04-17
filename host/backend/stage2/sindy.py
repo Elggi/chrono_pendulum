@@ -9,6 +9,12 @@ import traceback
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
+
+import sys
+
+HOST_DIR = Path(__file__).resolve().parents[2]
+if str(HOST_DIR) not in sys.path:
+    sys.path.insert(0, str(HOST_DIR))
 from typing import Any
 
 import numpy as np
@@ -16,12 +22,12 @@ import numpy as np
 from chrono_core.config import BridgeConfig
 from chrono_core.dynamics import PendulumModel, compute_model_torque_and_electrics
 from chrono_core.model_parameter_io import load_model_parameter_json
-from stage2_dataset import Stage2Trajectory, load_trajectories
+from backend.stage2.dataset import Stage2Trajectory, load_trajectories
 from stage2_settings import (
     DEFAULT_FEATURES,
     parse_feature_list,
     build_feature_matrix,
-    known_params_from_model_json,
+    known_params_from_model_json_with_trace,
     compute_residual_target,
     evaluate_residual_from_terms,
 )
@@ -238,7 +244,7 @@ def run_stage2(
     if model_data is None:
         model_data = {}
     cfg = BridgeConfig()
-    known = known_params_from_model_json(model_data)
+    known, known_trace = known_params_from_model_json_with_trace(model_data)
     print("[Stage2] residual target torque model:")
     if str(target_mode).strip().lower() == "blackbox":
         print("[Stage2]   tau_target = tau_total + tau_gravity")
@@ -250,6 +256,16 @@ def run_stage2(
     print(f"[Stage2]   tau_visc = b_eq * omega, b_eq={known.b_eq:.9g}")
     print(f"[Stage2]   tau_coul = tau_eq * tanh(omega/eps), tau_eq={known.tau_eq:.9g}, eps={known.eps:.9g}")
     print(f"[Stage2]   tau_total = J_total * alpha, J_total={known.j_total:.9g}")
+    print("[Stage2]   alpha source = SmoothedFiniteDifference(d/dt of filtered omega), CSV alpha is ignored.")
+    print("[Stage2]   known-parameter initialization (value | source):")
+    print(f"[Stage2]     m_total={known.m_total:.9g} | {known_trace.get('m_total','unknown')}")
+    print(f"[Stage2]     j_total={known.j_total:.9g} | {known_trace.get('j_total','unknown')}")
+    print(f"[Stage2]     l_com={known.l_com:.9g} | {known_trace.get('l_com','unknown')}")
+    print(f"[Stage2]     g={known.g:.9g} | {known_trace.get('g','unknown')}")
+    print(f"[Stage2]     K_i={known.K_i:.9g} | {known_trace.get('K_i','unknown')}")
+    print(f"[Stage2]     b_eq={known.b_eq:.9g} | {known_trace.get('b_eq','unknown')}")
+    print(f"[Stage2]     tau_eq={known.tau_eq:.9g} | {known_trace.get('tau_eq','unknown')}")
+    print(f"[Stage2]     eps={known.eps:.9g} | {known_trace.get('eps','unknown')}")
     print("[Stage2]   NOTE: feature 'motor_input' means measured input current [A].")
 
     features, parse_warnings = parse_feature_list(features)
@@ -262,6 +278,8 @@ def run_stage2(
     overlay_rows: list[dict[str, float | str]] = []
     overlay_artifacts: dict[str, dict[str, str]] = {}
     for tr in trajs:
+        dt_med = float(np.median(np.diff(tr.t))) if len(tr.t) >= 2 else float("nan")
+        print(f"[Stage2] trajectory[{tr.name}]: samples={len(tr.t)}, dt_median={dt_med:.6g}s, alpha=SmoothedFiniteDifference(omega)")
         rt = compute_residual_target(tr.theta, tr.omega, tr.alpha, tr.motor_input_a, known, target_mode=target_mode)
         _, phi = build_feature_matrix(tr.theta, tr.omega, tr.motor_input_a, features, eps=known.eps)
         phis.append(phi)

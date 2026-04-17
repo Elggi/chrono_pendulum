@@ -10,6 +10,13 @@ import math
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
+
+import sys
+
+HOST_DIR = Path(__file__).resolve().parents[2]
+if str(HOST_DIR) not in sys.path:
+    sys.path.insert(0, str(HOST_DIR))
+
 from typing import Any
 
 import numpy as np

@@ -65,8 +65,8 @@ def _compute_alpha_from_omega_smoothed(omega: np.ndarray, t: np.ndarray) -> np.n
         alpha_2d = sfd(omega_2d, t_1d)
     alpha = np.asarray(alpha_2d, dtype=float).reshape(-1)
     return alpha
-    
-    
+
+
 def load_trajectory(csv_path: Path) -> Stage2Trajectory:
     df = pd.read_csv(csv_path)
     n = len(df)
@@ -104,7 +104,7 @@ def load_trajectory(csv_path: Path) -> Stage2Trajectory:
     omega = omega[alpha_good]
     motor_input_a = motor_input_a[alpha_good]
     alpha = alpha[alpha_good]
-    
+
     return Stage2Trajectory(
         name=csv_path.stem,
         source_csv=str(csv_path),
