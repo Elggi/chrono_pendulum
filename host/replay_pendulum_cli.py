@@ -22,6 +22,7 @@ from std_msgs.msg import Float32
 from chrono_core.calibration_io import apply_calibration_json
 from chrono_core.config import BridgeConfig
 from chrono_core.dynamics import PendulumModel
+from chrono_core.model_parameter_io import extract_runtime_overrides
 from chrono_core.pendulum_rl_env import build_init_params, load_replay_csv, simulate_trajectory
 
 
@@ -79,12 +80,13 @@ def build_replay_series(args):
 
     if args.parameter_json:
         param_data = json.load(open(args.parameter_json, "r", encoding="utf-8"))
+        runtime = extract_runtime_overrides(param_data, cfg)
+        if "r_imu" in runtime:
+            # Replay must use pivot->IMU COM radius exactly like chrono_pendulum runtime.
+            cfg.r_imu = float(runtime["r_imu"])
         traj = load_replay_csv(args.csv, cfg, delay_override=args.delay_override)
         params = build_init_params(cfg, parameter_json=param_data)
-        delay_sec = params.get(
-            "delay_sec",
-            (traj.delay_sec_est if args.delay_override is None else float(args.delay_override)),
-        )
+        delay_sec = float(args.delay_override) if args.delay_override is not None else float(traj.delay_sec_est)
         sim = simulate_trajectory(traj, params, cfg, delay_sec=delay_sec)
         theta_sim = sim["theta"]
         theta_real = traj.theta_real
@@ -102,6 +104,9 @@ def build_replay_series(args):
     if len(theta_sim) != len(theta_real):
         n = min(len(theta_sim), len(theta_real))
         theta_sim, theta_real, omega_real, pwm, t = theta_sim[:n], theta_real[:n], omega_real[:n], pwm[:n], t[:n]
+    theta_sim = np.unwrap(np.asarray(theta_sim, dtype=float))
+    if len(theta_sim) > 0 and len(theta_real) > 0:
+        theta_sim = theta_sim + (float(theta_real[0]) - float(theta_sim[0]))
     return cfg, t, pwm, theta_sim, theta_real, omega_real
 
 
@@ -226,6 +231,8 @@ def main():
     t_base = float(t[0])
 
     i = 0
+    imu_local = model.imu_local_on_rod()
+    imu_local_vec = ch.ChVector3d(float(imu_local[0]), float(imu_local[1]), float(imu_local[2]))
     try:
         while i < len(t):
             vis.Run()
@@ -242,8 +249,7 @@ def main():
 
             model.link.SetRot(ch.QuatFromAngleZ(ths))
             model.link.SetAngVelLocal(ch.ChVector3d(0.0, 0.0, 0.0))
-            imu_local = ch.ChVector3d(0.0, -cfg.link_L + cfg.imu_size_y / 2.0, 0.0)
-            imu_abs = model.link.TransformPointLocalToParent(imu_local)
+            imu_abs = model.link.TransformPointLocalToParent(imu_local_vec)
             model.imu.SetPos(imu_abs)
             model.imu.SetRot(model.link.GetRot())
             node.publish_real(float(t[i] - t_base), thr, omr, enc)
