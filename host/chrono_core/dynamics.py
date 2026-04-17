@@ -101,6 +101,9 @@ class PendulumModel:
 
         self.prev_sensor_vel = np.zeros(3, dtype=float)
         self.prev_t = None
+        theta0_wrapped = math.atan2(math.sin(theta0), math.cos(theta0))
+        self._theta_prev_wrapped = float(theta0_wrapped)
+        self._theta_unwrapped = float(theta0)
 
     def pivot_pos_world(self):
         return np.array([0.0, 0.0, float(self.cfg.motor_length / 2.0)], dtype=float)
@@ -180,9 +183,24 @@ class PendulumModel:
         _ = params
         # Mass/COM/inertia are derived from geometry+density via ChBodyEasyBox.
 
-    def get_theta(self):
+    def get_theta_wrapped(self):
         d = self.link.TransformDirectionLocalToParent(ch.ChVector3d(0.0, -1.0, 0.0))
         return math.atan2(float(d.x), -float(d.y))
+
+    def get_theta(self):
+        theta_wrapped = float(self.get_theta_wrapped())
+        if self._theta_prev_wrapped is None:
+            self._theta_prev_wrapped = theta_wrapped
+            self._theta_unwrapped = theta_wrapped
+            return float(self._theta_unwrapped)
+        dth = float(theta_wrapped - float(self._theta_prev_wrapped))
+        while dth > math.pi:
+            dth -= 2.0 * math.pi
+        while dth < -math.pi:
+            dth += 2.0 * math.pi
+        self._theta_unwrapped = float(self._theta_unwrapped + dth)
+        self._theta_prev_wrapped = theta_wrapped
+        return float(self._theta_unwrapped)
 
     def get_omega(self):
         return float(self.link.GetAngVelLocal().z)
@@ -210,6 +228,9 @@ class PendulumModel:
         self.imu.SetRot(q_link)
         self.imu.SetPosDt(ch.ChVector3d(float(v_imu[0]), float(v_imu[1]), float(v_imu[2])))
         self.imu.SetAngVelLocal(ch.ChVector3d(0.0, 0.0, omega_z))
+        theta_wrapped = math.atan2(math.sin(theta), math.cos(theta))
+        self._theta_prev_wrapped = float(theta_wrapped)
+        self._theta_unwrapped = float(theta)
 
     def get_sensor_kinematics(self, cur_t, step):
         pos_w = self.imu.GetPos()
