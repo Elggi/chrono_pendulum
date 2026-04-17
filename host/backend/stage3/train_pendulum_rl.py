@@ -4,11 +4,16 @@
 import argparse
 import csv
 import json
-import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+import sys
+
+HOST_DIR = Path(__file__).resolve().parents[2]
+if str(HOST_DIR) not in sys.path:
+    sys.path.insert(0, str(HOST_DIR))
 
 import numpy as np
 

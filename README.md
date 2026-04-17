@@ -20,7 +20,7 @@ Practically, this supports a repeatable workflow from data collection → calibr
 2. **Calibration**
    - `calibration.py` provides geometric and sensor-derived constants (e.g., CPR/radius).
 3. **Model parameter optimization**
-   - `train_pendulum_rl.py` replays logs and tunes surrogate parameters.
+   - `backend/stage3/train_pendulum_rl.py` replays logs and tunes surrogate parameters.
 4. **Validation and visualization**
    - `plot_pendulum.py` compares `theta/omega/alpha` between sim and real.
    - `replay_pendulum_cli.py` validates best parameters on replay data.
@@ -102,7 +102,7 @@ Runtime logs `theta_real`, `omega_real`, `alpha_real` from IMU-based reconstruct
 
 ## PPO Algorithm: how it’s built
 
-PPO training is implemented in the replay optimization path (`train_pendulum_rl.py`) with a custom pendulum replay environment (`chrono_core/pendulum_rl_env.py`).
+PPO training is implemented in the replay optimization path (`backend/stage3/train_pendulum_rl.py`) with a custom pendulum replay environment (`chrono_core/pendulum_rl_env.py`).
 
 High-level structure:
 - **Environment objective**: minimize mismatch between simulated and measured trajectories (theta/omega/alpha, plus optional smoothness penalties).
