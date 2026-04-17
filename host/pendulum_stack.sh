@@ -356,7 +356,6 @@ run_stage1_pem_identification() {
     echo "[INFO] Stage1 weighted RMSE loss: w_theta=${w_theta}, w_omega=${w_omega}"
     local csv_args=("${selected_csvs[@]}")
     cmd=(python3 "$BASE_DIR/backend/stage1/cmaes_chrono.py" --csv "${csv_args[@]}" --calibration-json "$calib_json" --model-parameter-json "$model_param_json" --outdir "$outdir" --max-generations "$gens" --workers "$workers" --w-theta "$w_theta" --w-omega "$w_omega")
-
     if [[ "$optimize_ki_yn" =~ ^[Yy]$ ]]; then
         cmd+=(--optimize-ki)
     fi
@@ -384,20 +383,13 @@ run_stage2_sindy_identification() {
     threshold=${threshold:-1e-4}
     read -p "target mode (greybox/blackbox) [greybox]: " target_mode
     target_mode=${target_mode:-greybox}
-    default_feature_set=$(BASE_DIR="$BASE_DIR" python3 - <<'PY'
-import os, sys
-base_dir = os.environ.get('BASE_DIR', '')
-if base_dir:
-    sys.path.insert(0, base_dir)
-=======
-    default_feature_set=$(python3 - <<'PY'
-import os, sys
-sys.path.insert(0, os.path.dirname(__file__))
->>>>>>> desktop
-from stage2_settings import DEFAULT_FEATURES
-print(",".join(DEFAULT_FEATURES))
-PY
-)
+    
+    default_feature_set=$(BASE_DIR="$BASE_DIR" python3 -c "import os,sys; b=os.environ.get('BASE_DIR',''); sys.path.insert(0,b) if b else None; 
+try:
+    from stage2_settings import DEFAULT_FEATURES
+except Exception:
+    DEFAULT_FEATURES=['motor_input','theta','omega','theta2','omega2','sin_theta','tanh_omega_eps','motor_input_omega']
+print(','.join(DEFAULT_FEATURES))")
     read -p "feature set (comma-separated) [${default_feature_set}]: " feature_set
     feature_set=${feature_set:-$default_feature_set}
     local csv_args=("${selected_csvs[@]}")
@@ -405,6 +397,7 @@ PY
     echo "[INFO] command: ${cmd[*]}"
     "${cmd[@]}"
 }
+
 
 run_stage3_ppo_identification() {
     echo "--------------------------------"
