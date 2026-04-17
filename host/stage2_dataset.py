@@ -38,6 +38,20 @@ class Stage2Trajectory:
     motor_input_a: np.ndarray
 
 
+def _infer_current_a(df: pd.DataFrame, n: int) -> np.ndarray:
+    # Prefer explicit ampere channels first.
+    for c in ["I_filtered_A", "ina_current_a", "current_A"]:
+        if c in df.columns:
+            return pd.to_numeric(df[c], errors="coerce").to_numpy(dtype=float)
+    # Otherwise consume mA channels and convert to A.
+    current_ma = _pick_col(
+        df,
+        ["ina_current_signed_online_mA", "I_filtered_mA", "ina_current_corr_mA", "ina_current_raw_mA", "current_mA"],
+        n,
+    )
+    return current_ma / 1000.0
+
+
 def load_trajectory(csv_path: Path) -> Stage2Trajectory:
     df = pd.read_csv(csv_path)
     n = len(df)
@@ -49,13 +63,7 @@ def load_trajectory(csv_path: Path) -> Stage2Trajectory:
     omega = _pick_col(df, ["omega_real", "omega_imu_filtered", "omega", "omega_imu"], n)
     alpha = _pick_col(df, ["alpha_real", "alpha_from_linear_accel_filtered", "alpha", "alpha_linear"], n)
 
-    # Actual current input priority (A)
-    current_ma = _pick_col(
-        df,
-        ["I_filtered_mA", "ina_current_corr_mA", "ina_current_raw_mA", "current_mA", "ina_current_signed_online_mA"],
-        n,
-    )
-    motor_input_a = current_ma / 1000.0
+    motor_input_a = _infer_current_a(df, n)
 
     if not np.isfinite(alpha).any():
         dt = np.diff(t, prepend=t[0])
@@ -74,11 +82,17 @@ def load_trajectory(csv_path: Path) -> Stage2Trajectory:
         raise ValueError(f"Not enough finite samples in {csv_path}")
 
     t = t[good]
-    t = t - t[0]
     theta = theta[good]
     omega = omega[good]
     alpha = alpha[good]
     motor_input_a = motor_input_a[good]
+    order = np.argsort(t)
+    t = t[order]
+    theta = theta[order]
+    omega = omega[order]
+    alpha = alpha[order]
+    motor_input_a = motor_input_a[order]
+    t = t - t[0]
 
     return Stage2Trajectory(
         name=csv_path.stem,
@@ -98,4 +112,3 @@ def load_trajectories(csv_paths: list[Path]) -> list[Stage2Trajectory]:
     if not out:
         raise ValueError("No Stage2 trajectories loaded")
     return out
-
