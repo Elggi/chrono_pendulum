@@ -129,6 +129,109 @@ def evaluate_residual_torque(theta: float, omega: float, motor_input: float, act
     return evaluate_residual_from_terms(theta, omega, motor_input, active_terms, eps)
 
 
+def _safe_corr(x: np.ndarray, y: np.ndarray) -> float:
+    xx = np.asarray(x, dtype=float).reshape(-1)
+    yy = np.asarray(y, dtype=float).reshape(-1)
+    m = np.isfinite(xx) & np.isfinite(yy)
+    if int(np.sum(m)) < 8:
+        return float("nan")
+    x0 = xx[m] - float(np.mean(xx[m]))
+    y0 = yy[m] - float(np.mean(yy[m]))
+    den = float(np.sqrt(np.sum(x0 * x0) * np.sum(y0 * y0)))
+    if den <= 1e-12:
+        return float("nan")
+    return float(np.sum(x0 * y0) / den)
+
+
+def _build_idle_mask(
+    t: np.ndarray,
+    omega: np.ndarray,
+    alpha: np.ndarray,
+    motor_input_a: np.ndarray,
+    *,
+    t_end: float = 2.0,
+    current_abs_max_a: float = 0.02,
+    omega_abs_max: float = 0.25,
+    alpha_abs_max: float = 2.0,
+) -> np.ndarray:
+    tt = np.asarray(t, dtype=float)
+    om = np.asarray(omega, dtype=float)
+    al = np.asarray(alpha, dtype=float)
+    mi = np.asarray(motor_input_a, dtype=float)
+    return (
+        (tt <= float(t_end))
+        & (np.abs(mi) <= float(current_abs_max_a))
+        & (np.abs(om) <= float(omega_abs_max))
+        & (np.abs(al) <= float(alpha_abs_max))
+        & np.isfinite(tt)
+        & np.isfinite(om)
+        & np.isfinite(al)
+        & np.isfinite(mi)
+    )
+
+
+def _preprocess_trajectory_for_stage2(tr: Stage2Trajectory, known: Any) -> tuple[Stage2Trajectory, dict[str, float]]:
+    theta = np.asarray(tr.theta, dtype=float).copy()
+    omega = np.asarray(tr.omega, dtype=float).copy()
+    alpha = np.asarray(tr.alpha, dtype=float).copy()
+    motor_input_a = np.asarray(tr.motor_input_a, dtype=float).copy()
+
+    t = np.asarray(tr.t, dtype=float)
+    low_current_early = (t <= 2.0) & (np.abs(motor_input_a) <= 0.02)
+    if int(np.sum(low_current_early)) >= 10:
+        theta_bias = float(np.median(theta[low_current_early]))
+        omega_bias = float(np.median(omega[low_current_early]))
+        alpha_bias = float(np.median(alpha[low_current_early]))
+    else:
+        theta_bias = float(theta[0])
+        omega_bias = float(omega[0])
+        alpha_bias = 0.0
+    theta = theta - theta_bias
+    omega = omega - omega_bias
+    alpha = alpha - alpha_bias
+
+    tau_id_no_motor = (
+        float(known.j_total) * alpha
+        + float(known.m_total * known.g * known.l_com) * np.sin(theta)
+        + float(known.b_eq) * omega
+        + float(known.tau_eq) * np.tanh(omega / float(known.eps))
+    )
+    excite = np.abs(motor_input_a) >= 0.03
+    corr_pos = _safe_corr(motor_input_a[excite], tau_id_no_motor[excite])
+    corr_neg = _safe_corr((-motor_input_a)[excite], tau_id_no_motor[excite])
+    current_sign_used = 1.0
+    if np.isfinite(corr_pos) and np.isfinite(corr_neg) and (corr_neg > corr_pos + 0.10):
+        motor_input_a = -motor_input_a
+        current_sign_used = -1.0
+
+    tr_new = Stage2Trajectory(
+        name=tr.name,
+        source_csv=tr.source_csv,
+        t=t,
+        theta=theta,
+        omega=omega,
+        alpha=alpha,
+        motor_input_a=motor_input_a,
+    )
+    info = {
+        "theta_bias_removed": float(theta_bias),
+        "omega_bias_removed": float(omega_bias),
+        "alpha_bias_removed": float(alpha_bias),
+        "current_sign_used": float(current_sign_used),
+        "current_tau_corr_pos": float(corr_pos) if np.isfinite(corr_pos) else float("nan"),
+        "current_tau_corr_neg": float(corr_neg) if np.isfinite(corr_neg) else float("nan"),
+    }
+    return tr_new, info
+
+
+def _align_rollout_state_sign(theta_real: np.ndarray, omega_real: np.ndarray, theta_sim: np.ndarray, omega_sim: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
+    err_pos = _rmse(theta_real, theta_sim) + 0.2 * _rmse(omega_real, omega_sim)
+    err_neg = _rmse(theta_real, -theta_sim) + 0.2 * _rmse(omega_real, -omega_sim)
+    if err_neg + 1e-12 < err_pos:
+        return -theta_sim, -omega_sim, -1.0
+    return theta_sim, omega_sim, 1.0
+
+
 @dataclass
 class Stage2Metrics:
     rmse: float
@@ -279,15 +382,51 @@ def run_stage2(
     overlay_rows: list[dict[str, float | str]] = []
     overlay_artifacts: dict[str, dict[str, str]] = {}
     for tr in trajs:
+        tr_proc, tr_info = _preprocess_trajectory_for_stage2(tr, known)
+        early_mask = tr_proc.t <= 2.0
+        if int(np.sum(early_mask)) > 0:
+            early_theta_mean = float(np.mean(tr_proc.theta[early_mask]))
+            early_omega_mean = float(np.mean(tr_proc.omega[early_mask]))
+            early_current_mean = float(np.mean(tr_proc.motor_input_a[early_mask]))
+        else:
+            early_theta_mean = float("nan")
+            early_omega_mean = float("nan")
+            early_current_mean = float("nan")
         dt_med = float(np.median(np.diff(tr.t))) if len(tr.t) >= 2 else float("nan")
         print(f"[Stage2] trajectory[{tr.name}]: samples={len(tr.t)}, dt_median={dt_med:.6g}s, alpha=SmoothedFiniteDifference(omega)")
-        rt = compute_residual_target(tr.theta, tr.omega, tr.alpha, tr.motor_input_a, known, target_mode=target_mode)
-        _, phi = build_feature_matrix(tr.theta, tr.omega, tr.motor_input_a, features, eps=known.eps)
+        print(
+            f"[Stage2]   preprocessing: theta_bias={tr_info['theta_bias_removed']:.6g}, "
+            f"omega_bias={tr_info['omega_bias_removed']:.6g}, alpha_bias={tr_info['alpha_bias_removed']:.6g}, "
+            f"current_sign={tr_info['current_sign_used']:+.0f}, "
+            f"corr(+I,tau_id)={tr_info['current_tau_corr_pos']:.4f}, corr(-I,tau_id)={tr_info['current_tau_corr_neg']:.4f}"
+        )
+        print(
+            f"[Stage2]   early-window means (0-2s, post-preprocess): "
+            f"theta={early_theta_mean:.6g}, omega={early_omega_mean:.6g}, current_A={early_current_mean:.6g}"
+        )
+
+        rt = compute_residual_target(tr_proc.theta, tr_proc.omega, tr_proc.alpha, tr_proc.motor_input_a, known, target_mode=target_mode)
+        tau_target_raw = np.asarray(rt.tau_residual_target, dtype=float)
+        idle_mask = _build_idle_mask(tr_proc.t, tr_proc.omega, tr_proc.alpha, tr_proc.motor_input_a)
+        if int(np.sum(idle_mask)) >= 8:
+            idle_bias = float(np.median(tau_target_raw[idle_mask]))
+            tau_target = tau_target_raw - idle_bias
+            print(
+                f"[Stage2]   idle-zeroing: samples={int(np.sum(idle_mask))}, "
+                f"tau_target_idle_bias={idle_bias:.6g} Nm (subtracted)"
+            )
+        else:
+            idle_bias = 0.0
+            tau_target = tau_target_raw
+            print("[Stage2][WARN]   idle-zeroing skipped (not enough idle samples).")
+        _, phi = build_feature_matrix(tr_proc.theta, tr_proc.omega, tr_proc.motor_input_a, features, eps=known.eps)
         phis.append(phi)
-        ys.append(rt.tau_residual_target)
+        ys.append(tau_target)
         per_traj[tr.name] = {
-            "traj": tr,
-            "target": rt.tau_residual_target,
+            "traj": tr_proc,
+            "target": tau_target,
+            "target_raw": tau_target_raw,
+            "tau_idle_bias": idle_bias,
             "phi": phi,
         }
     names = list(features)
@@ -343,20 +482,27 @@ def run_stage2(
             known=known,
             residual_terms=identified_terms,
         )
+        theta_sim_aligned, omega_sim_aligned, sim_sign_used = _align_rollout_state_sign(
+            tr.theta, tr.omega, sim_rollout["theta_sim"], sim_rollout["omega_sim"]
+        )
+        if sim_sign_used < 0.0:
+            print(f"[Stage2][WARN] trajectory '{name}' sim state sign auto-flipped for overlay consistency.")
         traj_rows: list[dict[str, float | str]] = []
         for i in range(len(tr.t)):
             row = {
                 "trajectory": name,
                 "t": float(tr.t[i]),
                 "tau_residual_target": float(y[i]),
+                "tau_residual_target_raw": float(rec["target_raw"][i]),
                 "tau_residual_pred": float(yhat[i]),
                 "theta_real": float(tr.theta[i]),
-                "theta_sim": float(sim_rollout["theta_sim"][i]),
+                "theta_sim": float(theta_sim_aligned[i]),
                 "omega_real": float(tr.omega[i]),
-                "omega_sim": float(sim_rollout["omega_sim"][i]),
+                "omega_sim": float(omega_sim_aligned[i]),
                 "alpha_real": float(tr.alpha[i]),
                 "alpha_sim": float(sim_rollout["alpha_sim"][i]),
                 "motor_input_a": float(tr.motor_input_a[i]),
+                "sim_sign_used": float(sim_sign_used),
                 "tau_motor_sim": float(sim_rollout["tau_motor_sim"][i]),
                 "tau_visc_sim": float(sim_rollout["tau_visc_sim"][i]),
                 "tau_coul_sim": float(sim_rollout["tau_coul_sim"][i]),
@@ -384,12 +530,12 @@ def run_stage2(
             axs[0].grid(alpha=0.25)
             axs[0].legend()
             axs[1].plot(tr.t, tr.theta, label="theta_real")
-            axs[1].plot(tr.t, sim_rollout["theta_sim"], label="theta_sim")
+            axs[1].plot(tr.t, theta_sim_aligned, label="theta_sim")
             axs[1].set_ylabel("theta [rad]")
             axs[1].grid(alpha=0.25)
             axs[1].legend()
             axs[2].plot(tr.t, tr.omega, label="omega_real")
-            axs[2].plot(tr.t, sim_rollout["omega_sim"], label="omega_sim")
+            axs[2].plot(tr.t, omega_sim_aligned, label="omega_sim")
             axs[2].set_xlabel("time [s]")
             axs[2].set_ylabel("omega [rad/s]")
             axs[2].grid(alpha=0.25)
