@@ -383,6 +383,7 @@ run_stage2_sindy_identification() {
     threshold=${threshold:-1e-4}
     read -p "target mode (greybox/blackbox) [greybox]: " target_mode
     target_mode=${target_mode:-greybox}
+    
     default_feature_set=$(BASE_DIR="$BASE_DIR" python3 -c "import os,sys; b=os.environ.get('BASE_DIR',''); sys.path.insert(0,b) if b else None; 
 try:
     from stage2_settings import DEFAULT_FEATURES
@@ -396,6 +397,7 @@ print(','.join(DEFAULT_FEATURES))")
     echo "[INFO] command: ${cmd[*]}"
     "${cmd[@]}"
 }
+
 
 run_stage3_ppo_identification() {
     echo "--------------------------------"
