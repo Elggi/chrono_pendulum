@@ -356,6 +356,7 @@ run_stage1_pem_identification() {
     echo "[INFO] Stage1 weighted RMSE loss: w_theta=${w_theta}, w_omega=${w_omega}"
     local csv_args=("${selected_csvs[@]}")
     cmd=(python3 "$BASE_DIR/backend/stage1/cmaes_chrono.py" --csv "${csv_args[@]}" --calibration-json "$calib_json" --model-parameter-json "$model_param_json" --outdir "$outdir" --max-generations "$gens" --workers "$workers" --w-theta "$w_theta" --w-omega "$w_omega")
+
     if [[ "$optimize_ki_yn" =~ ^[Yy]$ ]]; then
         cmd+=(--optimize-ki)
     fi
@@ -388,6 +389,11 @@ import os, sys
 base_dir = os.environ.get('BASE_DIR', '')
 if base_dir:
     sys.path.insert(0, base_dir)
+=======
+    default_feature_set=$(python3 - <<'PY'
+import os, sys
+sys.path.insert(0, os.path.dirname(__file__))
+>>>>>>> desktop
 from stage2_settings import DEFAULT_FEATURES
 print(",".join(DEFAULT_FEATURES))
 PY

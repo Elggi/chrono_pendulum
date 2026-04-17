@@ -1,21 +1,43 @@
 {
   "method": "cmaes_chrono_headless",
-  "best_loss": 0.2968294914409915,
+  "best_loss": 0.5159496978450074,
   "best_params": {
-    "b_eq": 0.01922636540411224,
-    "tau_eq": 0.014448922020706325
+    "b_eq": 0.027845782677776282,
+    "tau_eq": 0.00044179169191864464,
+    "K_i": 0.0
   },
   "population_size": 16,
   "max_generations": 30,
   "input_csvs": [
-    "/home/kyudev/Documents/PEM/chrono_pendulum/host/run_logs/calibration_free_decay_1.csv",
-    "/home/kyudev/Documents/PEM/chrono_pendulum/host/run_logs/calibration_free_decay_2.csv",
-    "/home/kyudev/Documents/PEM/chrono_pendulum/host/run_logs/calibration_free_decay_3.csv",
-    "/home/kyudev/Documents/PEM/chrono_pendulum/host/run_logs/calibration_free_decay_4.csv"
+    "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_10.csv",
+    "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_11.csv",
+    "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_12.csv",
+    "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_13.csv",
+    "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_14.csv",
+    "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_15.csv",
+    "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_16.csv",
+    "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_17.csv",
+    "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_18.csv",
+    "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_19.csv",
+    "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_1.csv",
+    "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_20.csv",
+    "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_21.csv",
+    "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_22.csv",
+    "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_23.csv",
+    "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_24.csv",
+    "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_2.csv",
+    "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_3.csv",
+    "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_4.csv",
+    "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_5.csv",
+    "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_6.csv",
+    "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_7.csv",
+    "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_8.csv",
+    "/home/kyudev/Desktop/chrono_pendulum/host/run_logs/calibration_free_decay_9.csv"
   ],
-  "num_trajectories": 4,
+  "num_trajectories": 24,
   "parallel_workers": 8,
   "headless_chrono": true,
+  "optimize_ki": false,
   "loss_type": "weighted_rmse",
   "loss_weights": {
     "w_theta": 1.0,
@@ -26,7 +48,7 @@
     "tail_omega_abs": 0.25,
     "tail_hold_sec": 0.8
   },
-  "output_rollout_csv": "/home/kyudev/Documents/PEM/chrono_pendulum/host/../reports/Stage1_CMAES/stage1_cmaes_rollout.csv",
-  "output_progress_csv": "/home/kyudev/Documents/PEM/chrono_pendulum/host/../reports/Stage1_CMAES/stage1_cmaes_progress.csv",
-  "output_progress_png": "/home/kyudev/Documents/PEM/chrono_pendulum/host/../reports/Stage1_CMAES/stage1_cmaes_progress.png"
+  "output_rollout_csv": "/home/kyudev/Desktop/chrono_pendulum/host/../reports/Stage1_CMAES/stage1_cmaes_rollout.csv",
+  "output_progress_csv": "/home/kyudev/Desktop/chrono_pendulum/host/../reports/Stage1_CMAES/stage1_cmaes_progress.csv",
+  "output_progress_png": "/home/kyudev/Desktop/chrono_pendulum/host/../reports/Stage1_CMAES/stage1_cmaes_progress.png"
 }
