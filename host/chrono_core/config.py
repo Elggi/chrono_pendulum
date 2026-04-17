@@ -53,7 +53,7 @@ class BridgeConfig:
     # Surrogate damping/friction parameters
     b_eq_init: float = 0.0
     tau_eq_init: float = 0.0
-    tanh_eps: float = 0.05
+    tanh_eps: float = 1e-9
 
     l_com_min: float = 0.03
     l_com_max: float = 0.45
