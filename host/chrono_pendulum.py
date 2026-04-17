@@ -819,7 +819,7 @@ def main():
         else:
             print("[INFO] run limit: none (quit with q/ESC)")
         print("[INFO] alpha_real (legacy/export) source: filtered derivative of omega")
-        print("[INFO] finalized training alpha source: tangential linear acceleration / radius")
+        print("[INFO] finalized training alpha source: filtered derivative of omega (compat column name kept)")
         if runtime_overrides:
             print(
                 "[INFO] Runtime overrides from model-parameter json: "
@@ -907,7 +907,8 @@ def main():
                         width=cfg.terminal_status_width,
                     )
                     if sim_t >= warmup_sec:
-                        theta_offset_rad = compute_theta_offset(np.asarray(warmup_theta_samples, dtype=float))
+                        theta_offset_raw = compute_theta_offset(np.asarray(warmup_theta_samples, dtype=float))
+                        theta_offset_rad = float(theta_offset_raw) if args.enable_free_decay_mode else 0.0
                         if len(warmup_alpha_linear_samples) >= 4:
                             alpha_linear_offset = float(np.nanmedian(np.asarray(warmup_alpha_linear_samples, dtype=float)))
                         current_offset_used_mA, valid_cur_n = compute_current_offset(
@@ -926,6 +927,7 @@ def main():
                         print(
                             "[WARMUP DONE] "
                             f"warmup_duration={warmup_sec:.2f}s, theta_offset_rad={theta_offset_rad:.6f}, "
+                            f"theta_offset_raw={theta_offset_raw:.6f}, "
                             f"alpha_linear_offset={alpha_linear_offset:.6f}, "
                             f"current_offset_mA={current_offset_used_mA:.6f}, number_of_valid_current_samples={valid_cur_n}"
                         )
@@ -954,9 +956,12 @@ def main():
                             radius=cfg.r_imu,
                             imu_sign=imu_sign,
                         )
-                        theta_imu_unwrapped_acc = float(theta_offset_rad)
+                        if args.enable_free_decay_mode:
+                            theta_imu_unwrapped_acc = float(theta_offset_rad)
+                        else:
+                            theta_imu_unwrapped_acc = float(theta_imu_prev_wrapped) if theta_imu_prev_wrapped is not None else 0.0
                         theta_encoder_prev_wrapped = None
-                        theta_encoder_unwrapped_acc = float(theta_offset_rad)
+                        theta_encoder_unwrapped_acc = 0.0
                         # Reset filter state to "unseeded": first run sample becomes the seed.
                         online_state = {k: 0.0 for k in online_filter_bank.keys()}
                         for k, flt in online_filter_bank.items():
@@ -1234,7 +1239,7 @@ def main():
                     online_state["omega_imu"], online_state["omega_encoder"],
                     online_state["alpha_imu"], online_state["alpha_linear"], online_state["alpha_encoder"],
                     online_state["ina_current_signed_mA"],
-                    theta, omega, alpha,
+                    theta, omega, alpha, alpha,
                     snap["hw_enc"], snap["hw_arduino_ms"],
                     theta_meas, omega_meas, alpha_meas,
                     model.J_rod, model.J_imu, model.J_total,
@@ -1249,7 +1254,7 @@ def main():
                     online_state["ina_current_signed_mA"],
                     online_state["theta_imu"],
                     online_state["omega_imu"],
-                    online_state["alpha_linear"],
+                    online_state["alpha_imu"],
                 ])
 
                 if cfg.realtime:
@@ -1310,7 +1315,7 @@ def main():
         },
         "signal_policy": {
             "alpha_real_source": "filtered_domega_dt",
-            "alpha_linear_source": "imu_linear_accel_tangential_projection_finalized",
+            "alpha_linear_source": "filtered_domega_dt_finalized_export",
             "alpha_linear_frame": "imu_body_to_world0_xy",
             "alpha_linear_gravity_compensated": bool(gravity_comp_enabled),
             "gravity_mps2_used": float(cfg.gravity),
