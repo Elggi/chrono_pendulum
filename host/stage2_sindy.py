@@ -17,8 +17,14 @@ from chrono_core.config import BridgeConfig
 from chrono_core.dynamics import PendulumModel, compute_model_torque_and_electrics
 from chrono_core.model_parameter_io import load_model_parameter_json
 from stage2_dataset import Stage2Trajectory, load_trajectories
-from stage2_feature_map import DEFAULT_FEATURES, build_feature_matrix
-from stage2_residual_target import build_residual_target, known_params_from_model_json
+from stage2_settings import (
+    DEFAULT_FEATURES,
+    parse_feature_list,
+    build_feature_matrix,
+    known_params_from_model_json,
+    compute_residual_target,
+    evaluate_residual_from_terms,
+)
 
 
 def _rmse(y: np.ndarray, yhat: np.ndarray) -> float:
@@ -114,31 +120,7 @@ def _equation_string(names: list[str], coefs: np.ndarray, precision: int = 6) ->
 
 
 def evaluate_residual_torque(theta: float, omega: float, motor_input: float, active_terms: list[dict[str, float]], eps: float) -> float:
-    th = float(theta)
-    om = float(omega)
-    mi = float(motor_input)
-    teps = max(float(eps), 1e-9)
-    out = 0.0
-    for term in active_terms:
-        feat = str(term.get("feature", ""))
-        c = float(term.get("coeff", 0.0))
-        if feat == "motor_input":
-            out += c * mi
-        elif feat == "theta":
-            out += c * th
-        elif feat == "omega":
-            out += c * om
-        elif feat == "theta2":
-            out += c * (th ** 2)
-        elif feat == "omega2":
-            out += c * (om ** 2)
-        elif feat == "sin_theta":
-            out += c * float(np.sin(th))
-        elif feat == "tanh_omega_eps":
-            out += c * float(np.tanh(om / teps))
-        elif feat == "motor_input_omega":
-            out += c * (mi * om)
-    return float(out)
+    return evaluate_residual_from_terms(theta, omega, motor_input, active_terms, eps)
 
 
 @dataclass
@@ -239,6 +221,7 @@ def run_stage2(
     outdir: Path,
     features: list[str],
     threshold: float,
+    target_mode: str = "greybox",
 ) -> Stage2Result:
     outdir.mkdir(parents=True, exist_ok=True)
     print("[Stage2] ===============================================")
@@ -255,9 +238,13 @@ def run_stage2(
     if model_data is None:
         model_data = {}
     cfg = BridgeConfig()
-    known = known_params_from_model_json(model_data, cfg)
+    known = known_params_from_model_json(model_data)
     print("[Stage2] residual target torque model:")
-    print("[Stage2]   tau_residual_target = tau_total + tau_gravity + tau_visc + tau_coul - tau_motor")
+    if str(target_mode).strip().lower() == "blackbox":
+        print("[Stage2]   tau_target = tau_total = J_total * alpha")
+    else:
+        print("[Stage2]   tau_target = tau_total + tau_visc + tau_coul - tau_motor")
+    print("[Stage2]   gravity term m*g*l*sin(theta) is ALWAYS excluded from target.")
     print(f"[Stage2]   tau_motor = K_i * I_filtered_A, K_i={known.K_i:.9g}")
     print(f"[Stage2]   tau_gravity = m_total * g * l_com * sin(theta), m_total={known.m_total:.9g}, g={known.g:.9g}, l_com={known.l_com:.9g}")
     print(f"[Stage2]   tau_visc = b_eq * omega, b_eq={known.b_eq:.9g}")
@@ -265,20 +252,24 @@ def run_stage2(
     print(f"[Stage2]   tau_total = J_total * alpha, J_total={known.j_total:.9g}")
     print("[Stage2]   NOTE: feature 'motor_input' means measured input current [A].")
 
+    features, parse_warnings = parse_feature_list(features)
+    for w in parse_warnings:
+        print(f"[Stage2][WARN] {w}")
+    print(f"[Stage2] feature_library(sanitized): {features}")
     phis = []
     ys = []
     per_traj = {}
     overlay_rows: list[dict[str, float | str]] = []
     overlay_artifacts: dict[str, dict[str, str]] = {}
     for tr in trajs:
-        rt = build_residual_target(tr, known)
-        fm = build_feature_matrix(tr.theta, tr.omega, tr.motor_input_a, features, eps=known.eps)
-        phis.append(fm.phi)
+        rt = compute_residual_target(tr.theta, tr.omega, tr.alpha, tr.motor_input_a, known, target_mode=target_mode)
+        _, phi = build_feature_matrix(tr.theta, tr.omega, tr.motor_input_a, features, eps=known.eps)
+        phis.append(phi)
         ys.append(rt.tau_residual_target)
         per_traj[tr.name] = {
             "traj": tr,
             "target": rt.tau_residual_target,
-            "phi": fm.phi,
+            "phi": phi,
         }
     names = list(features)
 
@@ -472,6 +463,7 @@ def run_stage2(
     model_data.setdefault("stage_outputs", {})
     model_data["stage_outputs"]["stage2"] = {
         "method": "greybox_residual_torque_sindy",
+        "target_mode": str(target_mode),
         "source_csvs": [str(p) for p in csv_paths],
         "feature_library": list(features),
         "optimizer": optimizer_name,
@@ -523,6 +515,7 @@ def run_stage2(
     print("[Stage2] ===============================================")
 
     residual_payload = {
+        "target_mode": str(target_mode),
         "feature_library": list(features),
         "optimizer": optimizer_name,
         "threshold": float(selected_threshold),

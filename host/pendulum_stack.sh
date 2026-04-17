@@ -379,10 +379,19 @@ run_stage2_sindy_identification() {
     outdir=${outdir:-$BASE_DIR/../reports/SINDy_stage2}
     read -p "sparsity threshold [1e-4]: " threshold
     threshold=${threshold:-1e-4}
-    read -p "feature set (comma-separated) [1,theta,omega,sin_theta,cos_theta,theta2,omega2,motor_input]: " feature_set
-    feature_set=${feature_set:-1,theta,omega,sin_theta,cos_theta,theta2,omega2,motor_input}
+    read -p "target mode (greybox/blackbox) [greybox]: " target_mode
+    target_mode=${target_mode:-greybox}
+    default_feature_set=$(python3 - <<'PY'
+import os, sys
+sys.path.insert(0, os.path.dirname(__file__))
+from stage2_settings import DEFAULT_FEATURES
+print(",".join(DEFAULT_FEATURES))
+PY
+)
+    read -p "feature set (comma-separated) [${default_feature_set}]: " feature_set
+    feature_set=${feature_set:-$default_feature_set}
     local csv_args=("${selected_csvs[@]}")
-    cmd=(python3 "$BASE_DIR/stage2_sindy_entry.py" --csv "${csv_args[@]}" --model-parameter-json "$model_param_json" --outdir "$outdir" --threshold "$threshold" --features "$feature_set")
+    cmd=(python3 "$BASE_DIR/stage2_sindy_entry.py" --csv "${csv_args[@]}" --model-parameter-json "$model_param_json" --outdir "$outdir" --threshold "$threshold" --target-mode "$target_mode" --features "$feature_set")
     echo "[INFO] command: ${cmd[*]}"
     "${cmd[@]}"
 }

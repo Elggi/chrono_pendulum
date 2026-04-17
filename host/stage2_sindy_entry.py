@@ -8,13 +8,16 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
-from stage2_feature_map import DEFAULT_FEATURES
+from stage2_settings import DEFAULT_FEATURES, parse_feature_list
 from stage2_sindy import run_stage2, save_stage2_summary
 
 
 def _parse_features(raw: str) -> list[str]:
     items = [s.strip() for s in raw.split(",")]
-    return [s for s in items if s]
+    out, warnings = parse_feature_list([s for s in items if s])
+    for w in warnings:
+        print(f"[Stage2-Entry][WARN] {w}")
+    return out
 
 
 def main() -> None:
@@ -34,6 +37,7 @@ def main() -> None:
     )
     ap.add_argument("--outdir", type=Path, required=True)
     ap.add_argument("--threshold", type=float, default=1.0e-4, help="base sparsification threshold (grid: [x/10, x, x*10])")
+    ap.add_argument("--target-mode", choices=["greybox", "blackbox"], default="greybox", help="greybox: remove Stage1 nominal terms, blackbox: fit J*alpha directly")
     ap.add_argument(
         "--features",
         type=str,
@@ -48,6 +52,7 @@ def main() -> None:
     print(f"[Stage2-Entry]   model_parameter_json: {args.model_parameter_json}")
     print(f"[Stage2-Entry]   outdir: {args.outdir}")
     print(f"[Stage2-Entry]   threshold: {args.threshold}")
+    print(f"[Stage2-Entry]   target_mode: {args.target_mode}")
     print(f"[Stage2-Entry]   features: {features}")
     result = run_stage2(
         csv_paths=list(args.csv),
@@ -56,6 +61,7 @@ def main() -> None:
         outdir=args.outdir,
         features=features,
         threshold=float(args.threshold),
+        target_mode=str(args.target_mode),
     )
     summary_path = save_stage2_summary(result, args.outdir)
     (args.outdir / "stage2_result.json").write_text(json.dumps(asdict(result), indent=2, ensure_ascii=False), encoding="utf-8")

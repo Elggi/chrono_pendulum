@@ -253,29 +253,33 @@ def compute_model_torque_and_electrics(motor_input, theta, omega, bus_v, p, cfg:
     tau_visc = p["b_eq"] * omega
     tau_coul = p["tau_eq"] * math.tanh(omega / max(cfg.tanh_eps, 1e-9))
     tau_residual = 0.0
-    for term in p.get("residual_terms", []):
-        if not isinstance(term, dict):
-            continue
-        coeff = float(term.get("coeff", 0.0))
-        feat = str(term.get("feature", ""))
-        if feat == "1":
-            tau_residual += coeff
-        elif feat == "theta":
-            tau_residual += coeff * float(theta)
-        elif feat == "omega":
-            tau_residual += coeff * float(omega)
-        elif feat == "sin_theta":
-            tau_residual += coeff * math.sin(float(theta))
-        elif feat == "cos_theta":
-            tau_residual += coeff * math.cos(float(theta))
-        elif feat == "theta2":
-            tau_residual += coeff * (float(theta) ** 2)
-        elif feat == "omega2":
-            tau_residual += coeff * (float(omega) ** 2)
-        elif feat == "sign_omega":
-            tau_residual += coeff * math.copysign(1.0, float(omega)) if abs(float(omega)) > 1e-12 else 0.0
-        elif feat == "motor_input":
-            tau_residual += coeff * float(motor_input)
+    terms = p.get("residual_terms", [])
+    try:
+        from stage2_settings import evaluate_residual_from_terms  # type: ignore
+
+        tau_residual = float(evaluate_residual_from_terms(theta, omega, motor_input, terms, cfg.tanh_eps))
+    except Exception:
+        for term in terms:
+            if not isinstance(term, dict):
+                continue
+            coeff = float(term.get("coeff", 0.0))
+            feat = str(term.get("feature", ""))
+            if feat == "theta":
+                tau_residual += coeff * float(theta)
+            elif feat == "omega":
+                tau_residual += coeff * float(omega)
+            elif feat == "sin_theta":
+                tau_residual += coeff * math.sin(float(theta))
+            elif feat == "theta2":
+                tau_residual += coeff * (float(theta) ** 2)
+            elif feat == "omega2":
+                tau_residual += coeff * (float(omega) ** 2)
+            elif feat == "tanh_omega_eps":
+                tau_residual += coeff * math.tanh(float(omega) / max(cfg.tanh_eps, 1e-9))
+            elif feat == "motor_input":
+                tau_residual += coeff * float(motor_input)
+            elif feat == "motor_input_omega":
+                tau_residual += coeff * float(motor_input) * float(omega)
     tau_res = tau_visc + tau_coul + tau_residual
     tau_gravity = 0.0
     tau_net = tau_motor - tau_res
