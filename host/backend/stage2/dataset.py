@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pysindy as ps
 
 
 def _pick_col(df: pd.DataFrame, candidates: list[str], n: int) -> np.ndarray:
@@ -38,6 +39,34 @@ class Stage2Trajectory:
     motor_input_a: np.ndarray
 
 
+def _infer_current_a(df: pd.DataFrame, n: int) -> np.ndarray:
+    # Prefer explicit ampere channels first.
+    for c in ["I_filtered_A", "ina_current_a", "current_A"]:
+        if c in df.columns:
+            return pd.to_numeric(df[c], errors="coerce").to_numpy(dtype=float)
+    # Otherwise consume mA channels and convert to A.
+    current_ma = _pick_col(
+        df,
+        ["ina_current_signed_online_mA", "I_filtered_mA", "ina_current_corr_mA", "ina_current_raw_mA", "current_mA"],
+        n,
+    )
+    return current_ma / 1000.0
+
+
+def _compute_alpha_from_omega_smoothed(omega: np.ndarray, t: np.ndarray) -> np.ndarray:
+    omega_2d = np.asarray(omega, dtype=float).reshape(-1, 1)
+    t_1d = np.asarray(t, dtype=float).reshape(-1)
+    if omega_2d.shape[0] != t_1d.shape[0]:
+        raise ValueError("omega/time length mismatch while building alpha")
+    sfd = ps.SmoothedFiniteDifference()
+    if hasattr(sfd, "_differentiate"):
+        alpha_2d = sfd._differentiate(omega_2d, t_1d)  # PySINDy API path
+    else:
+        alpha_2d = sfd(omega_2d, t_1d)
+    alpha = np.asarray(alpha_2d, dtype=float).reshape(-1)
+    return alpha
+
+
 def load_trajectory(csv_path: Path) -> Stage2Trajectory:
     df = pd.read_csv(csv_path)
     n = len(df)
@@ -47,38 +76,34 @@ def load_trajectory(csv_path: Path) -> Stage2Trajectory:
     t = _safe_time(df)
     theta = _pick_col(df, ["theta_real", "theta_imu_filtered_unwrapped", "theta", "theta_imu"], n)
     omega = _pick_col(df, ["omega_real", "omega_imu_filtered", "omega", "omega_imu"], n)
-    alpha = _pick_col(df, ["alpha_real", "alpha_from_linear_accel_filtered", "alpha", "alpha_linear"], n)
 
-    # Actual current input priority (A)
-    current_ma = _pick_col(
-        df,
-        ["I_filtered_mA", "ina_current_corr_mA", "ina_current_raw_mA", "current_mA", "ina_current_signed_online_mA"],
-        n,
-    )
-    motor_input_a = current_ma / 1000.0
+    motor_input_a = _infer_current_a(df, n)
 
-    if not np.isfinite(alpha).any():
-        dt = np.diff(t, prepend=t[0])
-        if len(dt) > 1:
-            dt[0] = dt[1]
-        alpha = np.gradient(omega, np.maximum(dt, 1e-6))
-
-    good = (
-        np.isfinite(t)
-        & np.isfinite(theta)
-        & np.isfinite(omega)
-        & np.isfinite(alpha)
-        & np.isfinite(motor_input_a)
-    )
+    good = np.isfinite(t) & np.isfinite(theta) & np.isfinite(omega) & np.isfinite(motor_input_a)
     if int(np.sum(good)) < 4:
         raise ValueError(f"Not enough finite samples in {csv_path}")
 
     t = t[good]
-    t = t - t[0]
     theta = theta[good]
     omega = omega[good]
-    alpha = alpha[good]
     motor_input_a = motor_input_a[good]
+    order = np.argsort(t)
+    t = t[order]
+    theta = theta[order]
+    omega = omega[order]
+    motor_input_a = motor_input_a[order]
+    t = t - t[0]
+
+    # Stage2 policy: never use CSV alpha for identification.
+    alpha = _compute_alpha_from_omega_smoothed(omega=omega, t=t)
+    alpha_good = np.isfinite(alpha)
+    if int(np.sum(alpha_good)) < 4:
+        raise ValueError(f"SmoothedFiniteDifference alpha has too few finite samples in {csv_path}")
+    t = t[alpha_good]
+    theta = theta[alpha_good]
+    omega = omega[alpha_good]
+    motor_input_a = motor_input_a[alpha_good]
+    alpha = alpha[alpha_good]
 
     return Stage2Trajectory(
         name=csv_path.stem,
@@ -98,4 +123,3 @@ def load_trajectories(csv_paths: list[Path]) -> list[Stage2Trajectory]:
     if not out:
         raise ValueError("No Stage2 trajectories loaded")
     return out
-

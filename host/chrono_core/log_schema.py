@@ -17,7 +17,7 @@ PENDULUM_LOG_COLUMNS = [
     "omega_imu_online", "omega_encoder_online",
     "alpha_imu_online", "alpha_linear_online", "alpha_encoder_online",
     "ina_current_signed_online_mA",
-    "theta", "omega", "alpha",
+    "theta", "omega", "alpha", "alpha_sim",
     "hw_enc", "hw_arduino_ms",
     "theta_real", "omega_real", "alpha_real",
     "J_rod", "J_imu", "J_total",

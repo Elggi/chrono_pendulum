@@ -8,9 +8,15 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
+import sys
+
+HOST_DIR = Path(__file__).resolve().parents[2]
+if str(HOST_DIR) not in sys.path:
+    sys.path.insert(0, str(HOST_DIR))
+
 import numpy as np
 
-import offline_id_pem_sindy_ppo as bench
+from backend.stage3 import offline_id_pem_sindy_ppo as bench
 
 
 def main() -> None:
