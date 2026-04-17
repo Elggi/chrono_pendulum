@@ -387,7 +387,7 @@ run_stage2_sindy_identification() {
 try:
     from stage2_settings import DEFAULT_FEATURES
 except Exception:
-    DEFAULT_FEATURES=['motor_input','theta','omega','theta2','omega2','sin_theta','tanh_omega_eps','motor_input_omega']
+    DEFAULT_FEATURES=['motor_input','theta','omega','theta2','omega2','tanh_omega_eps','motor_input_omega']
 print(','.join(DEFAULT_FEATURES))")
     read -p "feature set (comma-separated) [${default_feature_set}]: " feature_set
     feature_set=${feature_set:-$default_feature_set}

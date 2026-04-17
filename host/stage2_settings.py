@@ -18,7 +18,6 @@ DEFAULT_FEATURES = [
     "omega",
     "theta2",
     "omega2",
-    "sin_theta",
     "tanh_omega_eps",
     "motor_input_omega",
 ]

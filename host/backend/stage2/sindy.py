@@ -162,7 +162,10 @@ def _rollout_identified_trajectory(
 ) -> dict[str, np.ndarray]:
     n = len(tr.t)
     model = PendulumModel(cfg)
-    model.set_theta_kinematic(float(tr.theta[0]), float(tr.omega[0]))
+    # Data convention and Chrono internal theta convention are opposite for this
+    # rollout path. Initialize and evaluate residual terms in data convention by
+    # mirroring theta sign at the interface.
+    model.set_theta_kinematic(float(-tr.theta[0]), float(tr.omega[0]))
     p = {
         "K_i": float(known.K_i),
         "b_eq": float(known.b_eq),
@@ -179,16 +182,17 @@ def _rollout_identified_trajectory(
     tau_net_sim = np.zeros(n, dtype=float)
 
     for k in range(n):
+        theta_model = float(-model.get_theta())
         out = compute_model_torque_and_electrics(
             motor_input=float(tr.motor_input_a[k]),
-            theta=model.get_theta(),
+            theta=theta_model,
             omega=model.get_omega(),
             bus_v=float("nan"),
             p=p,
             cfg=cfg,
             cmd_u_for_duty=0.0,
         )
-        theta_sim[k] = float(model.get_theta())
+        theta_sim[k] = theta_model
         omega_sim[k] = float(model.get_omega())
         tau_motor_sim[k] = float(out["tau_motor"])
         tau_visc_sim[k] = float(out["tau_visc"])

@@ -908,7 +908,10 @@ def main():
                     )
                     if sim_t >= warmup_sec:
                         theta_offset_raw = compute_theta_offset(np.asarray(warmup_theta_samples, dtype=float))
-                        theta_offset_rad = float(theta_offset_raw) if args.enable_free_decay_mode else 0.0
+                        # Always zero-reference measured theta after warmup so
+                        # logs use a consistent absolute origin (similar to
+                        # current offset initialization).
+                        theta_offset_rad = float(theta_offset_raw)
                         if len(warmup_alpha_linear_samples) >= 4:
                             alpha_linear_offset = float(np.nanmedian(np.asarray(warmup_alpha_linear_samples, dtype=float)))
                         current_offset_used_mA, valid_cur_n = compute_current_offset(
