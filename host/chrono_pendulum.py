@@ -959,9 +959,12 @@ def main():
                             radius=cfg.r_imu,
                             imu_sign=imu_sign,
                         )
-                        theta_imu_unwrapped_acc = float(theta_offset_rad)
+                        if args.enable_free_decay_mode:
+                            theta_imu_unwrapped_acc = float(theta_offset_rad)
+                        else:
+                            theta_imu_unwrapped_acc = float(theta_imu_prev_wrapped) if theta_imu_prev_wrapped is not None else 0.0
                         theta_encoder_prev_wrapped = None
-                        theta_encoder_unwrapped_acc = float(theta_offset_rad)
+                        theta_encoder_unwrapped_acc = 0.0
                         # Reset filter state to "unseeded": first run sample becomes the seed.
                         online_state = {k: 0.0 for k in online_filter_bank.keys()}
                         for k, flt in online_filter_bank.items():
