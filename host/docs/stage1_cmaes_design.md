@@ -114,7 +114,7 @@ for gen in range(max_generations):
 
 ### Step 2 (headless rollout core)
 
-- `stage1_cmaes_chrono.py`(신규)에서 CSV 1개 evaluator 구현
+- `backend/stage1/cmaes_chrono.py`(신규)에서 CSV 1개 evaluator 구현
 - 단일 candidate 평가 및 rollout CSV 생성
 
 ### Step 3 (CMA-ES)
